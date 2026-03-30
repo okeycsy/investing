@@ -6,10 +6,11 @@
     66.27,
     67.11,
     65.53,
-    64.72
+    64.72,
+    64.2
   ],
   "high": 67.11,
-  "low": 64.72,
+  "low": 64.2,
   "alerts_fired": [
     "MACD bearish_cross",
     "주가 -6.9% (66.02)",
@@ -31,7 +32,9 @@
     "Robinhood Is One of the Worst-Performing Stocks in the S&P 500 This Year. Is It Overdue for a Rally?",
     "These Stocks Are Today’s Movers: Nvidia, Alcoa, Palo Alto, CrowdStrike, Eli Lilly, Datadog, Sysco, and More",
     "Are Analysts Crazy? Price Targets Suggest 29% Jump In S&P 500. These 10 Stocks Show Highest Potential Gains.",
-    "Bitcoin Price Rises as War Escalates. Why Cryptos Are Havens Once Again."
+    "Bitcoin Price Rises as War Escalates. Why Cryptos Are Havens Once Again.",
+    "Crypto stocks at 'big discounts,' may be nearing bottom: Bernstein analysts",
+    "Treasuries Climb as Powell Eases Fed-Hike Jitters: Markets Wrap"
   ],
   "rsi_readings": [
     35.5,
@@ -39,7 +42,8 @@
     35.72,
     37.27,
     34.88,
-    34.13
+    34.13,
+    33.65
   ],
   "pcr_readings": [],
   "short_readings": []
