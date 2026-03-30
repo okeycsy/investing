@@ -2,14 +2,19 @@ name: $HOOD Slack Monitor
 
 on:
   schedule:
-    # 미국 장중 (ET 9:00~16:30 = UTC 13:00~20:30)
-    # 30분마다 실행, 월~금
-    - cron: "0,30 13-20 * * 1-5"
-    # 장 마감 직후 한 번 더 (실적/공시 반영)
-    - cron: "0 21 * * 1-5"
+    # [normal] 장중 30분마다: 가격 구간 체크 + 뉴스 (ET 09:00~16:00 = UTC 13:00~20:00)
+    - cron: "0,30 13-19 * * 1-5"
+    # [close]  장 마감 후 종가 확정 (ET 16:30 = UTC 21:30)
+    - cron: "30 21 * * 1-5"
+    # [morning] 다음날 08:00 KST = UTC 23:00 (전날 화~토)
+    - cron: "0 23 * * 2-6"
 
-  # 수동 실행 (테스트용)
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "실행 모드 (normal / close / morning)"
+        required: false
+        default: "normal"
 
 jobs:
   monitor:
@@ -28,7 +33,30 @@ jobs:
       - name: Install dependencies
         run: pip install requests feedparser
 
+      - name: Determine run mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.run_mode }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.schedule }}" = "30 21 * * 1-5" ]; then
+            echo "mode=close" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.schedule }}" = "0 23 * * 2-6" ]; then
+            echo "mode=morning" >> $GITHUB_OUTPUT
+          else
+            echo "mode=normal" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run monitor
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUN_MODE: ${{ steps.mode.outputs.mode }}
         run: python hood_monitor.py
+
+      - name: Commit price state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add price_state.json || true
+          git diff --cached --quiet || git commit -m "chore: update price state [skip ci]"
+          git push || true
