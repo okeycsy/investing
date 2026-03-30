@@ -146,6 +146,9 @@ def load_state() -> dict:
         "last_insider_hashes": [],
         "last_13f_hashes": [],
         "price_history": [],  # 최근 50일 종가 (RSI/MACD 계산용)
+        "price_alert_max_pct": 0,  # 당일 알림 발송된 최고 등락% (절댓값)
+        "price_alert_direction": "",  # "up" | "down" — 당일 알림 방향
+        "price_alert_date": "",  # 알림 추적 날짜 (매일 리셋)
         "weekly_data": {
             "prices": [],
             "alerts": [],
@@ -331,6 +334,58 @@ def fetch_news() -> list[dict]:
     except Exception as e:
         log.error(f"News parse error: {e}")
         return []
+
+
+def translate_news(news: list[dict]) -> list[dict]:
+    """Claude API로 뉴스 헤드라인을 한글 번역 + 간략 요약. API 없으면 원문 반환."""
+    if not news:
+        return news
+    if not ANTHROPIC_API_KEY:
+        return news
+
+    titles = "\n".join(f"{i+1}. {n['title']}" for i, n in enumerate(news))
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "content-type": "application/json",
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": f"""아래 $HOOD 관련 영문 뉴스 헤드라인들을 한국어로 번역하고 각각 한 줄로 간략히 요약해주세요.
+형식: 번호. [번역된 제목] — 한 줄 요약
+
+{titles}
+
+JSON으로만 응답해주세요: [{{"idx": 1, "title_kr": "...", "summary": "..."}}]"""}],
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return news
+
+        data = resp.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block["text"]
+
+        text = text.strip().replace("```json", "").replace("```", "").strip()
+        translated = json.loads(text)
+
+        for item in translated:
+            idx = item.get("idx", 0) - 1
+            if 0 <= idx < len(news):
+                news[idx]["title_kr"] = item.get("title_kr", news[idx]["title"])
+                news[idx]["summary"] = item.get("summary", "")
+
+    except Exception as e:
+        log.warning(f"News translation error: {e}")
+
+    return news
 
 
 # ─────────────────────────────────────────────
@@ -1040,10 +1095,18 @@ def format_news_block(news: list[dict]) -> list[dict]:
     if not news:
         return []
 
-    items = "\n".join(f"• <{n['link']}|{n['title']}>" for n in news[:5])
+    lines = []
+    for n in news[:5]:
+        title_display = n.get("title_kr", n["title"])
+        summary = n.get("summary", "")
+        line = f"• <{n['link']}|{title_display}>"
+        if summary:
+            line += f"\n   _{summary}_"
+        lines.append(line)
+
     return [{
         "type": "section",
-        "text": {"type": "mrkdwn", "text": f"*📰 최신 뉴스*\n{items}"},
+        "text": {"type": "mrkdwn", "text": f"*📰 최신 뉴스*\n" + "\n".join(lines)},
     }]
 
 
@@ -1103,26 +1166,70 @@ def send_slack(blocks: list[dict], text: str = "HOOD Monitor Alert"):
 # 실행 모드
 # ─────────────────────────────────────────────
 def run_normal():
-    """일반 모드: 주가 + 뉴스 + RSI/MACD + 내부자 (매시간)"""
+    """일반 모드: 뉴스(한글) + RSI/MACD + 내부자 + 주가 급변동 알림 (매시간)
+    
+    주가 알림 로직:
+    - 평소 주가 블록 없음 (DCA 투자자에게 불필요)
+    - 전일 종가 대비 4%+ 등락 시 첫 알림
+    - 이후 1% 단위로 추가 알림 (4→5→6...)
+    - 되돌아올 때는 알림 없음 (6%→5%→4% 하락 시 무시)
+    """
     log.info("=== NORMAL mode ===")
     state = load_state()
     ws = load_weekly_state()
     blocks = []
+    today = datetime.now(KST).strftime("%Y-%m-%d")
 
-    # 주가
+    # 날짜 바뀌면 알림 추적 리셋
+    if state.get("price_alert_date") != today:
+        state["price_alert_max_pct"] = 0
+        state["price_alert_direction"] = ""
+        state["price_alert_date"] = today
+
+    # 주가 (알림 판단용으로만 fetch, 블록은 조건부)
     price = fetch_price()
-    if price:
-        blocks.append(format_price_block(price))
+    if price and price.prev_close > 0:
+        change_pct = (price.current - price.prev_close) / price.prev_close * 100
+        abs_pct = abs(change_pct)
+        direction = "up" if change_pct > 0 else "down"
 
-        # 가격 변동 알림 (5% 이상)
-        if state["last_price"] > 0:
-            delta = abs(price.current - state["last_price"]) / state["last_price"] * 100
-            if delta >= 5:
-                blocks.append({
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"🚨 *주가 급변동!* 전 체크 대비 {delta:.1f}% 변동"},
-                })
+        # 현재까지 알림 보낸 최대 %
+        prev_max = state.get("price_alert_max_pct", 0)
+        prev_dir = state.get("price_alert_direction", "")
 
+        # 알림 조건: 4%+ 이고, 같은 방향에서 이전 알림보다 1%p 이상 더 갔을 때만
+        should_alert = False
+        if abs_pct >= 4:
+            if prev_max == 0:
+                # 첫 4% 돌파
+                should_alert = True
+            elif direction == prev_dir and abs_pct >= prev_max + 1:
+                # 같은 방향으로 1%p 더 갔을 때 (4→5→6...)
+                should_alert = True
+            elif direction != prev_dir and abs_pct >= 4:
+                # 방향 전환 (상승→하락 또는 반대) 시 4% 넘으면 새로 시작
+                should_alert = True
+
+        if should_alert:
+            emoji = "🚀" if direction == "up" else "💥"
+            arrow = "▲" if direction == "up" else "▼"
+            threshold = int(abs_pct)  # 4%, 5%, 6%...
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"{emoji} *$HOOD 주가 급변동!*\n"
+                        f"*${price.current}* ({arrow} {abs(change_pct):.1f}%)\n"
+                        f"전일 종가: ${price.prev_close} → {threshold}% {'상승' if direction == 'up' else '하락'} 돌파"
+                    ),
+                },
+            })
+            state["price_alert_max_pct"] = max(prev_max, abs_pct) if direction == prev_dir else abs_pct
+            state["price_alert_direction"] = direction
+            ws.setdefault("alerts_fired", []).append(f"주가 {change_pct:+.1f}% ({price.current})")
+
+        # weekly 추적용
         state["last_price"] = price.current
         ws.setdefault("prices", []).append(price.current)
         ws["high"] = max(ws.get("high", 0), price.current)
@@ -1134,10 +1241,11 @@ def run_normal():
     if closes:
         state["price_history"] = closes[-60:]
         technicals = get_technical_signals(closes)
-        blocks.append(format_technicals_block(technicals))
+        # RSI/MACD 알림은 중요 시그널만 (과매도/과매수/크로스)
+        if technicals.rsi_alert or technicals.macd_alert:
+            blocks.append(format_technicals_block(technicals))
         ws.setdefault("rsi_readings", []).append(technicals.rsi_14)
 
-        # RSI 알림 (과매도 시 중요)
         if technicals.rsi_alert == "oversold":
             ws.setdefault("alerts_fired", []).append(f"RSI {technicals.rsi_14} 과매도")
         if technicals.macd_alert:
@@ -1145,14 +1253,15 @@ def run_normal():
     else:
         technicals = TechnicalSignals()
 
-    # 뉴스
+    # 뉴스 (한글 번역 + 요약)
     news = fetch_news()
     new_news = [n for n in news if n["hash"] not in state.get("last_news_hashes", [])]
     if new_news:
+        new_news = translate_news(new_news)  # 한글 번역
         blocks.extend(format_news_block(new_news))
         state["last_news_hashes"] = [n["hash"] for n in news[:20]]
         for n in new_news[:3]:
-            ws.setdefault("news_headlines", []).append(n["title"])
+            ws.setdefault("news_headlines", []).append(n.get("title_kr", n["title"]))
 
     # 내부자 거래
     insider_trades = fetch_insider_trades()
@@ -1178,6 +1287,8 @@ def run_normal():
         })
         blocks.append({"type": "divider"})
         send_slack(blocks)
+    else:
+        log.info("No alerts to send — quiet hour")
 
     save_state(state)
     save_weekly_state(ws)
@@ -1185,16 +1296,32 @@ def run_normal():
 
 
 def run_close():
-    """장 마감 모드: 옵션 PCR + 공매도 잔고 + DCA 시그널 (매일 장 마감 후)"""
+    """장 마감 모드: 종가 기준 알림(해당시) + 기술지표 + 옵션 PCR + 공매도 + DCA 시그널"""
     log.info("=== CLOSE mode ===")
     state = load_state()
     ws = load_weekly_state()
     blocks = []
 
-    # 주가
+    # 주가 (종가 기준 4%+ 변동 시에만 알림)
     price = fetch_price()
-    if price:
-        blocks.append(format_price_block(price))
+    if price and price.prev_close > 0:
+        change_pct = (price.current - price.prev_close) / price.prev_close * 100
+        abs_pct = abs(change_pct)
+        if abs_pct >= 4:
+            direction = "up" if change_pct > 0 else "down"
+            emoji = "🚀" if direction == "up" else "💥"
+            arrow = "▲" if direction == "up" else "▼"
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"{emoji} *$HOOD 종가 기준 급변동*\n"
+                        f"*${price.current}* ({arrow} {abs(change_pct):.1f}%)\n"
+                        f"전일 종가: ${price.prev_close}"
+                    ),
+                },
+            })
         state["last_price"] = price.current
 
     # 기술적 지표
@@ -1222,8 +1349,9 @@ def run_close():
     if new_insiders:
         blocks.extend(format_insider_block(new_insiders))
 
-    # 뉴스
+    # 뉴스 (한글 번역)
     news = fetch_news()
+    news = translate_news(news)
 
     # DCA 시그널 (Phase 3)
     dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news)
@@ -1238,9 +1366,57 @@ def run_close():
         blocks.append({"type": "divider"})
         send_slack(blocks)
 
+    # 알림 추적 리셋 (장 마감 = 하루 끝)
+    state["price_alert_max_pct"] = 0
+    state["price_alert_direction"] = ""
+
     save_state(state)
     save_weekly_state(ws)
     log.info("Close mode complete")
+
+
+def run_morning():
+    """아침 모드 (08:00 KST): 전일 종가 기준 4%+ 변동 시에만 알림. 해당 없으면 전송 없음."""
+    log.info("=== MORNING mode ===")
+
+    price = fetch_price()
+    if not price or not price.prev_close or price.prev_close == 0:
+        log.info("No price data — skipping morning alert")
+        return
+
+    change_pct = (price.current - price.prev_close) / price.prev_close * 100
+    abs_pct = abs(change_pct)
+
+    if abs_pct < 4:
+        log.info(f"Change {change_pct:+.1f}% < 4% — no morning alert needed")
+        return
+
+    direction = "up" if change_pct > 0 else "down"
+    emoji = "🚀" if direction == "up" else "💥"
+    arrow = "▲" if direction == "up" else "▼"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"☀️ $HOOD 아침 브리핑 — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"},
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {'상승' if direction == 'up' else '하락'}*\n"
+                    f"*${price.current}* ({arrow} {abs(change_pct):.1f}%)\n"
+                    f"전일 종가: ${price.prev_close}"
+                ),
+            },
+        },
+        {"type": "divider"},
+    ]
+
+    send_slack(blocks)
+    log.info(f"Morning alert sent — {change_pct:+.1f}%")
 
 
 def run_13f():
@@ -1419,6 +1595,8 @@ def main():
         run_normal()
     elif mode == "close":
         run_close()
+    elif mode == "morning":
+        run_morning()
     elif mode == "13f":
         run_13f()
     elif mode == "weekly":
