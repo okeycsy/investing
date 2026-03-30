@@ -1,0 +1,13 @@
+{
+  "last_price": 0,
+  "last_news_hashes": [],
+  "last_insider_hashes": [],
+  "last_13f_hashes": [],
+  "price_history": [],
+  "weekly_data": {
+    "prices": [],
+    "alerts": [],
+    "insider_trades": [],
+    "news_headlines": []
+  }
+}
