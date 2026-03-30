@@ -186,22 +186,59 @@ def save_weekly_state(ws: dict):
 # ─────────────────────────────────────────────
 # HTTP 유틸
 # ─────────────────────────────────────────────
-def safe_get(url: str, headers: dict = None, params: dict = None, timeout: int = 15) -> Optional[requests.Response]:
-    try:
-        resp = requests.get(url, headers=headers or {}, params=params, timeout=timeout)
-        if resp.status_code == 200:
-            return resp
-        log.warning(f"HTTP {resp.status_code} for {url}")
-    except Exception as e:
-        log.error(f"Request failed for {url}: {e}")
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+
+def safe_get(url: str, headers: dict = None, params: dict = None, timeout: int = 15, retries: int = 3) -> Optional[requests.Response]:
+    """HTTP GET with retry + exponential backoff for 429/5xx"""
+    h = headers.copy() if headers else {}
+    # Yahoo, SEC 등에서 User-Agent 없으면 차단하므로 기본값 설정
+    if "User-Agent" not in h and "user-agent" not in {k.lower() for k in h}:
+        h["User-Agent"] = BROWSER_UA
+
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=h, params=params, timeout=timeout)
+            if resp.status_code == 200:
+                return resp
+            if resp.status_code == 429:
+                wait = min(2 ** (attempt + 1), 10)  # 2s, 4s, 8s
+                log.warning(f"HTTP 429 for {url} — retry in {wait}s (attempt {attempt+1}/{retries})")
+                time.sleep(wait)
+                continue
+            if resp.status_code >= 500:
+                wait = 2 ** attempt
+                log.warning(f"HTTP {resp.status_code} for {url} — retry in {wait}s")
+                time.sleep(wait)
+                continue
+            log.warning(f"HTTP {resp.status_code} for {url}")
+            return None
+        except Exception as e:
+            log.error(f"Request failed for {url}: {e}")
+            if attempt < retries - 1:
+                time.sleep(1)
     return None
 
 
 # ─────────────────────────────────────────────
 # 1. 주가 데이터 (Yahoo Finance)
 # ─────────────────────────────────────────────
+# Yahoo 요청 간 딜레이 (429 방지)
+_last_yahoo_call = 0.0
+
+
+def _yahoo_throttle():
+    """Yahoo 요청 간 최소 1.5초 간격 유지"""
+    global _last_yahoo_call
+    elapsed = time.time() - _last_yahoo_call
+    if elapsed < 1.5:
+        time.sleep(1.5 - elapsed)
+    _last_yahoo_call = time.time()
+
+
 def fetch_price() -> Optional[PriceData]:
     """Yahoo Finance에서 현재 주가 데이터 가져오기"""
+    _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=TICKER)
     params = {"interval": "1d", "range": "5d"}
     resp = safe_get(url, params=params)
@@ -238,6 +275,7 @@ def fetch_price() -> Optional[PriceData]:
 
 def fetch_price_history(days: int = 60) -> list[float]:
     """RSI/MACD 계산을 위한 과거 종가 데이터"""
+    _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=TICKER)
     params = {"interval": "1d", "range": f"{days}d"}
     resp = safe_get(url, params=params)
@@ -269,6 +307,7 @@ def format_market_cap(val: float) -> str:
 # ─────────────────────────────────────────────
 def fetch_news() -> list[dict]:
     """Yahoo Finance RSS에서 최신 뉴스 헤드라인"""
+    _yahoo_throttle()
     url = YAHOO_RSS_URL.format(ticker=TICKER)
     resp = safe_get(url)
     if not resp:
@@ -377,6 +416,7 @@ def get_technical_signals(closes: list[float]) -> TechnicalSignals:
 # ─────────────────────────────────────────────
 def fetch_options_pcr() -> Optional[OptionsData]:
     """CBOE 또는 Yahoo Options에서 PCR 계산"""
+    _yahoo_throttle()
     # Yahoo Finance Options Chain 사용 (CBOE 직접 스크래핑보다 안정적)
     url = f"https://query1.finance.yahoo.com/v7/finance/options/{TICKER}"
     resp = safe_get(url)
@@ -486,13 +526,43 @@ def fetch_insider_trades() -> list[InsiderTrade]:
             if i >= 20:  # 최근 20개만 확인
                 break
 
-            accession = accessions[i].replace("-", "")
+            accession_raw = accessions[i]
+            accession = accession_raw.replace("-", "")
             filing_date = dates[i]
+            cik_clean = CIK.lstrip("0")
+            xml_resp = None
+            xml_url = ""
 
-            # Form 4 XML 파싱
-            xml_url = f"https://www.sec.gov/Archives/edgar/data/{CIK.lstrip('0')}/{accession}/{primary_docs[i]}"
-            xml_resp = safe_get(xml_url, headers=SEC_HEADERS)
+            # 전략: index.json에서 원본 Form 4 XML을 직접 찾는다
+            # primaryDocument는 xslF345X05/, xslF345X06/ 등 XSLT 경로라 403 뜸
+            idx_url = f"https://data.sec.gov/Archives/edgar/data/{cik_clean}/{accession}/index.json"
+            idx_resp = safe_get(idx_url, headers=SEC_HEADERS, retries=1)
+            if idx_resp:
+                try:
+                    idx_data = idx_resp.json()
+                    for item in idx_data.get("directory", {}).get("item", []):
+                        name = item.get("name", "")
+                        # Form 4 원본 XML: .xml 확장자, xsl/R/Financial 등 제외
+                        if (name.endswith(".xml")
+                                and "xsl" not in name.lower()
+                                and not name.startswith("R")
+                                and "Financial" not in name):
+                            xml_url = f"https://data.sec.gov/Archives/edgar/data/{cik_clean}/{accession}/{name}"
+                            xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
+                            if xml_resp:
+                                break
+                except Exception:
+                    pass
+
+            # index.json 실패 시 fallback: primaryDocument에서 파일명만 추출
             if not xml_resp:
+                primary = primary_docs[i]
+                xml_filename = primary.split("/")[-1]
+                xml_url = f"https://data.sec.gov/Archives/edgar/data/{cik_clean}/{accession}/{xml_filename}"
+                xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
+
+            if not xml_resp:
+                log.debug(f"Skipping Form 4 accession {accession_raw} — XML not accessible")
                 continue
 
             try:
