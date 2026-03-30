@@ -337,7 +337,7 @@ def fetch_news() -> list[dict]:
 
 
 def translate_news(news: list[dict]) -> list[dict]:
-    """Claude API로 뉴스 헤드라인을 한글 번역 + 간략 요약. API 없으면 원문 반환."""
+    """Claude API로 뉴스 헤드라인을 한글 요약 + 감성 분석. API 없으면 원문 반환."""
     if not news:
         return news
     if not ANTHROPIC_API_KEY:
@@ -355,12 +355,16 @@ def translate_news(news: list[dict]) -> list[dict]:
             json={
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 1000,
-                "messages": [{"role": "user", "content": f"""아래 $HOOD 관련 영문 뉴스 헤드라인들을 한국어로 번역하고 각각 한 줄로 간략히 요약해주세요.
-형식: 번호. [번역된 제목] — 한 줄 요약
+                "messages": [{"role": "user", "content": f"""아래 $HOOD(Robinhood Markets) 관련 영문 뉴스 헤드라인들을 분석해주세요.
+
+각 뉴스에 대해:
+1. 한국어로 간략 요약 (한 줄, 15자 이내)
+2. HOOD 주가에 대한 감성 판단 (positive/negative/neutral)
 
 {titles}
 
-JSON으로만 응답해주세요: [{{"idx": 1, "title_kr": "...", "summary": "..."}}]"""}],
+JSON 배열로만 응답. 다른 텍스트 없이:
+[{{"idx": 1, "title_kr": "한글 제목", "summary": "한 줄 요약", "sentiment": "positive"}}]"""}],
             },
             timeout=30,
         )
@@ -381,6 +385,7 @@ JSON으로만 응답해주세요: [{{"idx": 1, "title_kr": "...", "summary": "..
             if 0 <= idx < len(news):
                 news[idx]["title_kr"] = item.get("title_kr", news[idx]["title"])
                 news[idx]["summary"] = item.get("summary", "")
+                news[idx]["sentiment"] = item.get("sentiment", "neutral")
 
     except Exception as e:
         log.warning(f"News translation error: {e}")
@@ -988,27 +993,32 @@ def format_price_block(price: PriceData) -> dict:
 
 
 def format_technicals_block(ts: TechnicalSignals) -> dict:
-    rsi_emoji = "🟢" if ts.rsi_alert == "oversold" else "🔴" if ts.rsi_alert == "overbought" else "⚪"
-    macd_emoji = "🟢" if ts.macd_alert == "bullish_cross" else "🔴" if ts.macd_alert == "bearish_cross" else "⚪"
+    """기술적 지표를 자연어로 해석해서 전달"""
+    lines = []
 
-    alerts = []
-    if ts.rsi_alert == "oversold":
-        alerts.append("⚠️ *RSI 과매도 — DCA 타이밍 체크!*")
-    elif ts.rsi_alert == "overbought":
-        alerts.append("⚠️ *RSI 과매수 — 추격 매수 주의*")
+    # RSI 해석
+    if ts.rsi_14 <= 30:
+        lines.append(f"🟢 *매수 기회 포착* — 과매도 구간 진입 (RSI {ts.rsi_14}). DCA 추가매수 타이밍일 수 있음")
+    elif ts.rsi_14 <= 40:
+        lines.append(f"🟡 *관심 구간* — 아직 과매도는 아니지만 약세 흐름 (RSI {ts.rsi_14})")
+    elif ts.rsi_14 >= 70:
+        lines.append(f"🔴 *과열 주의* — 과매수 구간 (RSI {ts.rsi_14}). 추격 매수 자제 권장")
+    elif ts.rsi_14 >= 60:
+        lines.append(f"🟡 *강세 흐름* — 상승 모멘텀 지속 중 (RSI {ts.rsi_14})")
+    else:
+        lines.append(f"⚪ *중립* — 특별한 시그널 없음 (RSI {ts.rsi_14})")
+
+    # MACD 해석
     if ts.macd_alert == "bullish_cross":
-        alerts.append("⚠️ *MACD 골든크로스 발생!*")
+        lines.append("🟢 *골든크로스 발생!* — 상승 전환 시그널. 매수 모멘텀 강화")
     elif ts.macd_alert == "bearish_cross":
-        alerts.append("⚠️ *MACD 데드크로스 발생*")
+        lines.append("🔴 *데드크로스 발생* — 하락 전환 시그널. 단기 약세 가능성")
+    elif ts.macd_histogram > 0.1:
+        lines.append("🟢 상승 모멘텀 유지 중")
+    elif ts.macd_histogram < -0.1:
+        lines.append("🔴 하락 모멘텀 진행 중")
 
-    text = (
-        f"*📊 기술적 지표*\n"
-        f"{rsi_emoji} RSI(14): *{ts.rsi_14}*\n"
-        f"{macd_emoji} MACD: {ts.macd_line:.4f} | Signal: {ts.macd_signal:.4f} | Hist: {ts.macd_histogram:.4f}"
-    )
-    if alerts:
-        text += "\n" + "\n".join(alerts)
-
+    text = "*📊 시장 상황*\n" + "\n".join(lines)
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 
@@ -1053,17 +1063,19 @@ def format_insider_block(trades: list[InsiderTrade]) -> list[dict]:
     blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*🕴️ 내부자 거래*"}}]
 
     for t in trades[:5]:  # 최대 5건
-        emoji = "🟢" if t.trade_type == "Purchase" else "🔴"
+        emoji = "🟢 매수" if t.trade_type == "Purchase" else "🔴 매도"
+        # 규모감만 전달 (소/중/대)
+        if t.total_value >= 1_000_000:
+            scale = "대규모"
+        elif t.total_value >= 100_000:
+            scale = "중규모"
+        else:
+            scale = "소규모"
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": (
-                    f"{emoji} *{t.filer}* ({t.title})\n"
-                    f"{t.trade_type}: {t.shares:,}주 @ ${t.price:.2f} "
-                    f"= *${t.total_value:,.0f}*\n"
-                    f"📅 {t.date} | <{t.url}|SEC Filing>"
-                ),
+                "text": f"{emoji} — *{t.filer}* ({t.title}) | {t.shares:,}주 {scale} | {t.date}",
             },
         })
 
@@ -1097,16 +1109,27 @@ def format_news_block(news: list[dict]) -> list[dict]:
 
     lines = []
     for n in news[:5]:
-        title_display = n.get("title_kr", n["title"])
         summary = n.get("summary", "")
-        line = f"• <{n['link']}|{title_display}>"
+        sentiment = n.get("sentiment", "")
+        title_kr = n.get("title_kr", "")
+
         if summary:
-            line += f"\n   _{summary}_"
-        lines.append(line)
+            # 감성 태그
+            if sentiment == "positive":
+                tag = "🟢 호재"
+            elif sentiment == "negative":
+                tag = "🔴 악재"
+            else:
+                tag = "⚪ 중립"
+            lines.append(f"• {tag} — {summary}")
+        elif title_kr:
+            lines.append(f"• {title_kr}")
+        else:
+            lines.append(f"• {n['title']}")
 
     return [{
         "type": "section",
-        "text": {"type": "mrkdwn", "text": f"*📰 최신 뉴스*\n" + "\n".join(lines)},
+        "text": {"type": "mrkdwn", "text": f"*📰 뉴스 요약*\n" + "\n".join(lines)},
     }]
 
 
@@ -1212,22 +1235,20 @@ def run_normal():
 
         if should_alert:
             emoji = "🚀" if direction == "up" else "💥"
-            arrow = "▲" if direction == "up" else "▼"
             threshold = int(abs_pct)  # 4%, 5%, 6%...
             blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"{emoji} *$HOOD 주가 급변동!*\n"
-                        f"*${price.current}* ({arrow} {abs(change_pct):.1f}%)\n"
-                        f"전일 종가: ${price.prev_close} → {threshold}% {'상승' if direction == 'up' else '하락'} 돌파"
+                        f"{emoji} *$HOOD {threshold}% {'상승' if direction == 'up' else '하락'} 돌파!*\n"
+                        f"전일 대비 {abs(change_pct):.1f}% {'상승' if direction == 'up' else '하락'} 중"
                     ),
                 },
             })
             state["price_alert_max_pct"] = max(prev_max, abs_pct) if direction == prev_dir else abs_pct
             state["price_alert_direction"] = direction
-            ws.setdefault("alerts_fired", []).append(f"주가 {change_pct:+.1f}% ({price.current})")
+            ws.setdefault("alerts_fired", []).append(f"주가 {change_pct:+.1f}%")
 
         # weekly 추적용
         state["last_price"] = price.current
@@ -1302,7 +1323,7 @@ def run_close():
     ws = load_weekly_state()
     blocks = []
 
-    # 주가 (종가 기준 4%+ 변동 시에만 알림)
+    # 주가 (종가 기준 4%+ 변동 시에만 알림 — 가격 숫자 없이 %만)
     price = fetch_price()
     if price and price.prev_close > 0:
         change_pct = (price.current - price.prev_close) / price.prev_close * 100
@@ -1310,15 +1331,12 @@ def run_close():
         if abs_pct >= 4:
             direction = "up" if change_pct > 0 else "down"
             emoji = "🚀" if direction == "up" else "💥"
-            arrow = "▲" if direction == "up" else "▼"
             blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"{emoji} *$HOOD 종가 기준 급변동*\n"
-                        f"*${price.current}* ({arrow} {abs(change_pct):.1f}%)\n"
-                        f"전일 종가: ${price.prev_close}"
+                        f"{emoji} *$HOOD 종가 기준 {abs_pct:.1f}% {'상승' if direction == 'up' else '하락'}*"
                     ),
                 },
             })
@@ -1393,23 +1411,18 @@ def run_morning():
 
     direction = "up" if change_pct > 0 else "down"
     emoji = "🚀" if direction == "up" else "💥"
-    arrow = "▲" if direction == "up" else "▼"
 
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"☀️ $HOOD 아침 브리핑 — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"},
+            "text": {"type": "plain_text", "text": f"☀️ $HOOD 아침 브리핑 — {datetime.now(KST).strftime('%m/%d')}"},
         },
         {"type": "divider"},
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": (
-                    f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {'상승' if direction == 'up' else '하락'}*\n"
-                    f"*${price.current}* ({arrow} {abs(change_pct):.1f}%)\n"
-                    f"전일 종가: ${price.prev_close}"
-                ),
+                "text": f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {'상승' if direction == 'up' else '하락'}*",
             },
         },
         {"type": "divider"},
