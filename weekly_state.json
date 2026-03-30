@@ -4,16 +4,18 @@
     66.02,
     66.02,
     66.27,
-    67.11
+    67.11,
+    65.53
   ],
   "high": 67.11,
-  "low": 66.02,
+  "low": 65.53,
   "alerts_fired": [
     "MACD bearish_cross",
     "주가 -6.9% (66.02)",
     "MACD bearish_cross",
     "주가 -8.6%",
-    "주가 -7.4%"
+    "주가 -7.4%",
+    "주가 -9.6%"
   ],
   "insider_trades": [],
   "news_headlines": [
@@ -24,13 +26,15 @@
     "Bernstein sees a bottom in crypto stocks into weak Q1 earnings",
     "These Stocks Are Today’s Movers: Nvidia, Alcoa, Coinbase, Strategy, Palo Alto, CrowdStrike, Eli Lilly, and More",
     "William Blair Lowers Varonis Systems, Inc. (VRNS) Rating as AI Disruption Clouds Infrastructure Software Outlook",
-    "Robinhood Is One of the Worst-Performing Stocks in the S&P 500 This Year. Is It Overdue for a Rally?"
+    "Robinhood Is One of the Worst-Performing Stocks in the S&P 500 This Year. Is It Overdue for a Rally?",
+    "These Stocks Are Today’s Movers: Nvidia, Alcoa, Palo Alto, CrowdStrike, Eli Lilly, Datadog, Sysco, and More"
   ],
   "rsi_readings": [
     35.5,
     35.5,
     35.72,
-    37.27
+    37.27,
+    34.88
   ],
   "pcr_readings": [],
   "short_readings": []
