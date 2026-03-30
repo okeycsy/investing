@@ -1,0 +1,71 @@
+# $HOOD Slack Monitor
+
+$HOOD 주가 급등락 + 뉴스 알림을 Slack으로 받는 GitHub Actions 봇.
+
+## 알림 종류
+
+| 색상 | 유형 | 조건 |
+|------|------|------|
+| 🟢 초록 | 긍정 뉴스 | upgrade, beat, raise PT 등 키워드 포함 |
+| 🔴 빨강 | 부정 뉴스 | downgrade, miss, lawsuit 등 키워드 포함 |
+| 🟡 노랑/빨강 | 가격 급등락 | 전일 종가 대비 ±5% 초과 |
+| 🔵 파랑 | SEC 공시 | 8-K, 10-Q, 10-K 제출 시 |
+| 🟣 보라 | 애널리스트 | 목표주가 변경, 커버리지 개시/재확인 |
+
+## 세팅 방법 (5분)
+
+### 1. 이 레포를 Fork 또는 새 레포 생성
+
+```bash
+# 새 레포 만들어서 파일 올리기
+git init hood-monitor
+cd hood-monitor
+# 이 파일들 복사 후
+git add .
+git commit -m "init"
+git remote add origin https://github.com/<YOUR_ID>/hood-monitor.git
+git push -u origin main
+```
+
+### 2. Slack Incoming Webhook URL 발급
+
+1. https://api.slack.com/apps 에서 **Create New App** → From scratch
+2. 앱 이름 지정, 알림 받을 워크스페이스 선택
+3. 좌측 메뉴 **Incoming Webhooks** → 활성화
+4. **Add New Webhook to Workspace** → 채널 선택
+5. 생성된 `https://hooks.slack.com/services/...` URL 복사
+
+### 3. GitHub Secret 등록
+
+1. GitHub 레포 → **Settings** → **Secrets and variables** → **Actions**
+2. **New repository secret**
+   - Name: `SLACK_WEBHOOK_URL`
+   - Secret: 복사한 Webhook URL
+
+### 4. 동작 확인
+
+- **Actions** 탭 → `$HOOD Slack Monitor` → **Run workflow** 클릭
+- Slack에 테스트 메시지 오면 성공!
+
+## 실행 스케줄
+
+- 미국 장중 30분 간격 (ET 09:00 ~ 20:30)
+- 장 마감 후 21:00 UTC 한 번 추가 실행
+- 주말 자동 휴식
+
+## 커스터마이징
+
+`hood_monitor.py` 상단 상수:
+
+```python
+PRICE_THRESHOLD = 0.05     # 가격 알림 기준 (기본 5%)
+NEWS_LOOKBACK_MINUTES = 65 # 뉴스 조회 기간 (분)
+```
+
+키워드 추가는 `POSITIVE_KW` / `NEGATIVE_KW` 리스트에 항목 추가.
+
+## 무료 소스 & API 키 불필요
+
+- Yahoo Finance RSS — 가격 + 일반 뉴스
+- SEC EDGAR Atom Feed — 공시 원문
+- Finviz 스크레이핑은 미사용 (차단 우려), 애널리스트 정보는 Yahoo 뉴스로 커버
