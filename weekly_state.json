@@ -1,20 +1,25 @@
 {
   "week_start": "",
   "prices": [
+    66.02,
     66.02
   ],
   "high": 66.02,
   "low": 66.02,
   "alerts_fired": [
+    "MACD bearish_cross",
+    "주가 -6.9% (66.02)",
     "MACD bearish_cross"
   ],
   "insider_trades": [],
   "news_headlines": [
     "1 Cash-Producing Stock Worth Your Attention and 2 We Find Risky",
     "Goldman Sachs Flags 2 Crypto Stocks Worth Buying After 46% Sector Crash",
-    "Robinhood Social Launch Tests Trust As Stock Trades Below Analyst Targets"
+    "Robinhood Social Launch Tests Trust As Stock Trades Below Analyst Targets",
+    "These Stocks Are Today’s Movers: Nvidia, Eli Lilly, Alcoa, Coinbase, Strategy, and More"
   ],
   "rsi_readings": [
+    35.5,
     35.5
   ],
   "pcr_readings": [],
