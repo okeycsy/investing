@@ -1,6 +1,8 @@
 {
-  "last_price": 65.53,
+  "last_price": 64.72,
   "last_news_hashes": [
+    "4f20b5a05987",
+    "fbfb17e1b51c",
     "e521947807d0",
     "b7b09fef5d11",
     "900186160a11",
@@ -8,9 +10,7 @@
     "cff478249c8a",
     "558c7a24c015",
     "6b851885bb39",
-    "8383825b1406",
-    "b59b25eb6c5d",
-    "47af8bea6d7e"
+    "8383825b1406"
   ],
   "last_insider_hashes": [],
   "last_13f_hashes": [],
@@ -74,7 +74,7 @@
     72.54,
     70.35,
     66.02,
-    65.51
+    64.72
   ],
   "weekly_data": {
     "prices": [],
@@ -82,7 +82,7 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 9.601324320595936,
+  "price_alert_max_pct": 10.718719823423916,
   "price_alert_direction": "down",
   "price_alert_date": "2026-03-31"
 }
