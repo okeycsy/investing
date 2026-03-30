@@ -186,9 +186,9 @@ def save_weekly_state(ws: dict):
 # ─────────────────────────────────────────────
 # HTTP 유틸
 # ─────────────────────────────────────────────
-def safe_get(url: str, headers: dict = None, timeout: int = 15) -> Optional[requests.Response]:
+def safe_get(url: str, headers: dict = None, params: dict = None, timeout: int = 15) -> Optional[requests.Response]:
     try:
-        resp = requests.get(url, headers=headers or {}, timeout=timeout)
+        resp = requests.get(url, headers=headers or {}, params=params, timeout=timeout)
         if resp.status_code == 200:
             return resp
         log.warning(f"HTTP {resp.status_code} for {url}")
@@ -240,16 +240,11 @@ def fetch_price_history(days: int = 60) -> list[float]:
     """RSI/MACD 계산을 위한 과거 종가 데이터"""
     url = YAHOO_QUOTE_URL.format(ticker=TICKER)
     params = {"interval": "1d", "range": f"{days}d"}
-    resp = safe_get(url)
+    resp = safe_get(url, params=params)
     if not resp:
         return []
 
     try:
-        # URL에 params를 직접 추가
-        full_url = f"{url}?interval=1d&range={days}d"
-        resp = safe_get(full_url)
-        if not resp:
-            return []
         data = resp.json()
         quotes = data["chart"]["result"][0]["indicators"]["quote"][0]
         closes = [round(c, 2) for c in quotes["close"] if c is not None]
