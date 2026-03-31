@@ -702,6 +702,23 @@ def parse_form4_xml(xml_text: str, filing_date: str, url: str) -> list:
 
 def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
     try:
+        coding = txn.find("transactionCoding")
+        txn_code = ""
+        if coding is not None:
+            txn_code_e = coding.find("transactionCode")
+            txn_code = txn_code_e.text.strip() if txn_code_e is not None and txn_code_e.text else ""
+
+        # 제외할 transaction code:
+        # C = 전환 (Class B → Class A 등, 실제 매수 아님)
+        # J = 기타 취득/처분 (스톡옵션 행사 등 시장 무관)
+        # G = 증여
+        # W = 상속
+        # Z = 신탁 관련
+        SKIP_CODES = {"C", "J", "G", "W", "Z"}
+        if txn_code in SKIP_CODES:
+            log.debug(f"Form 4 스킵 (code={txn_code}): {filer_name}")
+            return None
+
         amounts = txn.find("transactionAmounts")
         if amounts is None:
             return None
@@ -710,17 +727,31 @@ def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
         code_e = amounts.find("transactionAcquiredDisposedCode/value")
         shares = float(shares_e.text) if shares_e is not None and shares_e.text else 0
         price = float(price_e.text) if price_e is not None and price_e.text else 0
-        acq = code_e.text if code_e is not None else ""
+        acq = code_e.text.strip() if code_e is not None and code_e.text else ""
+
         if shares == 0:
             return None
-        trade_type = "Purchase" if acq == "A" else "Sale" if acq == "D" else "Other"
+
+        # P = 시장 매수, A = 취득(부여 등), D = 처분/매도, S = 시장 매도
+        if txn_code == "P" or (txn_code == "A" and acq == "A"):
+            trade_type = "Purchase"
+        elif txn_code in ("S", "D") or acq == "D":
+            trade_type = "Sale"
+        else:
+            trade_type = "Other"
+
+        # Other는 알림 불필요
+        if trade_type == "Other":
+            return None
+
         return InsiderTrade(
             filer=filer_name, title=filer_title, trade_type=trade_type,
             shares=int(shares), price=round(price, 2),
             total_value=round(shares * price, 2),
             date=filing_date, url=url,
         )
-    except Exception:
+    except Exception as e:
+        log.debug(f"_parse_transaction error: {e}")
         return None
 
 
@@ -1098,7 +1129,16 @@ def format_insider_block(trades: list) -> list:
     blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*🕴 내부자 거래*"}}]
     for t in trades[:5]:
         emoji = "🟢 매수" if t.trade_type == "Purchase" else "🔴 매도"
-        scale = "대규모" if t.total_value >= 1_000_000 else "중규모" if t.total_value >= 100_000 else "소규모"
+        # 규모: total_value 기준 (price 있을 때), 없으면 주식 수 기준
+        if t.total_value >= 1_000_000:
+            scale = "대규모"
+        elif t.total_value >= 100_000:
+            scale = "중규모"
+        elif t.total_value > 0:
+            scale = "소규모"
+        else:
+            # price=0인 경우 주식 수로 판단
+            scale = "대규모" if t.shares >= 50_000 else "중규모" if t.shares >= 5_000 else "소규모"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
             f"{emoji} — *{t.filer}* ({t.title}) | {t.shares:,}주 {scale} | {t.date}"}})
     return blocks
