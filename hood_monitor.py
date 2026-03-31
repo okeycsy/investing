@@ -1614,6 +1614,9 @@ def _footer() -> list:
         {"type": "divider"},
         _ctx(f"🤖 HOOD Monitor  |  {kst}"),
     ]
+
+
+def send_slack(blocks: list, text: str = "HOOD Monitor"):
     if not SLACK_WEBHOOK:
         log.warning("SLACK_WEBHOOK_URL not set")
         for b in blocks:
