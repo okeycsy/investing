@@ -274,6 +274,132 @@ def fetch_price_history(days: int = 60) -> list:
 
 
 # ─────────────────────────────────────────────
+# 1-1. 베타(β) 계산 + 기대수익률 이격도
+# ─────────────────────────────────────────────
+BETA_CACHE_FILE = Path("beta_cache.json")
+BETA_BENCHMARK = "QQQ"
+
+
+def _fetch_yearly_closes(ticker: str) -> list:
+    """1년치 일간 종가 반환"""
+    _yahoo_throttle()
+    url = YAHOO_QUOTE_URL.format(ticker=ticker)
+    resp = safe_get(url, params={"interval": "1d", "range": "1y"})
+    if not resp:
+        return []
+    try:
+        closes = resp.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        return [c for c in closes if c is not None]
+    except Exception as e:
+        log.error(f"_fetch_yearly_closes({ticker}): {e}")
+        return []
+
+
+def _calc_beta(stock_closes: list, market_closes: list) -> Optional[float]:
+    """β = Cov(r_s, r_m) / Var(r_m)"""
+    n = min(len(stock_closes), len(market_closes))
+    if n < 30:
+        return None
+    # 수익률 계산 (일간 단순 수익률)
+    rs = [(stock_closes[i] - stock_closes[i-1]) / stock_closes[i-1]
+          for i in range(n - min(n, len(stock_closes)), n)
+          if stock_closes[i-1] != 0]
+    rm = [(market_closes[i] - market_closes[i-1]) / market_closes[i-1]
+          for i in range(n - min(n, len(market_closes)), n)
+          if market_closes[i-1] != 0]
+
+    # 길이 맞추기
+    length = min(len(rs), len(rm))
+    rs, rm = rs[-length:], rm[-length:]
+    if length < 20:
+        return None
+
+    mean_rs = sum(rs) / length
+    mean_rm = sum(rm) / length
+    cov = sum((rs[i] - mean_rs) * (rm[i] - mean_rm) for i in range(length)) / length
+    var_m = sum((rm[i] - mean_rm) ** 2 for i in range(length)) / length
+    if var_m == 0:
+        return None
+    return round(cov / var_m, 3)
+
+
+def get_beta() -> Optional[float]:
+    """
+    베타 반환. 오늘 이미 계산된 캐시가 있으면 그걸 사용,
+    없거나 날짜 다르면 1년치 데이터 재계산 후 캐시 저장.
+    """
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+    # 캐시 확인
+    if BETA_CACHE_FILE.exists():
+        try:
+            cache = json.loads(BETA_CACHE_FILE.read_text())
+            if cache.get("date") == today and cache.get("beta") is not None:
+                log.info(f"Beta 캐시 히트: β={cache['beta']} ({today})")
+                return float(cache["beta"])
+        except Exception:
+            pass
+
+    # 재계산
+    log.info("Beta 재계산 시작 (1년치 데이터 fetch)...")
+    stock_closes = _fetch_yearly_closes(TICKER)
+    market_closes = _fetch_yearly_closes(BETA_BENCHMARK)
+
+    if not stock_closes or not market_closes:
+        log.warning("Beta 계산 실패: 데이터 부족")
+        return None
+
+    beta = _calc_beta(stock_closes, market_closes)
+    if beta is None:
+        log.warning("Beta 계산 실패: 수익률 데이터 부족")
+        return None
+
+    # 캐시 저장
+    BETA_CACHE_FILE.write_text(json.dumps({"date": today, "beta": beta}, indent=2))
+    log.info(f"Beta 계산 완료: β={beta} → 캐시 저장")
+    return beta
+
+
+def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> dict:
+    """
+    기대 수익률 vs 실제 수익률 이격도 계산.
+
+    기대 수익률 = β × 시장(QQQ) 수익률  (CAPM 단순화, rf=0 가정)
+    이격도 = 실제 - 기대  (양수: 시장 대비 초과 성과 / 음수: 시장 대비 부진)
+    """
+    expected = round(beta * market_pct, 2)
+    divergence = round(actual_pct - expected, 2)
+    return {
+        "beta": beta,
+        "expected_pct": expected,
+        "actual_pct": actual_pct,
+        "divergence": divergence,
+    }
+
+
+def format_beta_block(bd: dict) -> list:
+    div = bd["divergence"]
+    if div >= 2:
+        div_emoji, div_desc = "🟢", "시장 대비 초과 상승"
+    elif div <= -2:
+        div_emoji, div_desc = "🔴", "시장 대비 초과 하락 (개별 요인)"
+    else:
+        div_emoji, div_desc = "⚪", "기대 범위 내"
+
+    return [
+        _sec(
+            f"*📉 베타 분석*  β = *{bd['beta']:.2f}*\n"
+            f"{div_emoji} 이격도: *{div:+.2f}%p* — {div_desc}"
+        ),
+        _ctx(
+            f"기대 수익률 {bd['expected_pct']:+.2f}% (β×QQQ)  |  "
+            f"실제 수익률 {bd['actual_pct']:+.2f}%  |  "
+            f"벤치마크(QQQ) {bd['actual_pct'] - div - (bd['expected_pct'] - bd['beta'] * (bd['actual_pct'] - div)):+.2f}%"
+        ),
+    ]
+
+
+# ─────────────────────────────────────────────
 # 1-2. 시장 대비 상대 강도 분석 (Relative Strength)
 # ─────────────────────────────────────────────
 @dataclass
@@ -1792,6 +1918,13 @@ def run_close():
     closes = fetch_price_history(60)
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
+
+    # 베타 분석 (캐시 우선, 4%+ 급변동 시에만 이격도 의미 있음)
+    beta = get_beta()
+    if beta and price and price.prev_close > 0:
+        qqq_pct = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
+        bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
+        blocks.extend(format_beta_block(bd))
 
     # Safety Margin: 4%+ 급변동 시에만
     if price and price.prev_close > 0 and abs(price.change_pct) >= 4 and closes:
