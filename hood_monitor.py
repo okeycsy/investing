@@ -234,6 +234,7 @@ def fetch_price() -> Optional[PriceData]:
 
         prev_close = closes[-2] if len(closes) >= 2 else 0 
         current = closes[-1] if closes else 0
+      
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
 
         return PriceData(
@@ -1357,7 +1358,15 @@ def run_close():
     log.info(f"내부자 거래 신규: {len(new_insiders)}건 (중복 제외)")
     if new_insiders:
         blocks.extend(format_insider_block(new_insiders))
-
+        state["last_insider_hashes"] = [
+            hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
+            for t in insider_trades[:30]
+        ]
+        for t in new_insiders:
+            ws.setdefault("insider_trades", []).append(
+                f"{t.trade_type}: {t.filer} {t.shares:,}주"
+                + (f" @ ${t.price:.2f}" if t.price > 0 else "")
+            )
     news = fetch_news()
     news = translate_news(news)
     news_blocks = format_news_block(news)
