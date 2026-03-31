@@ -232,9 +232,8 @@ def fetch_price() -> Optional[PriceData]:
         quotes = result["indicators"]["quote"][0]
         closes = [c for c in quotes["close"] if c is not None]
 
-        prev_close = closes[-2] if len(closes) >= 2 else 0 
+        prev_close = closes[-2] if len(closes) >= 2 else 0
         current = closes[-1] if closes else 0
-      
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
 
         return PriceData(
@@ -264,6 +263,102 @@ def fetch_price_history(days: int = 60) -> list:
     except Exception as e:
         log.error(f"Price history error: {e}")
         return []
+
+
+# ─────────────────────────────────────────────
+# 1-2. 시장 대비 상대 강도 분석 (Relative Strength)
+# ─────────────────────────────────────────────
+@dataclass
+class RelativeStrength:
+    hood_pct: float = 0.0
+    qqq_pct: float = 0.0
+    spy_pct: float = 0.0
+    signal: str = ""        # "relative_weakness" | "market_selloff" | "relative_strength" | "neutral"
+    diff_qqq: float = 0.0   # HOOD - QQQ (음수면 HOOD가 더 하락)
+    diff_spy: float = 0.0
+
+
+def _fetch_ticker_change(ticker: str) -> Optional[float]:
+    """전일 종가 대비 당일 변동률 반환 (closes 배열 기준)"""
+    _yahoo_throttle()
+    url = YAHOO_QUOTE_URL.format(ticker=ticker)
+    resp = safe_get(url, params={"interval": "1d", "range": "5d"})
+    if not resp:
+        return None
+    try:
+        data = resp.json()
+        closes = [c for c in data["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c is not None]
+        if len(closes) < 2:
+            return None
+        return round((closes[-1] - closes[-2]) / closes[-2] * 100, 2)
+    except Exception as e:
+        log.debug(f"_fetch_ticker_change({ticker}) error: {e}")
+        return None
+
+
+def check_relative_strength(hood_pct: float) -> Optional[RelativeStrength]:
+    """
+    HOOD 등락률과 QQQ/SPY 벤치마크를 비교해 하락 성격 판별.
+
+    판별 기준 (하락 4% 이상일 때만 의미 있음):
+    - HOOD가 벤치마크보다 2%p 이상 더 하락 → Relative Weakness (개별 악재)
+    - HOOD 하락폭이 벤치마크와 유사 (±2%p 이내) → Market Sell-off (시장 전체 하락)
+
+    상승 시:
+    - HOOD가 벤치마크보다 2%p 이상 더 상승 → Relative Strength (개별 호재)
+    """
+    log.info("Relative Strength 분석 시작...")
+    qqq_pct = _fetch_ticker_change("QQQ")
+    spy_pct = _fetch_ticker_change("SPY")
+
+    if qqq_pct is None or spy_pct is None:
+        log.warning("벤치마크 데이터 fetch 실패 (QQQ/SPY)")
+        return None
+
+    diff_qqq = round(hood_pct - qqq_pct, 2)
+    diff_spy = round(hood_pct - spy_pct, 2)
+    avg_diff = (diff_qqq + diff_spy) / 2
+
+    log.info(f"RS 분석: HOOD {hood_pct:+.2f}% / QQQ {qqq_pct:+.2f}% / SPY {spy_pct:+.2f}% / avg_diff {avg_diff:+.2f}%p")
+
+    # 하락 국면
+    if hood_pct <= -4:
+        signal = "relative_weakness" if avg_diff <= -2 else "market_selloff"
+    # 상승 국면
+    elif hood_pct >= 4:
+        signal = "relative_strength" if avg_diff >= 2 else "market_rally"
+    else:
+        signal = "neutral"
+
+    return RelativeStrength(
+        hood_pct=hood_pct,
+        qqq_pct=qqq_pct,
+        spy_pct=spy_pct,
+        signal=signal,
+        diff_qqq=diff_qqq,
+        diff_spy=diff_spy,
+    )
+
+
+def format_relative_strength_block(rs: RelativeStrength) -> dict:
+    """RS 분석 결과 Slack 블록 포맷"""
+    signal_map = {
+        "relative_weakness": ("🔴 *개별 악재 의심*", "시장보다 크게 하락 — HOOD 자체 요인 가능성 높음"),
+        "market_selloff":    ("🟡 *시장 전체 하락*", "지수와 유사한 낙폭 — 매크로 투매로 판단"),
+        "relative_strength": ("🟢 *개별 호재 감지*", "시장보다 크게 상승 — HOOD 자체 모멘텀 가능성"),
+        "market_rally":      ("🟢 *시장 전체 상승*", "지수와 유사한 상승 — 매크로 반등"),
+        "neutral":           ("⚪ *중립*", "벤치마크 대비 특이 움직임 없음"),
+    }
+    title, desc = signal_map.get(rs.signal, ("⚪", ""))
+    avg_bench = round((rs.qqq_pct + rs.spy_pct) / 2, 2)
+    avg_diff = round((rs.diff_qqq + rs.diff_spy) / 2, 2)
+
+    return {"type": "section", "text": {"type": "mrkdwn", "text": (
+        f"*📐 시장 대비 상대 강도*\n"
+        f"{title} — {desc}\n"
+        f"$HOOD {rs.hood_pct:+.2f}% | QQQ {rs.qqq_pct:+.2f}% / SPY {rs.spy_pct:+.2f}% (벤치 평균 {avg_bench:+.2f}%)\n"
+        f"벤치마크 대비: *{avg_diff:+.2f}%p*"
+    )}}
 
 
 # ─────────────────────────────────────────────
@@ -1243,6 +1338,12 @@ def run_normal():
             label = "상승" if direction == "up" else "하락"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji} *$HOOD {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
+
+            # RS 분석: 4% 이상 급등락 시 시장과 비교
+            rs = check_relative_strength(price.change_pct)
+            if rs:
+                blocks.append(format_relative_strength_block(rs))
+
             state["price_alert_max_pct"] = abs_pct if direction != prev_dir else max(prev_max, abs_pct)
             state["price_alert_direction"] = direction
             ws.setdefault("alerts_fired", []).append(f"주가 {price.change_pct:+.1f}%")
@@ -1325,6 +1426,11 @@ def run_close():
             label = "상승" if direction == "up" else "하락"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_big} *$HOOD 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
+
+            # RS 분석: 종가 4%+ 시 시장 대비 원인 분석
+            rs = check_relative_strength(price.change_pct)
+            if rs:
+                blocks.append(format_relative_strength_block(rs))
         else:
             state["pending_morning_alert"] = None
             # 4% 미만: 방향 이모지만 조용히 표시
