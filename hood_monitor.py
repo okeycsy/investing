@@ -229,9 +229,9 @@ def fetch_price() -> Optional[PriceData]:
         quotes = result["indicators"]["quote"][0]
         closes = [c for c in quotes["close"] if c is not None]
 
-        prev_close = closes[-2] if len(closes) >= 2 else 0
+        prev_close = closes[-2] if len(closes) >= 2 else 0 
         current = closes[-1] if closes else 0
-
+      
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
 
         return PriceData(
@@ -580,18 +580,38 @@ def fetch_insider_trades() -> list:
         log.info(f"Form 4: {len(entries)} filings found via atom feed")
 
         for entry in entries[:10]:
-            filing_href = entry.findtext("atom:filing-href", namespaces=ns) or \
-                          entry.findtext("{http://www.w3.org/2005/Atom}filing-href", default="")
+            # EDGAR atom feed URL 추출 — 태그명이 버전마다 다름
+            filing_href = ""
 
+            # 방법 1: atom:filing-href 네임스페이스
+            filing_href = entry.findtext("atom:filing-href", namespaces=ns) or ""
+
+            # 방법 2: content 태그의 href 속성
             if not filing_href:
                 content = entry.find("atom:content", ns)
                 if content is not None:
                     filing_href = content.get("href", "")
 
+            # 방법 3: entry 내 link 태그에서 Archives/edgar URL 찾기
+            if not filing_href:
+                for link in entry.findall("atom:link", ns):
+                    href = link.get("href", "")
+                    if "Archives/edgar" in href:
+                        filing_href = href
+                        break
+
+            # 방법 4: atom:id (일부 버전에서 URL 포함)
+            if not filing_href:
+                entry_id = entry.findtext("atom:id", namespaces=ns) or ""
+                if "Archives/edgar" in entry_id:
+                    filing_href = entry_id
+
             filing_date = (entry.findtext("atom:updated", namespaces=ns) or "")[:10]
 
             if not filing_href:
-                log.warning("Form 4 entry에 filing-href 없음 — 스킵")
+                # 디버그용: entry 태그 목록 출력
+                tags = [child.tag for child in entry]
+                log.warning(f"Form 4 filing-href 없음 — entry 태그: {tags}")
                 continue
 
             log.info(f"Form 4 index 요청: {filing_href}")
@@ -1293,6 +1313,10 @@ def run_close():
     log.info(f"내부자 거래 신규: {len(new_insiders)}건 (중복 제외)")
     if new_insiders:
         blocks.extend(format_insider_block(new_insiders))
+
+    news = fetch_news()
+    news = translate_news(news)
+    news_blocks = format_news_block(news)
     if news_blocks:
         blocks.extend(news_blocks)
         log.info(f"뉴스 블록 추가: {len(news_blocks)}개")
