@@ -1571,8 +1571,8 @@ def format_volume_profile_block(vp: VolumeProfile) -> list:
     poc_desc = "매물대 상단 (저항)" if vp.poc_signal == "resistance" else "지지선 확보"
     whale = "  🐋 *Whale Activity Detected*" if vp.whale_detected else ""
     return [
-        _sec(f"*📊 수급 구조 (30분)*  {poc_emoji} POC *${vp.poc_price:.2f}* — {poc_desc}{whale}"),
-        _ctx(f"거래량 {vp.vol_30m:,} | 5일평균 {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"),
+        _sec(f"*📊 수급 구조 (30분 POC)*  {poc_emoji} *${vp.poc_price:.2f}* — {poc_desc}{whale}"),
+        _ctx(f"30분 거래량 {vp.vol_30m:,} | 동시간대 5일평균 {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"),
     ]
 
 
@@ -1607,7 +1607,13 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
 # ─────────────────────────────────────────────
 # Slack 전송
 # ─────────────────────────────────────────────
-def send_slack(blocks: list, text: str = "HOOD Monitor"):
+def _footer() -> list:
+    """메시지 끝 구분선 + 타임스탬프"""
+    kst = datetime.now(KST).strftime("%m/%d %H:%M KST")
+    return [
+        {"type": "divider"},
+        _ctx(f"🤖 HOOD Monitor  |  {kst}"),
+    ]
     if not SLACK_WEBHOOK:
         log.warning("SLACK_WEBHOOK_URL not set")
         for b in blocks:
@@ -1712,7 +1718,7 @@ def run_normal():
     if blocks:
         blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
             "text": f"📊 $HOOD — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
-        blocks.append({"type": "divider"})
+        blocks.extend(_footer())
         send_slack(blocks)
     else:
         log.info("No alerts — quiet")
@@ -1837,10 +1843,9 @@ def run_close():
     dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news)
     blocks.extend(format_dca_block(dca))
 
-    kst_now = datetime.now(KST).strftime("%m/%d %H:%M")
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-        "text": f"🔔 $HOOD 장 마감 — {kst_now} KST"}})
-    blocks.append({"type": "divider"})
+        "text": f"🔔 $HOOD 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}}) 
+    blocks.extend(_footer())
     send_slack(blocks)
 
     save_state(state)
