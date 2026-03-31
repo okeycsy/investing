@@ -1762,21 +1762,13 @@ def run_close():
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_big} *$HOOD 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
 
-            # RS 분석
+            # RS 분석 (장 마감 후에도 유효)
             rs = check_relative_strength(price.change_pct)
             if rs:
                 blocks.extend(format_relative_strength_block(rs))
 
-            # Volume Profile
-            vp = analyze_volume_profile(price.current)
-            if vp:
-                blocks.extend(format_volume_profile_block(vp))
-
-            # Safety Margin (볼린저 밴드 + 모멘텀)
-            if closes:
-                sm = check_safety_margin(closes, price.current)
-                if sm:
-                    blocks.extend(format_safety_margin_block(sm))
+            # Volume Profile: 장 마감 후엔 1분봉 없으므로 스킵
+            # Safety Margin은 closes 계산 후 아래서 처리
         else:
             state["pending_morning_alert"] = None
             emoji_dir = "🌤" if direction == "up" else "🌧"
@@ -1784,7 +1776,7 @@ def run_close():
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_dir} 오늘 종가 {mood}"}})
 
-        # 거래량 context (1회만)
+        # 거래량 context
         if price.volume > 0:
             vol_ratio = round(price.volume / price.vol_avg_5d, 2) if price.vol_avg_5d > 0 else 0
             vol_flag = "  🐋 거래량 폭증" if vol_ratio >= 1.5 else ""
@@ -1796,9 +1788,16 @@ def run_close():
         state["price_alert_max_pct"] = 0
         state["price_alert_direction"] = ""
 
+    # closes를 price 블록보다 먼저 fetch (Safety Margin에서도 사용)
     closes = fetch_price_history(60)
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
+
+    # Safety Margin: 4%+ 급변동 시에만
+    if price and price.prev_close > 0 and abs(price.change_pct) >= 4 and closes:
+        sm = check_safety_margin(closes, price.current)
+        if sm:
+            blocks.extend(format_safety_margin_block(sm))
 
     options = fetch_options_pcr()
     if options:
