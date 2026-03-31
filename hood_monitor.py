@@ -61,6 +61,7 @@ class PriceData:
     high: float = 0.0
     low: float = 0.0
     volume: int = 0
+    vol_avg_5d: int = 0      # 최근 5영업일 평균 거래량
     timestamp: str = ""
 
 
@@ -231,10 +232,16 @@ def fetch_price() -> Optional[PriceData]:
         meta = result["meta"]
         quotes = result["indicators"]["quote"][0]
         closes = [c for c in quotes["close"] if c is not None]
+        volumes = [v for v in quotes["volume"] if v is not None]
 
         prev_close = closes[-2] if len(closes) >= 2 else 0
         current = closes[-1] if closes else 0
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
+
+        today_vol = int(meta.get("regularMarketVolume", volumes[-1] if volumes else 0))
+        # 당일 제외한 직전 4일 + 당일 포함 최대 5일 평균
+        past_vols = [v for v in volumes[:-1] if v] if len(volumes) > 1 else []
+        vol_avg_5d = int(sum(past_vols) / len(past_vols)) if past_vols else 0
 
         return PriceData(
             current=round(current, 2),
@@ -242,7 +249,8 @@ def fetch_price() -> Optional[PriceData]:
             change_pct=round(change_pct, 2),
             high=round(max(q for q in quotes["high"] if q), 2) if any(quotes["high"]) else 0,
             low=round(min(q for q in quotes["low"] if q), 2) if any(quotes["low"]) else 0,
-            volume=int(meta.get("regularMarketVolume", 0)),
+            volume=today_vol,
+            vol_avg_5d=vol_avg_5d,
             timestamp=datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
         )
     except Exception as e:
@@ -1014,10 +1022,15 @@ def parse_form4_xml(xml_text: str, filing_date: str, url: str) -> list:
             xml_clean = xml_clean.replace(ns, "")
         root = ET.fromstring(xml_clean)
 
-        reporter = root.find(".//reportingOwner/reportingOwnerId") or root.find(".//reportingOwnerId")
-        filer_name = reporter.findtext("rptOwnerName", "Unknown") if reporter else "Unknown"
-        rel = root.find(".//reportingOwner/reportingOwnerRelationship") or root.find(".//reportingOwnerRelationship")
-        filer_title = rel.findtext("officerTitle", "") if rel else ""
+        reporter = root.find(".//reportingOwner/reportingOwnerId")
+        if reporter is None:
+            reporter = root.find(".//reportingOwnerId")
+        filer_name = reporter.findtext("rptOwnerName", "Unknown") if reporter is not None else "Unknown"
+
+        rel = root.find(".//reportingOwner/reportingOwnerRelationship")
+        if rel is None:
+            rel = root.find(".//reportingOwnerRelationship")
+        filer_title = rel.findtext("officerTitle", "") if rel is not None else ""
 
         for txn in root.findall(".//nonDerivativeTransaction"):
             t = _parse_transaction(txn, filer_name, filer_title, filing_date, url)
@@ -1761,6 +1774,22 @@ def run_close():
             mood = "양전 마감" if direction == "up" else "음전 마감"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_dir} 오늘 종가 {mood}"}})
+
+        # 거래량 요약 (항상 표시)
+        if price.volume > 0:
+            vol_ratio = price.volume / price.vol_avg_5d if price.vol_avg_5d > 0 else 0
+            vol_emoji = "🔥" if vol_ratio >= 1.5 else "📉" if vol_ratio < 0.7 else ""
+            vol_ctx = f"당일 거래량 {price.volume:,} | 5일 평균 {price.vol_avg_5d:,} | *{vol_ratio:.1f}x* {vol_emoji}"
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": vol_ctx}]})
+
+        # 거래량 context (항상 표시)
+        if price.volume > 0:
+            vol_ratio = round(price.volume / price.vol_avg_5d, 2) if price.vol_avg_5d > 0 else 0
+            vol_flag = " 🐋 거래량 폭증" if vol_ratio >= 1.5 else ""
+            vol_ctx = f"당일 거래량 {price.volume:,}"
+            if price.vol_avg_5d > 0:
+                vol_ctx += f" | 5일 평균 {price.vol_avg_5d:,} | *{vol_ratio:.1f}x*{vol_flag}"
+            blocks.append(_ctx(vol_ctx))
 
         state["price_alert_max_pct"] = 0
         state["price_alert_direction"] = ""
