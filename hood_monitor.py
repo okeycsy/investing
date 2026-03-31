@@ -1784,17 +1784,10 @@ def run_close():
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_dir} 오늘 종가 {mood}"}})
 
-        # 거래량 요약 (항상 표시)
-        if price.volume > 0:
-            vol_ratio = price.volume / price.vol_avg_5d if price.vol_avg_5d > 0 else 0
-            vol_emoji = "🔥" if vol_ratio >= 1.5 else "📉" if vol_ratio < 0.7 else ""
-            vol_ctx = f"당일 거래량 {price.volume:,} | 5일 평균 {price.vol_avg_5d:,} | *{vol_ratio:.1f}x* {vol_emoji}"
-            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": vol_ctx}]})
-
-        # 거래량 context (항상 표시)
+        # 거래량 context (1회만)
         if price.volume > 0:
             vol_ratio = round(price.volume / price.vol_avg_5d, 2) if price.vol_avg_5d > 0 else 0
-            vol_flag = " 🐋 거래량 폭증" if vol_ratio >= 1.5 else ""
+            vol_flag = "  🐋 거래량 폭증" if vol_ratio >= 1.5 else ""
             vol_ctx = f"당일 거래량 {price.volume:,}"
             if price.vol_avg_5d > 0:
                 vol_ctx += f" | 5일 평균 {price.vol_avg_5d:,} | *{vol_ratio:.1f}x*{vol_flag}"
@@ -1880,8 +1873,8 @@ def run_morning():
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text":
             f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {label}*"}},
-        {"type": "divider"},
     ]
+    blocks.extend(_footer())
     send_slack(blocks)
 
     # 발송 후 초기화
@@ -1905,7 +1898,7 @@ def run_13f():
             {"type": "divider"},
         ]
         blocks.extend(format_13f_block(new_filings))
-        blocks.append({"type": "divider"})
+        blocks.extend(_footer())
         send_slack(blocks)
 
         state["last_13f_hashes"] = [
@@ -1981,8 +1974,8 @@ def run_weekly():
             "*📰 주간 주요 뉴스*\n" + "\n".join(f"• {h}" for h in news_summary[-5:])}})
 
     blocks.append({"type": "divider"})
-    blocks.append(format_dca_block(dca))
-    blocks.append({"type": "divider"})
+    blocks.extend(format_dca_block(dca))
+    blocks.extend(_footer())
 
     send_slack(blocks)
 
