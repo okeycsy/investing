@@ -231,6 +231,7 @@ def fetch_price() -> Optional[PriceData]:
 
         prev_close = closes[-2] if len(closes) >= 2 else 0
         current = closes[-1] if closes else 0
+
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
 
         return PriceData(
@@ -579,11 +580,9 @@ def fetch_insider_trades() -> list:
         log.info(f"Form 4: {len(entries)} filings found via atom feed")
 
         for entry in entries[:10]:
-            # filing-href: 해당 Form 4 index 페이지 URL
             filing_href = entry.findtext("atom:filing-href", namespaces=ns) or \
                           entry.findtext("{http://www.w3.org/2005/Atom}filing-href", default="")
 
-            # 일부 EDGAR 버전은 content 안에 href가 있음
             if not filing_href:
                 content = entry.find("atom:content", ns)
                 if content is not None:
@@ -592,27 +591,31 @@ def fetch_insider_trades() -> list:
             filing_date = (entry.findtext("atom:updated", namespaces=ns) or "")[:10]
 
             if not filing_href:
+                log.warning("Form 4 entry에 filing-href 없음 — 스킵")
                 continue
 
-            # index 페이지에서 원본 Form 4 XML 파일명 찾기
-            # filing_href 예: https://www.sec.gov/Archives/edgar/data/1783879/000204907726000009/0002049077-26-000009-index.htm
+            log.info(f"Form 4 index 요청: {filing_href}")
             idx_resp = safe_get(filing_href, headers=SEC_HEADERS, retries=1)
             if not idx_resp:
+                log.warning(f"Form 4 index 응답 없음: {filing_href}")
                 continue
 
             xml_url = _find_form4_xml_url(idx_resp.text, filing_href)
             if not xml_url:
-                log.debug(f"Form 4 XML not found in index: {filing_href}")
+                log.warning(f"Form 4 XML 링크 미발견 (index HTML 길이={len(idx_resp.text)}): {filing_href}")
                 continue
 
+            log.info(f"Form 4 XML 요청: {xml_url}")
             xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
             if xml_resp:
                 try:
                     parsed = parse_form4_xml(xml_resp.text, filing_date, xml_url)
                     trades.extend(parsed)
-                    log.info(f"Form 4 parsed: {len(parsed)} trades from {xml_url}")
+                    log.info(f"Form 4 파싱 완료: {len(parsed)}건 — {xml_url}")
                 except Exception as e:
                     log.warning(f"Form 4 parse error: {e}")
+            else:
+                log.warning(f"Form 4 XML 응답 없음: {xml_url}")
 
             time.sleep(0.3)
 
@@ -1283,15 +1286,13 @@ def run_close():
         ws.setdefault("short_readings", []).append(short.short_pct)
 
     insider_trades = fetch_insider_trades()
+    log.info(f"내부자 거래 fetch 결과: 총 {len(insider_trades)}건")
     new_insiders = [t for t in insider_trades
                     if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
                     not in state.get("last_insider_hashes", [])]
+    log.info(f"내부자 거래 신규: {len(new_insiders)}건 (중복 제외)")
     if new_insiders:
         blocks.extend(format_insider_block(new_insiders))
-
-    news = fetch_news()
-    news = translate_news(news)
-    news_blocks = format_news_block(news)
     if news_blocks:
         blocks.extend(news_blocks)
         log.info(f"뉴스 블록 추가: {len(news_blocks)}개")
