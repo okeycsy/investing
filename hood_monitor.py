@@ -362,6 +362,244 @@ def format_relative_strength_block(rs: RelativeStrength) -> dict:
 
 
 # ─────────────────────────────────────────────
+# 1-3. 30분 수급 미세구조 / POC 분석 (Volume Profile)
+# ─────────────────────────────────────────────
+@dataclass
+class VolumeProfile:
+    poc_price: float = 0.0          # Point of Control (거래 집중 가격대)
+    current_price: float = 0.0
+    poc_signal: str = ""            # "resistance" | "support"
+    vol_30m: int = 0                # 최근 30분 거래량
+    vol_avg_30m: int = 0            # 5일 동일 시간대 평균 거래량
+    vol_ratio: float = 0.0          # 현재 / 평균
+    whale_detected: bool = False
+
+
+def _fetch_1m_bars(ticker: str, range_str: str = "1d") -> list:
+    """1분봉 데이터 반환 — [{time, open, high, low, close, volume}, ...]"""
+    _yahoo_throttle()
+    url = YAHOO_QUOTE_URL.format(ticker=ticker)
+    resp = safe_get(url, params={"interval": "1m", "range": range_str})
+    if not resp:
+        return []
+    try:
+        result = resp.json()["chart"]["result"][0]
+        timestamps = result.get("timestamp", [])
+        q = result["indicators"]["quote"][0]
+        bars = []
+        for i, ts in enumerate(timestamps):
+            v = q["volume"][i]
+            c = q["close"][i]
+            if v is None or c is None:
+                continue
+            bars.append({
+                "time": datetime.fromtimestamp(ts, tz=UTC),
+                "close": round(c, 4),
+                "volume": int(v),
+            })
+        return bars
+    except Exception as e:
+        log.debug(f"1m bars fetch error ({ticker}): {e}")
+        return []
+
+
+def analyze_volume_profile(current_price: float) -> Optional[VolumeProfile]:
+    """
+    최근 30분 1분봉 기반 POC 계산 + 5거래일 동일 시간대 평균 거래량 비교.
+
+    POC 계산: 가격을 $0.10 단위로 버킷화 → 거래량 가중 → 최다 거래량 가격대
+    거래량 비교: 5일치 1분봉에서 동일 UTC 시간 구간 평균 추출
+    """
+    log.info("Volume Profile 분석 시작...")
+
+    # 당일 1분봉
+    bars_1d = _fetch_1m_bars(TICKER, "1d")
+    if not bars_1d:
+        log.warning("1분봉 데이터 없음")
+        return None
+
+    now_utc = datetime.now(UTC)
+    cutoff = now_utc - timedelta(minutes=30)
+    recent_bars = [b for b in bars_1d if b["time"] >= cutoff]
+
+    if len(recent_bars) < 5:
+        log.warning(f"최근 30분 데이터 부족: {len(recent_bars)}개")
+        return None
+
+    # ── POC 계산 ──────────────────────────────
+    bucket_size = 0.10   # $0.10 단위
+    vol_by_price: dict = {}
+    for b in recent_bars:
+        bucket = round(round(b["close"] / bucket_size) * bucket_size, 2)
+        vol_by_price[bucket] = vol_by_price.get(bucket, 0) + b["volume"]
+
+    poc_price = max(vol_by_price, key=lambda k: vol_by_price[k])
+    vol_30m = sum(b["volume"] for b in recent_bars)
+
+    log.info(f"POC: ${poc_price:.2f} (현재가 ${current_price:.2f}) | 30분 거래량: {vol_30m:,}")
+
+    # ── 5거래일 동일 시간대 평균 거래량 ──────────
+    bars_5d = _fetch_1m_bars(TICKER, "5d")
+    start_minute = cutoff.hour * 60 + cutoff.minute
+    end_minute   = now_utc.hour * 60 + now_utc.minute
+
+    # 오늘 날짜 제외하고 동일 시간 구간 추출
+    today_date = now_utc.date()
+    past_vols = []
+    day_vol: dict = {}
+    for b in bars_5d:
+        d = b["time"].date()
+        if d == today_date:
+            continue
+        m = b["time"].hour * 60 + b["time"].minute
+        if start_minute <= m <= end_minute:
+            day_vol.setdefault(d, 0)
+            day_vol[d] += b["volume"]
+
+    past_vols = list(day_vol.values())
+    vol_avg_30m = int(sum(past_vols) / len(past_vols)) if past_vols else 0
+    vol_ratio = round(vol_30m / vol_avg_30m, 2) if vol_avg_30m > 0 else 0.0
+
+    log.info(f"5일 평균 동시간대 거래량: {vol_avg_30m:,} | 비율: {vol_ratio:.2f}x")
+
+    poc_signal = "resistance" if current_price < poc_price else "support"
+    whale = vol_ratio >= 1.5
+
+    return VolumeProfile(
+        poc_price=poc_price,
+        current_price=current_price,
+        poc_signal=poc_signal,
+        vol_30m=vol_30m,
+        vol_avg_30m=vol_avg_30m,
+        vol_ratio=vol_ratio,
+        whale_detected=whale,
+    )
+
+
+def format_volume_profile_block(vp: VolumeProfile) -> dict:
+    poc_desc = (
+        f"🔴 *매물대 상단* — POC(${vp.poc_price:.2f}) 아래"
+        if vp.poc_signal == "resistance"
+        else f"🟢 *지지선 확보* — POC(${vp.poc_price:.2f}) 위"
+    )
+    whale_line = "\n🐋 *Whale Activity Detected* — 평균 대비 거래량 폭증" if vp.whale_detected else ""
+    return {"type": "section", "text": {"type": "mrkdwn", "text": (
+        f"*📊 수급 미세구조 (최근 30분)*\n"
+        f"POC: *${vp.poc_price:.2f}* {poc_desc}\n"
+        f"거래량: {vp.vol_30m:,} | 5일평균: {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"
+        f"{whale_line}"
+    )}}
+
+
+# ─────────────────────────────────────────────
+# 1-4. 안전 마진 / 하락 모멘텀 측정 (Safety Margin)
+# ─────────────────────────────────────────────
+@dataclass
+class SafetyMargin:
+    sma20: float = 0.0
+    bb_upper: float = 0.0
+    bb_lower: float = 0.0
+    current_price: float = 0.0
+    bb_signal: str = ""          # "extreme_oversold" | "oversold" | "normal" | "overbought"
+    momentum_signal: str = ""    # "accelerating" | "decelerating" | "stable"
+    pct_from_lower: float = 0.0  # 현재가가 하단밴드 대비 몇 % 위/아래
+    mom_30m_prev: float = 0.0    # 30~60분 전 구간 변화율
+    mom_30m_curr: float = 0.0    # 최근 30분 변화율
+
+
+def check_safety_margin(closes_daily: list, current_price: float) -> Optional[SafetyMargin]:
+    """
+    볼린저 밴드(20일 SMA ± 2σ) + 30분 모멘텀 기울기 분석.
+
+    BB 판별:
+    - 현재가 < 하단밴드 AND 등락 -4% 이하 → Extreme Oversold (기술적 반등 가능)
+    - 현재가 < 하단밴드 → Oversold
+    - 현재가 > 상단밴드 → Overbought
+
+    모멘텀 판별 (1분봉 기준):
+    - 최근 30분 변화율 vs 직전 30분 변화율 비교
+    - 하락 가속(Accelerating): DCA 집행 위험 높음
+    - 하락 둔화(Decelerating): 저점 탐색 중, 진입 타이밍 탐색 가능
+    """
+    log.info("Safety Margin 분석 시작...")
+
+    if len(closes_daily) < 20:
+        log.warning(f"볼린저 밴드 계산 불가: 데이터 {len(closes_daily)}일 (최소 20일 필요)")
+        return None
+
+    # ── 볼린저 밴드 계산 ──────────────────────────
+    window = closes_daily[-20:]
+    sma20 = sum(window) / 20
+    variance = sum((p - sma20) ** 2 for p in window) / 20
+    std = variance ** 0.5
+    bb_upper = sma20 + 2 * std
+    bb_lower = sma20 - 2 * std
+
+    pct_from_lower = round((current_price - bb_lower) / bb_lower * 100, 2)
+
+    if current_price < bb_lower:
+        bb_signal = "extreme_oversold"
+    elif current_price > bb_upper:
+        bb_signal = "overbought"
+    elif pct_from_lower < 2:
+        bb_signal = "oversold"
+    else:
+        bb_signal = "normal"
+
+    log.info(f"BB: SMA20=${sma20:.2f} 상단=${bb_upper:.2f} 하단=${bb_lower:.2f} | 현재가=${current_price:.2f} ({pct_from_lower:+.2f}%)")
+
+    # ── 30분 모멘텀 기울기 ────────────────────────
+    bars = _fetch_1m_bars(TICKER, "1d")
+    now_utc = datetime.now(UTC)
+
+    def price_at(minutes_ago: int) -> Optional[float]:
+        target = now_utc - timedelta(minutes=minutes_ago)
+        # target 시각과 가장 가까운 바 탐색 (±3분 허용)
+        candidates = [(abs((b["time"] - target).total_seconds()), b["close"]) for b in bars]
+        if not candidates:
+            return None
+        closest = min(candidates, key=lambda x: x[0])
+        return closest[1] if closest[0] <= 180 else None
+
+    price_now  = current_price
+    price_30m  = price_at(30)
+    price_60m  = price_at(60)
+
+    if price_30m and price_60m and price_30m > 0 and price_60m > 0:
+        mom_curr = (price_now - price_30m) / price_30m * 100   # 최근 30분
+        mom_prev = (price_30m - price_60m) / price_60m * 100   # 직전 30분
+
+        # 하락 국면에서 판별
+        if mom_curr < 0 and mom_prev < 0:
+            momentum_signal = "accelerating" if mom_curr < mom_prev else "decelerating"
+        elif mom_curr > 0 and mom_prev < 0:
+            momentum_signal = "decelerating"
+        elif abs(mom_curr) < 0.3:
+            momentum_signal = "stable"
+        else:
+            momentum_signal = "stable"
+
+        log.info(f"모멘텀: 직전30분 {mom_prev:+.2f}% → 최근30분 {mom_curr:+.2f}% → {momentum_signal}")
+    else:
+        mom_curr = 0.0
+        mom_prev = 0.0
+        momentum_signal = "stable"
+        log.warning("30분/60분 전 가격 데이터 부족 — 모멘텀 분석 스킵")
+
+    return SafetyMargin(
+        sma20=round(sma20, 2),
+        bb_upper=round(bb_upper, 2),
+        bb_lower=round(bb_lower, 2),
+        current_price=current_price,
+        bb_signal=bb_signal,
+        momentum_signal=momentum_signal,
+        pct_from_lower=pct_from_lower,
+        mom_30m_prev=round(mom_prev, 2),
+        mom_30m_curr=round(mom_curr, 2),
+    )
+
+
+# ─────────────────────────────────────────────
 # 2. 뉴스 (BUG 2 FIX: 관련성 필터 + 한국어 강제)
 # ─────────────────────────────────────────────
 def fetch_news() -> list:
@@ -1183,49 +1421,69 @@ def _is_recent(date_str: str, days: int) -> bool:
 
 
 # ─────────────────────────────────────────────
-# Slack 포맷터
+# Slack 포맷터 (Section + Context 구조)
 # ─────────────────────────────────────────────
-def format_technicals_block(ts: TechnicalSignals) -> dict:
-    lines = []
+def _ctx(text: str) -> dict:
+    """Context 블록 헬퍼 — 작은 글씨 보조 정보"""
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+
+
+def _sec(text: str, fields: list = None) -> dict:
+    """Section 블록 헬퍼. fields 있으면 2열 레이아웃"""
+    block = {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+    if fields:
+        block["fields"] = [{"type": "mrkdwn", "text": f} for f in fields]
+    return block
+
+
+def format_technicals_block(ts: TechnicalSignals) -> list:
     if ts.rsi_14 <= 30:
-        lines.append(f"🟢 *과매도 구간* (RSI {ts.rsi_14}) — DCA 추가매수 타이밍 가능")
+        rsi_line = f"🟢 *RSI {ts.rsi_14}* — 과매도, DCA 타이밍 가능"
     elif ts.rsi_14 <= 40:
-        lines.append(f"🟡 *약세 흐름* (RSI {ts.rsi_14}) — 매수 관심 구간")
+        rsi_line = f"🟡 *RSI {ts.rsi_14}* — 약세, 매수 관심"
     elif ts.rsi_14 >= 70:
-        lines.append(f"🔴 *과열 구간* (RSI {ts.rsi_14}) — 추격 매수 자제")
+        rsi_line = f"🔴 *RSI {ts.rsi_14}* — 과열, 추격 자제"
     else:
-        lines.append(f"⚪ *중립* (RSI {ts.rsi_14})")
+        rsi_line = f"⚪ *RSI {ts.rsi_14}* — 중립"
 
+    macd_line = ""
     if ts.macd_alert == "bullish_cross":
-        lines.append("🟢 *MACD 골든크로스* — 상승 전환 시그널")
+        macd_line = "  🟢 MACD 골든크로스"
     elif ts.macd_alert == "bearish_cross":
-        lines.append("🔴 *MACD 데드크로스* — 하락 전환 시그널")
+        macd_line = "  🔴 MACD 데드크로스"
 
-    return {"type": "section", "text": {"type": "mrkdwn", "text": "*📊 기술 지표*\n" + "\n".join(lines)}}
-
-
-def format_options_block(od: OptionsData) -> dict:
-    sig = {"heavy_hedging": "🟡 과도한 풋 헤징 (역발상 매수 시그널)", "bullish": "🟢 콜 우세 (낙관)", "neutral": "⚪ 중립"}
-    return {"type": "section", "text": {"type": "mrkdwn", "text": (
-        f"*📈 옵션 시장*\nPCR: *{od.pcr:.3f}* — {sig.get(od.pcr_signal, '')}\n"
-        f"풋 OI: {od.total_puts:,} | 콜 OI: {od.total_calls:,}"
-    )}}
+    return [
+        _sec(f"*📊 기술 지표*\n{rsi_line}{macd_line}"),
+        _ctx(f"MACD {ts.macd_line:+.4f} | Signal {ts.macd_signal:+.4f} | Hist {ts.macd_histogram:+.4f}"),
+    ]
 
 
-def format_short_block(si: ShortInterestData) -> dict:
+def format_options_block(od: OptionsData) -> list:
+    sig = {
+        "heavy_hedging": "🟡 과도한 풋 헤징",
+        "bullish": "🟢 콜 우세",
+        "neutral": "⚪ 중립",
+    }
+    return [
+        _sec(f"*📈 옵션 시장*  PCR: *{od.pcr:.3f}* — {sig.get(od.pcr_signal, '')}"),
+        _ctx(f"풋 OI {od.total_puts:,} | 콜 OI {od.total_calls:,}"),
+    ]
+
+
+def format_short_block(si: ShortInterestData) -> list:
     emoji = "🔴" if si.signal == "high_short" else "⚪"
-    return {"type": "section", "text": {"type": "mrkdwn", "text": (
-        f"*🩳 공매도* ({si.date})\n{emoji} 비율: *{si.short_pct:.1f}%*"
-    )}}
+    return [
+        _sec(f"*🩳 공매도*  {emoji} *{si.short_pct:.1f}%*"),
+        _ctx(f"기준일 {si.date} | 공매도 {si.short_volume:,} / 총 {si.total_volume:,}"),
+    ]
 
 
 def format_insider_block(trades: list) -> list:
     if not trades:
         return []
-    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*🕴 내부자 거래*"}}]
+    lines = []
     for t in trades[:5]:
-        emoji = "🟢 매수" if t.trade_type == "Purchase" else "🔴 매도"
-        # 규모: total_value 기준 (price 있을 때), 없으면 주식 수 기준
+        emoji = "🟢" if t.trade_type == "Purchase" else "🔴"
         if t.total_value >= 1_000_000:
             scale = "대규모"
         elif t.total_value >= 100_000:
@@ -1233,54 +1491,104 @@ def format_insider_block(trades: list) -> list:
         elif t.total_value > 0:
             scale = "소규모"
         else:
-            # price=0인 경우 주식 수로 판단
             scale = "대규모" if t.shares >= 50_000 else "중규모" if t.shares >= 5_000 else "소규모"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            f"{emoji} — *{t.filer}* ({t.title})\n"
-            f"{t.shares:,}주" + (f" @ ${t.price:.2f}" if t.price > 0 else "") + f" | {scale} | {t.date}"}})
-    return blocks
+        price_str = f" @ ${t.price:.2f}" if t.price > 0 else ""
+        lines.append(f"{emoji} *{t.filer}* ({t.title})  {t.shares:,}주{price_str} {scale} _{t.date}_")
+    return [_sec("*🕴 내부자 거래*\n" + "\n".join(lines))]
 
 
 def format_13f_block(filings: list) -> list:
-    """BUG 3 FIX: 주식 수 / 평가금액 표시"""
     if not filings:
         return []
-    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*🏛 13F 기관 포지션*"}}]
-    for f in filings[:8]:
+    lines = []
+    for f in filings[:6]:
         detail = ""
         if f.shares > 0:
             val_str = f"${f.value_usd/1_000_000:.1f}M" if f.value_usd >= 1_000_000 else f"${f.value_usd:,.0f}"
-            detail = f" | {f.shares:,}주 / {val_str}"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            f"📋 *{f.institution}*{detail}\n제출일: {f.filing_date} | <{f.url}|SEC 보기>"}})
-    return blocks
+            detail = f"  {f.shares:,}주 / {val_str}"
+        lines.append(f"📋 *{f.institution}*{detail}  _{f.filing_date}_")
+    return [
+        _sec("*🏛 13F 기관 포지션*\n" + "\n".join(lines)),
+    ]
 
 
 def format_news_block(news: list) -> list:
-    """BUG 2 FIX: skip 된 뉴스 제외, 한국어만 표시"""
     relevant = [n for n in news if not n.get("skip") and n.get("summary")]
     if not relevant:
         return []
     lines = []
     for n in relevant[:5]:
-        tag = "🟢 호재" if n.get("sentiment") == "positive" else "🔴 악재" if n.get("sentiment") == "negative" else "⚪ 중립"
-        lines.append(f"• {tag} — {n['summary']}")
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": "*📰 뉴스 요약*\n" + "\n".join(lines)}}]
+        tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
+        lines.append(f"{tag} {n['summary']}")
+    return [_sec("*📰 뉴스*\n" + "\n".join(lines))]
 
 
-def format_dca_block(signal: DCASignal) -> dict:
-    """BUG 4 FIX: verdict(결론) 맨 위에 강조"""
+def format_dca_block(signal: DCASignal) -> list:
     bar_filled = signal.score // 5
     bar = ("🟩" if signal.score >= 60 else "🟨" if signal.score >= 40 else "🟥") * bar_filled + "⬜" * (20 - bar_filled)
-    text = (
-        f"*🎯 DCA 시그널: {signal.score}/100*\n"
-        f"{bar}\n"
-        f"*{signal.verdict}*\n"
-        f"{signal.summary}"
-    )
-    if signal.factors:
-        text += "\n" + "\n".join(f"  • {f}" for f in signal.factors[:4])
-    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+    factors_text = "\n".join(f"• {f}" for f in signal.factors[:3]) if signal.factors else ""
+    blocks = [
+        _sec(
+            f"*🎯 DCA 시그널: {signal.score}/100*\n{bar}\n*{signal.verdict}*\n{signal.summary}",
+        ),
+    ]
+    if factors_text:
+        blocks.append(_ctx(factors_text))
+    return blocks
+
+
+def format_relative_strength_block(rs: RelativeStrength) -> list:
+    signal_map = {
+        "relative_weakness": "🔴 *개별 악재 의심* — 시장보다 크게 하락",
+        "market_selloff":    "🟡 *시장 전체 하락* — 매크로 투매",
+        "relative_strength": "🟢 *개별 호재 감지* — 시장보다 크게 상승",
+        "market_rally":      "🟢 *시장 전체 상승* — 매크로 반등",
+        "neutral":           "⚪ *중립* — 벤치마크 대비 특이 없음",
+    }
+    avg_bench = round((rs.qqq_pct + rs.spy_pct) / 2, 2)
+    avg_diff = round((rs.diff_qqq + rs.diff_spy) / 2, 2)
+    return [
+        _sec(f"*📐 상대 강도*  {signal_map.get(rs.signal, '')}"),
+        _ctx(f"$HOOD {rs.hood_pct:+.2f}%  |  QQQ {rs.qqq_pct:+.2f}% / SPY {rs.spy_pct:+.2f}% (벤치 {avg_bench:+.2f}%)  |  차이 *{avg_diff:+.2f}%p*"),
+    ]
+
+
+def format_volume_profile_block(vp: VolumeProfile) -> list:
+    poc_emoji = "🔴" if vp.poc_signal == "resistance" else "🟢"
+    poc_desc = "매물대 상단 (저항)" if vp.poc_signal == "resistance" else "지지선 확보"
+    whale = "  🐋 *Whale Activity Detected*" if vp.whale_detected else ""
+    return [
+        _sec(f"*📊 수급 구조 (30분)*  {poc_emoji} POC *${vp.poc_price:.2f}* — {poc_desc}{whale}"),
+        _ctx(f"거래량 {vp.vol_30m:,} | 5일평균 {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"),
+    ]
+
+
+def format_safety_margin_block(sm: SafetyMargin) -> list:
+    # 볼린저 밴드 시그널
+    bb_map = {
+        "extreme_oversold": "🟢 *Extreme Oversold* — 밴드 하단 이탈, 기술적 반등 가능성",
+        "oversold":         "🟡 *밴드 하단 근접* — 과매도 경계",
+        "overbought":       "🔴 *밴드 상단 돌파* — 과매수",
+        "normal":           "⚪ *밴드 내 정상*",
+    }
+    bb_line = bb_map.get(sm.bb_signal, "")
+
+    # 모멘텀 시그널
+    mom_map = {
+        "accelerating":  "📉 *하락 가속* — DCA 집행 시점 아님, 추가 하락 주의",
+        "decelerating":  "📈 *하락 둔화* — 저점 탐색 중, 진입 타이밍 탐색 가능",
+        "stable":        "➡️ *모멘텀 안정*",
+    }
+    mom_line = mom_map.get(sm.momentum_signal, "")
+
+    return [
+        _sec(f"*🛡 안전 마진 분석*\n{bb_line}\n{mom_line}"),
+        _ctx(
+            f"BB 하단 ${sm.bb_lower:.2f} | SMA20 ${sm.sma20:.2f} | BB 상단 ${sm.bb_upper:.2f}  |  "
+            f"밴드 하단 대비 *{sm.pct_from_lower:+.2f}%*  |  "
+            f"모멘텀 직전30분 {sm.mom_30m_prev:+.2f}% → 최근30분 {sm.mom_30m_curr:+.2f}%"
+        ),
+    ]
 
 
 # ─────────────────────────────────────────────
@@ -1339,10 +1647,15 @@ def run_normal():
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji} *$HOOD {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
 
-            # RS 분석: 4% 이상 급등락 시 시장과 비교
+            # RS 분석
             rs = check_relative_strength(price.change_pct)
             if rs:
-                blocks.append(format_relative_strength_block(rs))
+                blocks.extend(format_relative_strength_block(rs))
+
+            # Volume Profile
+            vp = analyze_volume_profile(price.current)
+            if vp:
+                blocks.extend(format_volume_profile_block(vp))
 
             state["price_alert_max_pct"] = abs_pct if direction != prev_dir else max(prev_max, abs_pct)
             state["price_alert_direction"] = direction
@@ -1354,7 +1667,7 @@ def run_normal():
         state["price_history"] = closes[-60:]
         technicals = get_technical_signals(closes)
         if technicals.rsi_alert or technicals.macd_alert:
-            blocks.append(format_technicals_block(technicals))
+            blocks.extend(format_technicals_block(technicals))
         ws.setdefault("rsi_readings", []).append(technicals.rsi_14)
 
     news = fetch_news()
@@ -1427,13 +1740,23 @@ def run_close():
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_big} *$HOOD 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
 
-            # RS 분석: 종가 4%+ 시 시장 대비 원인 분석
+            # RS 분석
             rs = check_relative_strength(price.change_pct)
             if rs:
-                blocks.append(format_relative_strength_block(rs))
+                blocks.extend(format_relative_strength_block(rs))
+
+            # Volume Profile
+            vp = analyze_volume_profile(price.current)
+            if vp:
+                blocks.extend(format_volume_profile_block(vp))
+
+            # Safety Margin (볼린저 밴드 + 모멘텀)
+            if closes:
+                sm = check_safety_margin(closes, price.current)
+                if sm:
+                    blocks.extend(format_safety_margin_block(sm))
         else:
             state["pending_morning_alert"] = None
-            # 4% 미만: 방향 이모지만 조용히 표시
             emoji_dir = "🌤" if direction == "up" else "🌧"
             mood = "양전 마감" if direction == "up" else "음전 마감"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
@@ -1444,16 +1767,16 @@ def run_close():
 
     closes = fetch_price_history(60)
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
-    blocks.append(format_technicals_block(technicals))
+    blocks.extend(format_technicals_block(technicals))
 
     options = fetch_options_pcr()
     if options:
-        blocks.append(format_options_block(options))
+        blocks.extend(format_options_block(options))
         ws.setdefault("pcr_readings", []).append(options.pcr)
 
     short = fetch_short_interest()
     if short:
-        blocks.append(format_short_block(short))
+        blocks.extend(format_short_block(short))
         ws.setdefault("short_readings", []).append(short.short_pct)
 
     insider_trades = fetch_insider_trades()
@@ -1483,10 +1806,11 @@ def run_close():
         log.info("표시할 관련 뉴스 없음")
 
     dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news)
-    blocks.append(format_dca_block(dca))
+    blocks.extend(format_dca_block(dca))
 
+    kst_now = datetime.now(KST).strftime("%m/%d %H:%M")
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-        "text": f"🔔 $HOOD 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
+        "text": f"🔔 $HOOD 장 마감 — {kst_now} KST"}})
     blocks.append({"type": "divider"})
     send_slack(blocks)
 
