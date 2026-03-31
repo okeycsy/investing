@@ -296,9 +296,11 @@ def translate_news(news: list) -> list:
     - 관련 없으면 skip 표시
     """
     if not news or not ANTHROPIC_API_KEY:
+        log.info(f"translate_news skip — news:{len(news)} api_key:{'있음' if ANTHROPIC_API_KEY else '없음'}")
         return news
 
     titles = "\n".join(f"{i+1}. {n['title']}" for i, n in enumerate(news))
+    log.info(f"Claude API 호출: 뉴스 번역 ({len(news)}건)")
     prompt = f"""당신은 $HOOD(Robinhood Markets) 투자 알림 봇입니다.
 아래 뉴스 헤드라인 목록을 분석해주세요.
 
@@ -333,6 +335,7 @@ def translate_news(news: list) -> list:
             timeout=30,
         )
         if resp.status_code != 200:
+            log.error(f"Claude API 오류 (뉴스 번역): HTTP {resp.status_code} — {resp.text[:200]}")
             return news
 
         text = ""
@@ -341,6 +344,10 @@ def translate_news(news: list) -> list:
                 text += block["text"]
         text = text.strip().replace("```json", "").replace("```", "").strip()
         results = json.loads(text)
+
+        relevant = sum(1 for r in results if r.get("relevant", False))
+        skipped = len(results) - relevant
+        log.info(f"뉴스 번역 완료: 총 {len(results)}건 — 관련 {relevant}건 / 스킵 {skipped}건")
 
         for item in results:
             idx = item.get("idx", 0) - 1
@@ -352,7 +359,7 @@ def translate_news(news: list) -> list:
                 news[idx]["summary"] = item.get("summary", "")
                 news[idx]["sentiment"] = item.get("sentiment", "neutral")
     except Exception as e:
-        log.warning(f"News translation error: {e}")
+        log.warning(f"뉴스 번역 예외: {e}")
 
     return news
 
@@ -849,14 +856,19 @@ def _extract_hood_from_infotable(xml_text: str) -> tuple:
 # ─────────────────────────────────────────────
 def calculate_dca_signal(price, technicals, options, short_interest, insider_trades, news) -> DCASignal:
     score, factors = _rule_based_dca_score(price, technicals, options, short_interest, insider_trades)
+    log.info(f"DCA 규칙기반 점수: {score}/100")
 
     if ANTHROPIC_API_KEY:
+        log.info("Claude API 호출: DCA 분석")
         try:
             ai = _claude_dca_analysis(technicals, options, short_interest, insider_trades, news, score, factors)
             if ai:
+                log.info(f"DCA AI 분석 완료: {ai.score}/100 — {ai.verdict}")
                 return ai
         except Exception as e:
             log.warning(f"Claude DCA fallback: {e}")
+    else:
+        log.info("ANTHROPIC_API_KEY 없음 — 규칙기반 DCA 사용")
 
     return DCASignal(
         score=score,
@@ -936,8 +948,8 @@ def _claude_dca_analysis(technicals, options, short_interest, insider_trades, ne
 - RSI(14): {technicals.rsi_14} ({'과매도' if technicals.rsi_14 <= 30 else '과매수' if technicals.rsi_14 >= 70 else '중립'})
 - MACD 히스토그램: {technicals.macd_histogram:.4f} (양수=상승모멘텀)
 - MACD 시그널: {technicals.macd_alert or "없음"}
-- 옵션 PCR: {options.pcr:.3f if options else "N/A"} ({options.pcr_signal if options else ""})
-- 공매도 비율: {short_interest.short_pct:.1f}% if short_interest else "N/A"
+- 옵션 PCR: {f"{options.pcr:.3f} ({options.pcr_signal})" if options else "N/A"}
+- 공매도 비율: {f"{short_interest.short_pct:.1f}%" if short_interest else "N/A"}
 - 내부자 매수: {sum(1 for t in insider_trades if t.trade_type == "Purchase")}건 / 매도: {sum(1 for t in insider_trades if t.trade_type == "Sale")}건
 - 규칙기반 DCA 점수: {rule_score}/100
 
@@ -965,6 +977,7 @@ def _claude_dca_analysis(technicals, options, short_interest, insider_trades, ne
         timeout=30,
     )
     if resp.status_code != 200:
+        log.error(f"Claude API 오류 (DCA 분석): HTTP {resp.status_code} — {resp.text[:200]}")
         return None
 
     text = ""
