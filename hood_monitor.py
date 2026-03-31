@@ -467,73 +467,104 @@ def fetch_short_interest() -> Optional[ShortInterestData]:
 
 
 # ─────────────────────────────────────────────
-# 6. 내부자 거래 (Form 4)
+# 6. 내부자 거래 (Form 4) — EDGAR atom feed 방식
 # ─────────────────────────────────────────────
 def fetch_insider_trades() -> list:
+    """
+    EDGAR company search atom feed로 Form 4 목록을 가져온 뒤
+    각 filing의 index 페이지에서 원본 XML을 직접 찾아 파싱.
+    filing agent CIK 경로 404 문제 해결.
+    """
     trades = []
     try:
-        url = f"https://data.sec.gov/submissions/CIK{CIK_PADDED}.json"
-        resp = safe_get(url, headers=SEC_HEADERS)
+        # atom feed: Robinhood(CIK)가 issuer인 Form 4 목록
+        resp = safe_get(
+            "https://www.sec.gov/cgi-bin/browse-edgar",
+            headers=SEC_HEADERS,
+            params={
+                "action": "getcompany",
+                "CIK": CIK_PADDED,
+                "type": "4",
+                "dateb": "",
+                "owner": "include",
+                "count": "10",
+                "output": "atom",
+            },
+        )
         if not resp:
+            log.warning("Form 4 atom feed fetch failed")
             return trades
 
-        data = resp.json()
-        recent = data.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])
-        accessions = recent.get("accessionNumber", [])
-        dates = recent.get("filingDate", [])
-        primary_docs = recent.get("primaryDocument", [])
+        root = ET.fromstring(resp.text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entries = root.findall("atom:entry", ns)
+        log.info(f"Form 4: {len(entries)} filings found via atom feed")
 
-        checked = 0
-        for i, form in enumerate(forms):
-            if form != "4":
+        for entry in entries[:10]:
+            # filing-href: 해당 Form 4 index 페이지 URL
+            filing_href = entry.findtext("atom:filing-href", namespaces=ns) or \
+                          entry.findtext("{http://www.w3.org/2005/Atom}filing-href", default="")
+
+            # 일부 EDGAR 버전은 content 안에 href가 있음
+            if not filing_href:
+                content = entry.find("atom:content", ns)
+                if content is not None:
+                    filing_href = content.get("href", "")
+
+            filing_date = (entry.findtext("atom:updated", namespaces=ns) or "")[:10]
+
+            if not filing_href:
                 continue
-            if checked >= 20:
-                break
-            checked += 1
 
-            acc_raw = accessions[i]          # "0002049077-26-000009"
-            acc = acc_raw.replace("-", "")   # "000204907726000009"
-            filing_date = dates[i]
-            xml_resp = None
+            # index 페이지에서 원본 Form 4 XML 파일명 찾기
+            # filing_href 예: https://www.sec.gov/Archives/edgar/data/1783879/000204907726000009/0002049077-26-000009-index.htm
+            idx_resp = safe_get(filing_href, headers=SEC_HEADERS, retries=1)
+            if not idx_resp:
+                continue
 
-            # Form 4는 신고자(내부자) CIK 경로에 파일이 있음
-            # accession 번호 앞 10자리가 신고자 CIK
-            filer_cik = acc_raw.split("-")[0].lstrip("0") or "0"
+            xml_url = _find_form4_xml_url(idx_resp.text, filing_href)
+            if not xml_url:
+                log.debug(f"Form 4 XML not found in index: {filing_href}")
+                continue
 
-            idx_url = f"https://data.sec.gov/Archives/edgar/data/{filer_cik}/{acc}/index.json"
-            idx_resp = safe_get(idx_url, headers=SEC_HEADERS, retries=1)
-            if idx_resp:
-                try:
-                    for item in idx_resp.json().get("directory", {}).get("item", []):
-                        name = item.get("name", "")
-                        if (name.endswith(".xml")
-                                and "xsl" not in name.lower()
-                                and not name.startswith("R")
-                                and "Financial" not in name):
-                            xml_url = f"https://data.sec.gov/Archives/edgar/data/{filer_cik}/{acc}/{name}"
-                            xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
-                            if xml_resp:
-                                break
-                except Exception:
-                    pass
-
-            if not xml_resp:
-                prim = primary_docs[i].split("/")[-1]
-                xml_url = f"https://data.sec.gov/Archives/edgar/data/{filer_cik}/{acc}/{prim}"
-                xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
-
+            xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
             if xml_resp:
                 try:
-                    trades.extend(parse_form4_xml(xml_resp.text, filing_date, xml_url))
+                    parsed = parse_form4_xml(xml_resp.text, filing_date, xml_url)
+                    trades.extend(parsed)
+                    log.info(f"Form 4 parsed: {len(parsed)} trades from {xml_url}")
                 except Exception as e:
                     log.warning(f"Form 4 parse error: {e}")
 
-            time.sleep(0.2)
+            time.sleep(0.3)
 
     except Exception as e:
         log.error(f"Insider fetch error: {e}")
     return trades
+
+
+def _find_form4_xml_url(index_html: str, index_url: str) -> str:
+    """
+    Form 4 index HTML에서 원본 XML 파일 URL 추출.
+    예: .../0002049077-26-000009-index.htm 페이지에서
+        wk-form4_xxxx.xml 링크 찾기
+    """
+    import re
+    # base URL: index URL에서 파일명 제거
+    base = index_url.rsplit("/", 1)[0] + "/"
+
+    # href에서 .xml 파일 찾기 (xsl 렌더링 경로 제외)
+    for href in re.findall(r'href=["\']([^"\']+)["\']', index_html):
+        name = href.split("/")[-1]
+        if (name.endswith(".xml")
+                and "xsl" not in name.lower()
+                and not name.startswith("R")
+                and "Financial" not in name):
+            # 절대 경로면 그대로, 상대 경로면 base 붙이기
+            if href.startswith("http"):
+                return href
+            return "https://www.sec.gov" + href if href.startswith("/") else base + name
+    return ""
 
 
 def parse_form4_xml(xml_text: str, filing_date: str, url: str) -> list:
