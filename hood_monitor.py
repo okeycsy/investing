@@ -410,15 +410,52 @@ def get_technical_signals(closes: list) -> TechnicalSignals:
 
 
 # ─────────────────────────────────────────────
-# 4. 옵션 PCR
+# 4. 옵션 PCR (Yahoo crumb 인증 + CBOE fallback)
 # ─────────────────────────────────────────────
-def fetch_options_pcr() -> Optional[OptionsData]:
+_yahoo_session: Optional[requests.Session] = None
+_yahoo_crumb: str = ""
+
+
+def _get_yahoo_crumb() -> tuple:
+    """Yahoo 쿠키 세션 + crumb 토큰 취득"""
+    global _yahoo_session, _yahoo_crumb
+    if _yahoo_session and _yahoo_crumb:
+        return _yahoo_session, _yahoo_crumb
+    try:
+        s = requests.Session()
+        s.get("https://fc.yahoo.com", headers={"User-Agent": BROWSER_UA}, timeout=10)
+        r = s.get(
+            "https://query1.finance.yahoo.com/v1/test/getcrumb",
+            headers={"User-Agent": BROWSER_UA},
+            timeout=10,
+        )
+        if r.status_code == 200 and r.text.strip():
+            _yahoo_session = s
+            _yahoo_crumb = r.text.strip()
+            log.info(f"Yahoo crumb OK: {_yahoo_crumb[:8]}...")
+        else:
+            log.warning(f"Yahoo crumb failed: {r.status_code}")
+    except Exception as e:
+        log.warning(f"Yahoo crumb error: {e}")
+    return _yahoo_session, _yahoo_crumb
+
+
+def _fetch_pcr_yahoo() -> Optional[OptionsData]:
+    """Yahoo v7 options API (crumb 인증)"""
     _yahoo_throttle()
-    url = f"https://query1.finance.yahoo.com/v7/finance/options/{TICKER}"
-    resp = safe_get(url)
-    if not resp:
+    session, crumb = _get_yahoo_crumb()
+    if not session or not crumb:
         return None
     try:
+        resp = session.get(
+            f"https://query1.finance.yahoo.com/v7/finance/options/{TICKER}",
+            params={"crumb": crumb},
+            headers={"User-Agent": BROWSER_UA},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            log.warning(f"Yahoo options {resp.status_code}")
+            return None
         options = resp.json()["optionChain"]["result"][0]["options"]
         put_oi = sum(p.get("openInterest", 0) for chain in options for p in chain.get("puts", []))
         call_oi = sum(c.get("openInterest", 0) for chain in options for c in chain.get("calls", []))
@@ -429,8 +466,42 @@ def fetch_options_pcr() -> Optional[OptionsData]:
         od.pcr_signal = "heavy_hedging" if pcr > 1.2 else "bullish" if pcr < 0.5 else "neutral"
         return od
     except Exception as e:
-        log.error(f"PCR error: {e}")
+        log.warning(f"Yahoo PCR parse error: {e}")
         return None
+
+
+def _fetch_pcr_cboe() -> Optional[OptionsData]:
+    """CBOE delayed quotes fallback (인증 불필요)"""
+    try:
+        resp = safe_get(
+            f"https://cdn.cboe.com/api/global/delayed_quotes/options/{TICKER}.json",
+            headers={"User-Agent": BROWSER_UA},
+        )
+        if not resp:
+            return None
+        data = resp.json()
+        options = data.get("data", {}).get("options", [])
+        put_oi = sum(o.get("open_interest", 0) for o in options if o.get("option_type") == "P")
+        call_oi = sum(o.get("open_interest", 0) for o in options if o.get("option_type") == "C")
+        if call_oi == 0:
+            return None
+        pcr = put_oi / call_oi
+        od = OptionsData(pcr=round(pcr, 3), total_puts=put_oi, total_calls=call_oi)
+        od.pcr_signal = "heavy_hedging" if pcr > 1.2 else "bullish" if pcr < 0.5 else "neutral"
+        log.info(f"PCR from CBOE: {pcr:.3f}")
+        return od
+    except Exception as e:
+        log.warning(f"CBOE PCR error: {e}")
+        return None
+
+
+def fetch_options_pcr() -> Optional[OptionsData]:
+    """Yahoo crumb 인증 시도 → 실패 시 CBOE fallback"""
+    result = _fetch_pcr_yahoo()
+    if result:
+        return result
+    log.info("Yahoo PCR failed, trying CBOE...")
+    return _fetch_pcr_cboe()
 
 
 # ─────────────────────────────────────────────
