@@ -658,7 +658,7 @@ def _find_form4_xml_url(index_html: str, index_url: str) -> str:
     for href in re.findall(r'href=["\']([^"\']+)["\']', index_html):
         name = href.split("/")[-1]
         if (name.endswith(".xml")
-                and "xsl" not in name.lower()
+                and "xsl" not in href.lower()
                 and not name.startswith("R")
                 and "Financial" not in name):
             # 절대 경로면 그대로, 상대 경로면 base 붙이기
