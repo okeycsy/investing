@@ -1291,6 +1291,12 @@ def run_close():
 
     news = fetch_news()
     news = translate_news(news)
+    news_blocks = format_news_block(news)
+    if news_blocks:
+        blocks.extend(news_blocks)
+        log.info(f"뉴스 블록 추가: {len(news_blocks)}개")
+    else:
+        log.info("표시할 관련 뉴스 없음")
 
     dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news)
     blocks.append(format_dca_block(dca))
