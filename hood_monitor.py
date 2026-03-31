@@ -229,8 +229,8 @@ def fetch_price() -> Optional[PriceData]:
         quotes = result["indicators"]["quote"][0]
         closes = [c for c in quotes["close"] if c is not None]
 
-        current = meta.get("regularMarketPrice", closes[-1] if closes else 0)
-        prev_close = meta.get("previousClose", meta.get("chartPreviousClose", 0))
+        prev_close = closes[-2] if len(closes) >= 2 else 0
+        current = closes[-1] if closes else 0
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
 
         return PriceData(
