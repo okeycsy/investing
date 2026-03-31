@@ -90,7 +90,12 @@
   "price_alert_max_pct": 0,
   "price_alert_direction": "",
   "price_alert_date": "2026-03-31",
-  "pending_morning_alert": null,
+  "pending_morning_alert": {
+    "change_pct": -10.1,
+    "abs_pct": 10.1,
+    "direction": "down",
+    "date": "2026-03-31"
+  },
   "dca_shares": 1896,
   "dca_avg_price": 101.13,
   "dca_history": [
