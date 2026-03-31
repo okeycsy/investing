@@ -138,8 +138,11 @@ def load_state() -> dict:
         "price_alert_max_pct": 0,
         "price_alert_direction": "",
         "price_alert_date": "",
-        # ── BUG 1 FIX: run_close()가 여기 저장, run_morning()이 읽음 ──
         "pending_morning_alert": None,
+        # ── DCA 포트폴리오 ──
+        "dca_shares": 0.0,        # 총 보유 수량
+        "dca_avg_price": 0.0,     # 평균 매수가
+        "dca_history": [],        # 매수 이력
     }
 
 
@@ -229,9 +232,8 @@ def fetch_price() -> Optional[PriceData]:
         quotes = result["indicators"]["quote"][0]
         closes = [c for c in quotes["close"] if c is not None]
 
-        prev_close = closes[-2] if len(closes) >= 2 else 0 
-        current = closes[-1] if closes else 0
-      
+        current = meta.get("regularMarketPrice", closes[-1] if closes else 0)
+        prev_close = meta.get("previousClose", meta.get("chartPreviousClose", 0))
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
 
         return PriceData(
@@ -657,8 +659,9 @@ def _find_form4_xml_url(index_html: str, index_url: str) -> str:
     # href에서 .xml 파일 찾기 (xsl 렌더링 경로 제외)
     for href in re.findall(r'href=["\']([^"\']+)["\']', index_html):
         name = href.split("/")[-1]
+        # 파일명과 경로 모두에서 xsl 렌더링 경로 제외
         if (name.endswith(".xml")
-                and "xsl" not in href.lower()
+                and "xsl" not in href.lower()       # 경로에 xslF345 등 포함 여부
                 and not name.startswith("R")
                 and "Financial" not in name):
             # 절대 경로면 그대로, 상대 경로면 base 붙이기
@@ -1474,6 +1477,158 @@ def run_weekly():
     log.info("Weekly done")
 
 
+def run_dca_status():
+    """
+    DCA 현황 조회 — 현재 보유 수량 / 평단가 / 평가손익 Slack 전송
+    workflow_dispatch: mode=dca_status
+    """
+    log.info("=== DCA STATUS ===")
+    state = load_state()
+
+    shares = state.get("dca_shares", 0.0)
+    avg_price = state.get("dca_avg_price", 0.0)
+    history = state.get("dca_history", [])
+
+    if shares == 0 or avg_price == 0:
+        send_slack([{"type": "section", "text": {"type": "mrkdwn", "text":
+            "📭 아직 등록된 DCA 포지션이 없어요.\n"
+            "Actions → Run workflow → mode: `dca_update` → 수량/가격 입력으로 추가하세요."}}])
+        return
+
+    # 현재가 조회
+    price = fetch_price()
+    lines = [
+        f"*💼 $HOOD DCA 포지션 현황*",
+        f"보유 수량: *{shares:,.1f}주*",
+        f"평균 매수가: *${avg_price:.2f}*",
+        f"총 투자금액: *${shares * avg_price:,.0f}*",
+    ]
+
+    if price and price.current > 0:
+        eval_value = shares * price.current
+        profit_loss = eval_value - (shares * avg_price)
+        profit_pct = (profit_loss / (shares * avg_price)) * 100
+        pl_emoji = "📈" if profit_loss >= 0 else "📉"
+        lines += [
+            f"평가금액: ${eval_value:,.0f}",
+            f"{pl_emoji} 평가손익: {profit_pct:+.1f}% (${profit_loss:+,.0f})",
+        ]
+
+    if history:
+        lines.append(f"\n*📋 매수 이력 (최근 5건)*")
+        for h in history[-5:]:
+            lines.append(f"• {h['date']} — {h['shares']:.1f}주 @ ${h['price']:.2f}")
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "💼 $HOOD DCA 현황"}},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+        {"type": "divider"},
+    ]
+    send_slack(blocks)
+    log.info(f"DCA status sent: {shares:.1f}주 @ ${avg_price:.2f}")
+
+
+def run_dca_update():
+    """
+    DCA 추가매수 등록 — 새 매수 수량/가격 입력 시 평단가 재계산 후 Slack 전송
+    workflow_dispatch inputs:
+      DCA_SHARES: 매수 수량 (예: 10.5)
+      DCA_PRICE:  매수가격 (예: 64.50)
+    """
+    log.info("=== DCA UPDATE ===")
+
+    new_shares_str = os.environ.get("DCA_SHARES", "").strip()
+    new_price_str = os.environ.get("DCA_PRICE", "").strip()
+
+    if not new_shares_str or not new_price_str:
+        log.error("DCA_SHARES 또는 DCA_PRICE 환경변수 없음")
+        send_slack([{"type": "section", "text": {"type": "mrkdwn", "text":
+            "❌ 입력값 오류 — DCA_SHARES와 DCA_PRICE를 모두 입력해주세요."}}])
+        return
+
+    try:
+        new_shares = float(new_shares_str)
+        new_price = float(new_price_str)
+    except ValueError:
+        send_slack([{"type": "section", "text": {"type": "mrkdwn", "text":
+            f"❌ 숫자 변환 실패 — shares: `{new_shares_str}`, price: `{new_price_str}`\n"
+            "숫자만 입력해주세요 (예: 10.5 / 64.50)"}}])
+        return
+
+    state = load_state()
+    prev_shares = state.get("dca_shares", 0.0)
+    prev_avg = state.get("dca_avg_price", 0.0)
+    history = state.get("dca_history", [])
+
+    # 가중평균 재계산
+    if prev_shares == 0 or prev_avg == 0:
+        new_avg = new_price
+        total_shares = new_shares
+        is_first = True
+    else:
+        total_shares = prev_shares + new_shares
+        new_avg = (prev_shares * prev_avg + new_shares * new_price) / total_shares
+        is_first = False
+
+    # 물타기 / 불타기 판단
+    if not is_first:
+        if new_price < prev_avg:
+            action = "🧊 물타기"
+        elif new_price > prev_avg:
+            action = "🔥 불타기"
+        else:
+            action = "➡️ 동일가 매수"
+    else:
+        action = "🆕 최초 등록"
+
+    # 이력 추가
+    history.append({
+        "date": datetime.now(KST).strftime("%Y-%m-%d"),
+        "shares": new_shares,
+        "price": new_price,
+        "action": action,
+    })
+
+    state["dca_shares"] = round(total_shares, 4)
+    state["dca_avg_price"] = round(new_avg, 4)
+    state["dca_history"] = history
+    save_state(state)
+
+    # 현재가 조회
+    price = fetch_price()
+    lines = [
+        f"*{action}* 등록 완료!",
+        f"",
+        f"이번 매수: {new_shares:.1f}주 @ ${new_price:.2f}",
+        f"",
+        f"*업데이트된 포지션*",
+        f"총 보유: *{total_shares:.1f}주*",
+        f"새 평단가: *${new_avg:.2f}*",
+        f"총 투자금액: ${total_shares * new_avg:,.0f}",
+    ]
+
+    if not is_first:
+        avg_change = new_avg - prev_avg
+        lines.append(f"평단 변화: ${prev_avg:.2f} → ${new_avg:.2f} ({avg_change:+.2f})")
+
+    if price and price.current > 0:
+        eval_value = total_shares * price.current
+        profit_loss = eval_value - (total_shares * new_avg)
+        profit_pct = (profit_loss / (total_shares * new_avg)) * 100
+        pl_emoji = "📈" if profit_loss >= 0 else "📉"
+        lines.append(f"{pl_emoji} 현재 평가손익: {profit_pct:+.1f}% (${profit_loss:+,.0f})")
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "✅ DCA 포지션 업데이트"}},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+        {"type": "divider"},
+    ]
+    send_slack(blocks)
+    log.info(f"DCA updated: {total_shares:.1f}주 @ ${new_avg:.2f} ({action})")
+
+
 # ─────────────────────────────────────────────
 # 엔트리포인트
 # ─────────────────────────────────────────────
@@ -1486,6 +1641,8 @@ def main():
         "morning": run_morning,
         "13f": run_13f,
         "weekly": run_weekly,
+        "dca_status": run_dca_status,
+        "dca_update": run_dca_update,
     }.get(mode, lambda: log.error(f"Unknown mode: {mode}"))()
 
 
