@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '실행 모드 (normal/close/13f/weekly/morning)'
+        description: '실행 모드'
         required: true
         default: 'normal'
         type: choice
@@ -37,7 +37,17 @@ on:
           - morning
           - 13f
           - weekly
-
+          - dca_status
+          - dca_update        # ← 추가
+      dca_shares:
+        description: '[dca_update 전용] 매수 수량 (예: 10.5)'
+        required: false
+        default: ''
+      dca_price:
+        description: '[dca_update 전용] 매수 가격 (예: 64.50)'
+        required: false
+        default: ''
+      
 permissions:
   contents: write  # state.json 커밋용
 
