@@ -1140,7 +1140,8 @@ def format_insider_block(trades: list) -> list:
             # price=0인 경우 주식 수로 판단
             scale = "대규모" if t.shares >= 50_000 else "중규모" if t.shares >= 5_000 else "소규모"
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            f"{emoji} — *{t.filer}* ({t.title}) | {t.shares:,}주 {scale} | {t.date}"}})
+            f"{emoji} — *{t.filer}* ({t.title})\n"
+            f"{t.shares:,}주" + (f" @ ${t.price:.2f}" if t.price > 0 else "") + f" | {scale} | {t.date}"}})
     return blocks
 
 
