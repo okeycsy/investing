@@ -634,41 +634,42 @@ class SafetyMargin:
     bb_upper: float = 0.0
     bb_lower: float = 0.0
     current_price: float = 0.0
-    bb_signal: str = ""          # "extreme_oversold" | "oversold" | "normal" | "overbought"
-    momentum_signal: str = ""    # "accelerating" | "decelerating" | "stable"
-    pct_from_lower: float = 0.0  # 현재가가 하단밴드 대비 몇 % 위/아래
-    mom_30m_prev: float = 0.0    # 30~60분 전 구간 변화율
-    mom_30m_curr: float = 0.0    # 최근 30분 변화율
+    bb_signal: str = ""
+    momentum_signal: str = ""
+    pct_from_lower: float = 0.0
+    mom_30m_prev: float = 0.0
+    mom_30m_curr: float = 0.0
+    # ── 신규 필드 ──
+    beta_expected_pct: float = 0.0     # β 기반 기대 수익률
+    beta_excess_pct: float = 0.0       # 실제 - 기대 (음수 = 베타 초과 하락)
+    divergence_warning: bool = False   # 피어 반등 중 HOOD만 하락 가속
+    peer_coin_pct: float = 0.0
+    peer_mstr_pct: float = 0.0
+    dca_attraction: int = 0            # DCA 매력도 1~10
 
 
-def check_safety_margin(closes_daily: list, current_price: float) -> Optional[SafetyMargin]:
+def check_safety_margin(
+    closes_daily: list,
+    current_price: float,
+    actual_pct: float = 0.0,   # HOOD 당일 등락률
+    beta: Optional[float] = None,
+) -> Optional[SafetyMargin]:
     """
-    볼린저 밴드(20일 SMA ± 2σ) + 30분 모멘텀 기울기 분석.
-
-    BB 판별:
-    - 현재가 < 하단밴드 AND 등락 -4% 이하 → Extreme Oversold (기술적 반등 가능)
-    - 현재가 < 하단밴드 → Oversold
-    - 현재가 > 상단밴드 → Overbought
-
-    모멘텀 판별 (1분봉 기준):
-    - 최근 30분 변화율 vs 직전 30분 변화율 비교
-    - 하락 가속(Accelerating): DCA 집행 위험 높음
-    - 하락 둔화(Decelerating): 저점 탐색 중, 진입 타이밍 탐색 가능
+    볼린저 밴드 + 모멘텀 + 베타 초과 이탈 + 피어 분기 + DCA 매력도 통합 분석
     """
     log.info("Safety Margin 분석 시작...")
 
     if len(closes_daily) < 20:
-        log.warning(f"볼린저 밴드 계산 불가: 데이터 {len(closes_daily)}일 (최소 20일 필요)")
+        log.warning(f"볼린저 밴드 계산 불가: 데이터 {len(closes_daily)}일")
         return None
 
-    # ── 볼린저 밴드 계산 ──────────────────────────
+    # ── 1. 볼린저 밴드 ────────────────────────────
     window = closes_daily[-20:]
     sma20 = sum(window) / 20
     variance = sum((p - sma20) ** 2 for p in window) / 20
     std = variance ** 0.5
-    bb_upper = sma20 + 2 * std
-    bb_lower = sma20 - 2 * std
-
+    bb_upper = round(sma20 + 2 * std, 2)
+    bb_lower = round(sma20 - 2 * std, 2)
     pct_from_lower = round((current_price - bb_lower) / bb_lower * 100, 2)
 
     if current_price < bb_lower:
@@ -680,30 +681,26 @@ def check_safety_margin(closes_daily: list, current_price: float) -> Optional[Sa
     else:
         bb_signal = "normal"
 
-    log.info(f"BB: SMA20=${sma20:.2f} 상단=${bb_upper:.2f} 하단=${bb_lower:.2f} | 현재가=${current_price:.2f} ({pct_from_lower:+.2f}%)")
+    log.info(f"BB: SMA20=${sma20:.2f} 하단=${bb_lower:.2f} | 현재가=${current_price:.2f} ({pct_from_lower:+.2f}%)")
 
-    # ── 30분 모멘텀 기울기 ────────────────────────
+    # ── 2. 30분 모멘텀 기울기 ────────────────────────
     bars = _fetch_1m_bars(TICKER, "1d")
     now_utc = datetime.now(UTC)
 
     def price_at(minutes_ago: int) -> Optional[float]:
         target = now_utc - timedelta(minutes=minutes_ago)
-        # target 시각과 가장 가까운 바 탐색 (±3분 허용)
         candidates = [(abs((b["time"] - target).total_seconds()), b["close"]) for b in bars]
         if not candidates:
             return None
         closest = min(candidates, key=lambda x: x[0])
         return closest[1] if closest[0] <= 180 else None
 
-    price_now  = current_price
-    price_30m  = price_at(30)
-    price_60m  = price_at(60)
+    price_30m = price_at(30)
+    price_60m = price_at(60)
 
     if price_30m and price_60m and price_30m > 0 and price_60m > 0:
-        mom_curr = (price_now - price_30m) / price_30m * 100   # 최근 30분
-        mom_prev = (price_30m - price_60m) / price_60m * 100   # 직전 30분
-
-        # 하락 국면에서 판별
+        mom_curr = (current_price - price_30m) / price_30m * 100
+        mom_prev = (price_30m - price_60m) / price_60m * 100
         if mom_curr < 0 and mom_prev < 0:
             momentum_signal = "accelerating" if mom_curr < mom_prev else "decelerating"
         elif mom_curr > 0 and mom_prev < 0:
@@ -712,24 +709,94 @@ def check_safety_margin(closes_daily: list, current_price: float) -> Optional[Sa
             momentum_signal = "stable"
         else:
             momentum_signal = "stable"
-
-        log.info(f"모멘텀: 직전30분 {mom_prev:+.2f}% → 최근30분 {mom_curr:+.2f}% → {momentum_signal}")
+        log.info(f"모멘텀: {mom_prev:+.2f}% → {mom_curr:+.2f}% ({momentum_signal})")
     else:
-        mom_curr = 0.0
-        mom_prev = 0.0
+        mom_curr = mom_prev = 0.0
         momentum_signal = "stable"
-        log.warning("30분/60분 전 가격 데이터 부족 — 모멘텀 분석 스킵")
+
+    # ── 3. 베타 기반 기대 수익률 vs 실제 ───────────
+    beta_expected_pct = 0.0
+    beta_excess_pct = 0.0
+    if beta and actual_pct != 0:
+        qqq_pct = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
+        beta_expected_pct = round(beta * qqq_pct, 2)
+        beta_excess_pct = round(actual_pct - beta_expected_pct, 2)
+        log.info(f"베타 초과 이탈: 기대 {beta_expected_pct:+.2f}% vs 실제 {actual_pct:+.2f}% → 초과 {beta_excess_pct:+.2f}%")
+
+    # ── 4. 피어 그룹 분기 감지 ($COIN, $MSTR) ──────
+    peer_coin_pct = _fetch_ticker_change("COIN") or 0.0
+    peer_mstr_pct = _fetch_ticker_change("MSTR") or 0.0
+
+    # HOOD가 하락 가속 중인데 피어 둘 다 양전 → Divergence Warning
+    divergence_warning = (
+        momentum_signal == "accelerating"
+        and actual_pct < -2
+        and peer_coin_pct > 0
+        and peer_mstr_pct > 0
+    )
+    if divergence_warning:
+        log.info(f"Divergence Warning: HOOD {actual_pct:+.2f}% 하락 가속 | COIN {peer_coin_pct:+.2f}% / MSTR {peer_mstr_pct:+.2f}% 반등")
+
+    # ── 5. DCA 매력도 점수 1~10 ─────────────────────
+    # 3가지 요소 합산: RSI(0~4점) + BB 이탈(0~3점) + 베타 초과 이탈(0~3점)
+    score = 0
+
+    # RSI 계산 (closes_daily 재사용)
+    rsi = 50.0
+    if len(closes_daily) >= 15:
+        from types import SimpleNamespace
+        ts_tmp = get_technical_signals(closes_daily)
+        rsi = ts_tmp.rsi_14
+
+    if rsi <= 25:
+        score += 4
+    elif rsi <= 30:
+        score += 3
+    elif rsi <= 40:
+        score += 2
+    elif rsi <= 50:
+        score += 1
+
+    if bb_signal == "extreme_oversold":
+        score += 3
+    elif bb_signal == "oversold":
+        score += 2
+    elif pct_from_lower < 5:
+        score += 1
+
+    # 베타 초과 이탈: 기대보다 더 빠졌을수록 통계적 반등 가능성
+    if beta_excess_pct <= -5:
+        score += 3
+    elif beta_excess_pct <= -3:
+        score += 2
+    elif beta_excess_pct <= -1:
+        score += 1
+
+    # 하락 가속 중이면 감점
+    if momentum_signal == "accelerating":
+        score = max(0, score - 1)
+    if divergence_warning:
+        score = max(0, score - 1)
+
+    dca_attraction = max(1, min(10, score))
+    log.info(f"DCA 매력도: {dca_attraction}/10 (RSI={rsi:.1f}, BB={bb_signal}, β초과={beta_excess_pct:+.2f}%)")
 
     return SafetyMargin(
         sma20=round(sma20, 2),
-        bb_upper=round(bb_upper, 2),
-        bb_lower=round(bb_lower, 2),
+        bb_upper=bb_upper,
+        bb_lower=bb_lower,
         current_price=current_price,
         bb_signal=bb_signal,
         momentum_signal=momentum_signal,
         pct_from_lower=pct_from_lower,
         mom_30m_prev=round(mom_prev, 2),
         mom_30m_curr=round(mom_curr, 2),
+        beta_expected_pct=beta_expected_pct,
+        beta_excess_pct=beta_excess_pct,
+        divergence_warning=divergence_warning,
+        peer_coin_pct=peer_coin_pct,
+        peer_mstr_pct=peer_mstr_pct,
+        dca_attraction=dca_attraction,
     )
 
 
@@ -1384,8 +1451,8 @@ def _extract_hood_from_infotable(xml_text: str) -> tuple:
 # ─────────────────────────────────────────────
 # 8. DCA 시그널 (BUG 4 FIX: 결론 명확화, 가격 숫자 제거)
 # ─────────────────────────────────────────────
-def calculate_dca_signal(price, technicals, options, short_interest, insider_trades, news) -> DCASignal:
-    score, factors = _rule_based_dca_score(price, technicals, options, short_interest, insider_trades)
+def calculate_dca_signal(price, technicals, options, short_interest, insider_trades, news, sm=None) -> DCASignal:
+    score, factors = _rule_based_dca_score(price, technicals, options, short_interest, insider_trades, sm=sm)
     log.info(f"DCA 규칙기반 점수: {score}/100")
 
     if ANTHROPIC_API_KEY:
@@ -1408,10 +1475,11 @@ def calculate_dca_signal(price, technicals, options, short_interest, insider_tra
     )
 
 
-def _rule_based_dca_score(price, technicals, options, short_interest, insider_trades):
+def _rule_based_dca_score(price, technicals, options, short_interest, insider_trades, sm=None):
     score = 50
     factors = []
 
+    # ── RSI ──────────────────────────────────────
     if technicals.rsi_14 <= 30:
         bonus = min(20, int((30 - technicals.rsi_14) * 1.5))
         score += bonus
@@ -1424,6 +1492,7 @@ def _rule_based_dca_score(price, technicals, options, short_interest, insider_tr
         score -= penalty
         factors.append(f"🔴 RSI {technicals.rsi_14} 과매수 구간 (-{penalty})")
 
+    # ── MACD ─────────────────────────────────────
     if technicals.macd_alert == "bullish_cross":
         score += 10
         factors.append("🟢 MACD 골든크로스 (+10)")
@@ -1431,14 +1500,16 @@ def _rule_based_dca_score(price, technicals, options, short_interest, insider_tr
         score -= 10
         factors.append("🔴 MACD 데드크로스 (-10)")
 
+    # ── 옵션 PCR ─────────────────────────────────
     if options:
         if options.pcr > 1.2:
             score += 8
-            factors.append(f"🟢 PCR {options.pcr:.2f} 과도한 풋 헤징 → 역발상 매수 (+8)")
+            factors.append(f"🟢 PCR {options.pcr:.2f} 풋 헤징 집중 → 역발상 매수 (+8)")
         elif options.pcr < 0.5:
             score -= 5
             factors.append(f"🔴 PCR {options.pcr:.2f} 과도한 낙관 (-5)")
 
+    # ── 공매도 ───────────────────────────────────
     if short_interest:
         if short_interest.short_pct > 60:
             score += 8
@@ -1447,11 +1518,11 @@ def _rule_based_dca_score(price, technicals, options, short_interest, insider_tr
             score += 3
             factors.append(f"🟡 공매도 {short_interest.short_pct:.1f}% 높은 편 (+3)")
 
+    # ── 내부자 ───────────────────────────────────
     recent_buys = [t for t in insider_trades if t.trade_type == "Purchase" and _is_recent(t.date, 30)]
     recent_sells = [t for t in insider_trades if t.trade_type == "Sale" and _is_recent(t.date, 30)]
     buy_val = sum(t.total_value for t in recent_buys)
     sell_val = sum(t.total_value for t in recent_sells)
-
     if recent_buys and buy_val > 100_000:
         score += 10
         factors.append(f"🟢 내부자 매수 {len(recent_buys)}건 (대규모) (+10)")
@@ -1459,12 +1530,48 @@ def _rule_based_dca_score(price, technicals, options, short_interest, insider_tr
         score -= 8
         factors.append(f"🔴 내부자 대량 매도 {len(recent_sells)}건 (-8)")
 
+    # ── 가격 변동 ────────────────────────────────
     if price and price.change_pct <= -5:
         score += 5
         factors.append(f"🟢 큰 폭 하락 → 매수 기회 (+5)")
     elif price and price.change_pct >= 5:
         score -= 3
         factors.append(f"🟡 큰 폭 상승 → 추격 주의 (-3)")
+
+    # ── Safety Margin 3요소 (SM 있을 때만) ────────
+    if sm is not None:
+        # 1) 볼린저 밴드 이탈
+        if sm.bb_signal == "extreme_oversold":
+            score += 12
+            factors.append(f"🟢 BB 하단 이탈 (Extreme Oversold, 하단 대비 {sm.pct_from_lower:+.1f}%) (+12)")
+        elif sm.bb_signal == "oversold":
+            score += 6
+            factors.append(f"🟡 BB 하단 근접 ({sm.pct_from_lower:+.1f}%) (+6)")
+        elif sm.bb_signal == "overbought":
+            score -= 8
+            factors.append(f"🔴 BB 상단 돌파 — 과열 (-8)")
+
+        # 2) 베타 대비 초과 이탈
+        if sm.beta_excess_pct <= -5:
+            score += 12
+            factors.append(f"🟢 β 대비 과도 하락 ({sm.beta_excess_pct:+.1f}%p) — 통계적 반등 가능 (+12)")
+        elif sm.beta_excess_pct <= -2:
+            score += 6
+            factors.append(f"🟡 β 대비 소폭 초과 하락 ({sm.beta_excess_pct:+.1f}%p) (+6)")
+        elif sm.beta_excess_pct >= 5:
+            score -= 5
+            factors.append(f"🔴 β 대비 과도 상승 ({sm.beta_excess_pct:+.1f}%p) (-5)")
+
+        # 3) 피어 분기 / 모멘텀 (리스크 요소)
+        if sm.divergence_warning:
+            score -= 8
+            factors.append(f"🔴 Divergence Warning — 피어 반등 중 HOOD 하락 가속 (-8)")
+        elif sm.momentum_signal == "accelerating":
+            score -= 4
+            factors.append(f"🟠 하락 가속 중 — 추가 하락 리스크 (-4)")
+        elif sm.momentum_signal == "decelerating":
+            score += 4
+            factors.append(f"🟢 하락 둔화 — 저점 탐색 신호 (+4)")
 
     return max(0, min(100, score)), factors
 
@@ -1703,31 +1810,104 @@ def format_volume_profile_block(vp: VolumeProfile) -> list:
 
 
 def format_safety_margin_block(sm: SafetyMargin) -> list:
-    # 볼린저 밴드 시그널
+    blocks = []
+
+    # ── 볼린저 밴드 ──
     bb_map = {
-        "extreme_oversold": "🟢 *Extreme Oversold* — 밴드 하단 이탈, 기술적 반등 가능성",
+        "extreme_oversold": "🟢 *Extreme Oversold* — 밴드 하단 이탈, 통계적 반등 구간",
         "oversold":         "🟡 *밴드 하단 근접* — 과매도 경계",
         "overbought":       "🔴 *밴드 상단 돌파* — 과매수",
         "normal":           "⚪ *밴드 내 정상*",
     }
-    bb_line = bb_map.get(sm.bb_signal, "")
-
-    # 모멘텀 시그널
     mom_map = {
-        "accelerating":  "📉 *하락 가속* — DCA 집행 시점 아님, 추가 하락 주의",
-        "decelerating":  "📈 *하락 둔화* — 저점 탐색 중, 진입 타이밍 탐색 가능",
-        "stable":        "➡️ *모멘텀 안정*",
+        "accelerating":  "📉 하락 가속 — 추가 하락 주의",
+        "decelerating":  "📈 하락 둔화 — 저점 탐색 중",
+        "stable":        "➡️ 모멘텀 안정",
     }
-    mom_line = mom_map.get(sm.momentum_signal, "")
+    blocks.append(_sec(
+        f"*🛡 안전 마진*  {bb_map.get(sm.bb_signal, '')}  |  {mom_map.get(sm.momentum_signal, '')}"
+    ))
+    blocks.append(_ctx(
+        f"BB 하단 ${sm.bb_lower:.2f} | SMA20 ${sm.sma20:.2f} | BB 상단 ${sm.bb_upper:.2f}  |  "
+        f"하단 대비 *{sm.pct_from_lower:+.2f}%*  |  모멘텀 {sm.mom_30m_prev:+.2f}% → {sm.mom_30m_curr:+.2f}%"
+    ))
+
+    # ── 베타 초과 이탈 ──
+    if sm.beta_excess_pct != 0:
+        if sm.beta_excess_pct <= -3:
+            beta_line = f"🟢 *β 초과 이탈 {sm.beta_excess_pct:+.2f}%p* — 기대보다 과도한 하락, 통계적 반등 가능"
+        elif sm.beta_excess_pct <= -1:
+            beta_line = f"🟡 *β 소폭 초과 이탈 {sm.beta_excess_pct:+.2f}%p*"
+        elif sm.beta_excess_pct >= 3:
+            beta_line = f"🔴 *β 초과 상승 {sm.beta_excess_pct:+.2f}%p* — 기대보다 강한 상승"
+        else:
+            beta_line = f"⚪ *β 범위 내 {sm.beta_excess_pct:+.2f}%p*"
+        blocks.append(_ctx(f"기대수익률 {sm.beta_expected_pct:+.2f}% (β×QQQ)  |  {beta_line}"))
+
+    # ── 피어 분기 경고 ──
+    if sm.divergence_warning:
+        blocks.append(_sec(
+            f"⚠️ *Divergence Warning*\n"
+            f"HOOD 하락 가속 중인데 피어 그룹 반등 중 — 개별 악재 가능성"
+        ))
+        blocks.append(_ctx(
+            f"COIN {sm.peer_coin_pct:+.2f}% / MSTR {sm.peer_mstr_pct:+.2f}% 반등  vs  HOOD 하락 가속"
+        ))
+    elif sm.peer_coin_pct != 0 or sm.peer_mstr_pct != 0:
+        blocks.append(_ctx(
+            f"피어: COIN {sm.peer_coin_pct:+.2f}% | MSTR {sm.peer_mstr_pct:+.2f}%"
+        ))
+
+    return blocks
+
+
+def format_dca_attraction_block(sm: Optional[SafetyMargin]) -> list:
+    """
+    DCA 매력도 점수 1~10을 메시지 최상단용 요약 블록으로 출력.
+    SM 없으면 스킵.
+    """
+    if sm is None:
+        return []
+    score = sm.dca_attraction
+    filled = score
+    empty = 10 - filled
+    if score >= 8:
+        emoji, verdict = "🟢", "DCA 추가매수 매우 우호적"
+    elif score >= 6:
+        emoji, verdict = "🟡", "DCA 추가매수 고려 가능"
+    elif score >= 4:
+        emoji, verdict = "⚪", "정기 DCA 유지 권장"
+    else:
+        emoji, verdict = "🔴", "추가매수 자제 — 리스크 높음"
+
+    bar = "🟦" * filled + "⬜" * empty
+    detail_parts = []
+    if sm.bb_signal in ("extreme_oversold", "oversold"):
+        detail_parts.append(f"BB 이탈({sm.pct_from_lower:+.1f}%)")
+    if sm.beta_excess_pct <= -1:
+        detail_parts.append(f"β 초과({sm.beta_excess_pct:+.1f}%p)")
+    if sm.divergence_warning:
+        detail_parts.append("피어분기 경고")
+
+    detail = "  |  ".join(detail_parts) if detail_parts else "복합 지표 기반"
 
     return [
-        _sec(f"*🛡 안전 마진 분석*\n{bb_line}\n{mom_line}"),
-        _ctx(
-            f"BB 하단 ${sm.bb_lower:.2f} | SMA20 ${sm.sma20:.2f} | BB 상단 ${sm.bb_upper:.2f}  |  "
-            f"밴드 하단 대비 *{sm.pct_from_lower:+.2f}%*  |  "
-            f"모멘텀 직전30분 {sm.mom_30m_prev:+.2f}% → 최근30분 {sm.mom_30m_curr:+.2f}%"
-        ),
+        _sec(f"*💎 DCA 매력도: {score}/10*  {emoji} {verdict}\n{bar}"),
+        _ctx(detail),
+        {"type": "divider"},
     ]
+
+
+def format_dca_block(signal: DCASignal) -> list:
+    bar_filled = signal.score // 5
+    bar = ("🟩" if signal.score >= 60 else "🟨" if signal.score >= 40 else "🟥") * bar_filled + "⬜" * (20 - bar_filled)
+    factors_text = "\n".join(f"• {f}" for f in signal.factors[:3]) if signal.factors else ""
+    blocks = [
+        _sec(f"*🎯 DCA 시그널: {signal.score}/100*\n{bar}\n*{signal.verdict}*\n{signal.summary}"),
+    ]
+    if factors_text:
+        blocks.append(_ctx(factors_text))
+    return blocks
 
 
 # ─────────────────────────────────────────────
@@ -1926,9 +2106,15 @@ def run_close():
         bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
         blocks.extend(format_beta_block(bd))
 
-    # Safety Margin: 4%+ 급변동 시에만
+    # Safety Margin: 4%+ 급변동 시에만, beta 전달
+    sm = None
     if price and price.prev_close > 0 and abs(price.change_pct) >= 4 and closes:
-        sm = check_safety_margin(closes, price.current)
+        sm = check_safety_margin(
+            closes,
+            price.current,
+            actual_pct=price.change_pct,
+            beta=get_beta(),
+        )
         if sm:
             blocks.extend(format_safety_margin_block(sm))
 
@@ -1968,11 +2154,11 @@ def run_close():
     else:
         log.info("표시할 관련 뉴스 없음")
 
-    dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news)
+    dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news, sm=sm)
     blocks.extend(format_dca_block(dca))
 
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-        "text": f"🔔 $HOOD 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}}) 
+        "text": f"🔔 $HOOD 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
     blocks.extend(_footer())
     send_slack(blocks)
 
