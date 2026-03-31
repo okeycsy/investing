@@ -103,6 +103,8 @@ jobs:
           RUN_MODE: ${{ steps.mode.outputs.mode }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DCA_SHARES: ${{ github.event.inputs.dca_shares }}   # ← 추가
+          DCA_PRICE: ${{ github.event.inputs.dca_price }}     # ← 추가
         run: python hood_monitor.py
 
       - name: Commit state
