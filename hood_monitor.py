@@ -1495,24 +1495,11 @@ def run_dca_status():
             "Actions → Run workflow → mode: `dca_update` → 수량/가격 입력으로 추가하세요."}}])
         return
 
-    # 현재가 조회
-    price = fetch_price()
     lines = [
         f"*💼 $HOOD DCA 포지션 현황*",
         f"보유 수량: *{shares:,.1f}주*",
         f"평균 매수가: *${avg_price:.2f}*",
-        f"총 투자금액: *${shares * avg_price:,.0f}*",
     ]
-
-    if price and price.current > 0:
-        eval_value = shares * price.current
-        profit_loss = eval_value - (shares * avg_price)
-        profit_pct = (profit_loss / (shares * avg_price)) * 100
-        pl_emoji = "📈" if profit_loss >= 0 else "📉"
-        lines += [
-            f"평가금액: ${eval_value:,.0f}",
-            f"{pl_emoji} 평가손익: {profit_pct:+.1f}% (${profit_loss:+,.0f})",
-        ]
 
     if history:
         lines.append(f"\n*📋 매수 이력 (최근 5건)*")
@@ -1595,8 +1582,6 @@ def run_dca_update():
     state["dca_history"] = history
     save_state(state)
 
-    # 현재가 조회
-    price = fetch_price()
     lines = [
         f"*{action}* 등록 완료!",
         f"",
@@ -1605,19 +1590,11 @@ def run_dca_update():
         f"*업데이트된 포지션*",
         f"총 보유: *{total_shares:.1f}주*",
         f"새 평단가: *${new_avg:.2f}*",
-        f"총 투자금액: ${total_shares * new_avg:,.0f}",
     ]
 
     if not is_first:
         avg_change = new_avg - prev_avg
         lines.append(f"평단 변화: ${prev_avg:.2f} → ${new_avg:.2f} ({avg_change:+.2f})")
-
-    if price and price.current > 0:
-        eval_value = total_shares * price.current
-        profit_loss = eval_value - (total_shares * new_avg)
-        profit_pct = (profit_loss / (total_shares * new_avg)) * 100
-        pl_emoji = "📈" if profit_loss >= 0 else "📉"
-        lines.append(f"{pl_emoji} 현재 평가손익: {profit_pct:+.1f}% (${profit_loss:+,.0f})")
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": "✅ DCA 포지션 업데이트"}},
