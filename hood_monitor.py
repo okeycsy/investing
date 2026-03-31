@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-$HOOD Advanced Monitor v3.1
+$HOOD Advanced Monitor v3.2
 ============================
-BUG FIXES from v3.0:
-  1. run_morning() 종가 기준 누적 오류 → state 기반으로 변경
-  2. 뉴스 HOOD 관련성 필터 + 한국어 강제
-  3. 13F EDGAR API URL 수정 + infoTable 주식 수/금액 파싱
-  4. weekly 가격 숫자 노출 제거 + DCA 결론 명확화
+v3.2 fixes:
+  1. Form 4 404 → 신고자 CIK를 accession 번호에서 추출
+  2. FINRA short interest → 당일 제외, float 파싱 수정
+  3. Yahoo Options 401 → graceful skip
+  4. run_close() 에 등락률 로깅 추가
+  5. 4% 미만일 때도 종가 방향 이모지 표시
 """
 
 import os
@@ -228,8 +229,8 @@ def fetch_price() -> Optional[PriceData]:
         quotes = result["indicators"]["quote"][0]
         closes = [c for c in quotes["close"] if c is not None]
 
-        prev_close = closes[-2] if len(closes) >= 2 else 0
-        current = closes[-1] if closes else 0
+        current = meta.get("regularMarketPrice", closes[-1] if closes else 0)
+        prev_close = meta.get("previousClose", meta.get("chartPreviousClose", 0))
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
 
         return PriceData(
@@ -437,7 +438,8 @@ def fetch_options_pcr() -> Optional[OptionsData]:
 # ─────────────────────────────────────────────
 def fetch_short_interest() -> Optional[ShortInterestData]:
     now = datetime.now(UTC)
-    for delta in range(0, 7):
+    # delta=1부터: 당일 파일은 장 마감 수 시간 후 생성되므로 전일부터 조회
+    for delta in range(1, 8):
         d = now - timedelta(days=delta)
         if d.weekday() >= 5:
             continue
@@ -449,8 +451,9 @@ def fetch_short_interest() -> Optional[ShortInterestData]:
             for line in resp.text.strip().split("\n"):
                 fields = line.split("|")
                 if len(fields) >= 5 and fields[1].upper() == TICKER:
-                    short_vol = int(fields[2])
-                    total_vol = int(fields[4])
+                    # float 형태로 올 수 있으므로 float 경유 후 int 변환
+                    short_vol = int(float(fields[2]))
+                    total_vol = int(float(fields[4]))
                     short_pct = (short_vol / total_vol * 100) if total_vol > 0 else 0
                     sid = ShortInterestData(
                         short_volume=short_vol, total_volume=total_vol,
@@ -459,7 +462,7 @@ def fetch_short_interest() -> Optional[ShortInterestData]:
                     sid.signal = "high_short" if short_pct > 50 else "normal"
                     return sid
         except Exception as e:
-            log.error(f"Short interest parse error: {e}")
+            log.error(f"Short interest parse error ({date_str}): {e}")
     return None
 
 
@@ -489,12 +492,16 @@ def fetch_insider_trades() -> list:
                 break
             checked += 1
 
-            acc = accessions[i].replace("-", "")
+            acc_raw = accessions[i]          # "0002049077-26-000009"
+            acc = acc_raw.replace("-", "")   # "000204907726000009"
             filing_date = dates[i]
             xml_resp = None
 
-            # index.json에서 원본 XML 탐색
-            idx_url = f"https://data.sec.gov/Archives/edgar/data/{CIK_SHORT}/{acc}/index.json"
+            # Form 4는 신고자(내부자) CIK 경로에 파일이 있음
+            # accession 번호 앞 10자리가 신고자 CIK
+            filer_cik = acc_raw.split("-")[0].lstrip("0") or "0"
+
+            idx_url = f"https://data.sec.gov/Archives/edgar/data/{filer_cik}/{acc}/index.json"
             idx_resp = safe_get(idx_url, headers=SEC_HEADERS, retries=1)
             if idx_resp:
                 try:
@@ -504,7 +511,7 @@ def fetch_insider_trades() -> list:
                                 and "xsl" not in name.lower()
                                 and not name.startswith("R")
                                 and "Financial" not in name):
-                            xml_url = f"https://data.sec.gov/Archives/edgar/data/{CIK_SHORT}/{acc}/{name}"
+                            xml_url = f"https://data.sec.gov/Archives/edgar/data/{filer_cik}/{acc}/{name}"
                             xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
                             if xml_resp:
                                 break
@@ -512,9 +519,8 @@ def fetch_insider_trades() -> list:
                     pass
 
             if not xml_resp:
-                # fallback: primaryDocument 파일명 직접 사용
                 prim = primary_docs[i].split("/")[-1]
-                xml_url = f"https://data.sec.gov/Archives/edgar/data/{CIK_SHORT}/{acc}/{prim}"
+                xml_url = f"https://data.sec.gov/Archives/edgar/data/{filer_cik}/{acc}/{prim}"
                 xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
 
             if xml_resp:
@@ -1120,7 +1126,10 @@ def run_close():
         abs_pct = abs(price.change_pct)
         direction = "up" if price.change_pct > 0 else "down"
 
-        # ── BUG 1 FIX: 종가 기준 알림은 state에 저장해두고 morning에서 꺼냄 ──
+        # 로깅: 등락률 항상 기록
+        log.info(f"종가 등락: {price.change_pct:+.2f}% (prev_close={price.prev_close}, current={price.current})")
+
+        # state 저장 (4%+ 시 morning 알림 예약)
         if abs_pct >= 4:
             state["pending_morning_alert"] = {
                 "change_pct": round(price.change_pct, 1),
@@ -1129,17 +1138,18 @@ def run_close():
                 "date": datetime.now(KST).strftime("%Y-%m-%d"),
             }
             log.info(f"Morning alert queued: {price.change_pct:+.1f}%")
-        else:
-            state["pending_morning_alert"] = None
-
-        # 장 마감 알림 (4%+ 시에만)
-        if abs_pct >= 4:
-            emoji = "🚀" if direction == "up" else "💥"
+            emoji_big = "🚀" if direction == "up" else "💥"
             label = "상승" if direction == "up" else "하락"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"{emoji} *$HOOD 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
+                f"{emoji_big} *$HOOD 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
+        else:
+            state["pending_morning_alert"] = None
+            # 4% 미만: 방향 이모지만 조용히 표시
+            emoji_dir = "🌤" if direction == "up" else "🌧"
+            mood = "양전 마감" if direction == "up" else "음전 마감"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
+                f"{emoji_dir} 오늘 종가 {mood}"}})
 
-        # 알림 추적 리셋 (장 마감 = 하루 끝)
         state["price_alert_max_pct"] = 0
         state["price_alert_direction"] = ""
 
