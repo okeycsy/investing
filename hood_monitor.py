@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-$HOOD Advanced Monitor v3.2
+$HOOD Advanced Monitor v3.3
 ============================
 v3.2 fixes:
   1. Form 4 404 → 신고자 CIK를 accession 번호에서 추출
@@ -741,20 +741,6 @@ def analyze_volume_profile(current_price: float) -> Optional[VolumeProfile]:
         whale_detected=whale,
     )
 
-
-def format_volume_profile_block(vp: VolumeProfile) -> dict:
-    poc_desc = (
-        f"🔴 *매물대 상단* — POC(${vp.poc_price:.2f}) 아래"
-        if vp.poc_signal == "resistance"
-        else f"🟢 *지지선 확보* — POC(${vp.poc_price:.2f}) 위"
-    )
-    whale_line = "\n🐋 *Whale Activity Detected* — 평균 대비 거래량 폭증" if vp.whale_detected else ""
-    return {"type": "section", "text": {"type": "mrkdwn", "text": (
-        f"*📊 수급 미세구조 (최근 30분)*\n"
-        f"POC: *${vp.poc_price:.2f}* {poc_desc}\n"
-        f"거래량: {vp.vol_30m:,} | 5일평균: {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"
-        f"{whale_line}"
-    )}}
 
 
 # ─────────────────────────────────────────────
@@ -1901,20 +1887,6 @@ def format_news_block(news: list) -> list:
     return [_sec("*📰 뉴스*\n" + "\n".join(lines))]
 
 
-def format_dca_block(signal: DCASignal) -> list:
-    bar_filled = signal.score // 5
-    bar = ("🟩" if signal.score >= 60 else "🟨" if signal.score >= 40 else "🟥") * bar_filled + "⬜" * (20 - bar_filled)
-    factors_text = "\n".join(f"• {f}" for f in signal.factors[:3]) if signal.factors else ""
-    blocks = [
-        _sec(
-            f"*🎯 DCA 시그널: {signal.score}/100*\n{bar}\n*{signal.verdict}*\n{signal.summary}",
-        ),
-    ]
-    if factors_text:
-        blocks.append(_ctx(factors_text))
-    return blocks
-
-
 
 
 def format_volume_profile_block(vp: VolumeProfile) -> list:
@@ -2228,9 +2200,9 @@ def run_close():
         bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
         blocks.extend(format_beta_block(bd))
 
-    # Safety Margin: 4%+ 급변동 시에만, beta 전달
+    # Safety Margin: close 모드에서 항상 실행 (4% 조건 제거)
     sm = None
-    if price and price.prev_close > 0 and abs(price.change_pct) >= 4 and closes:
+    if price and price.prev_close > 0 and closes:
         sm = check_safety_margin(
             closes,
             price.current,
@@ -2408,7 +2380,7 @@ def run_weekly():
     if weekly_change_str:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 등락*\n{weekly_change_str}"}})
 
-    blocks.append(format_technicals_block(technicals))
+    blocks.extend(format_technicals_block(technicals))
 
     if pcr_readings:
         avg_pcr = sum(pcr_readings) / len(pcr_readings)
