@@ -434,8 +434,191 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
 
 
 # ─────────────────────────────────────────────
-# 1-3. 30분 수급 미세구조 / POC 분석 (Volume Profile)
+# 1-5. HOOD × BTC 30일 상관계수
 # ─────────────────────────────────────────────
+def calc_btc_correlation() -> Optional[dict]:
+    """
+    HOOD와 BTC-USD의 최근 30일 일간 수익률 피어슨 상관계수 계산.
+    r > 0.7 → 강한 양의 상관 (BTC 따라감)
+    r < 0.3 → 독립적 움직임
+    """
+    log.info("BTC 상관계수 계산 시작...")
+
+    def fetch_30d_returns(ticker: str) -> Optional[list]:
+        _yahoo_throttle()
+        url = YAHOO_QUOTE_URL.format(ticker=ticker)
+        resp = safe_get(url, params={"interval": "1d", "range": "35d"})
+        if not resp:
+            return None
+        try:
+            closes = [c for c in resp.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c is not None]
+            if len(closes) < 31:
+                return None
+            return [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
+        except Exception as e:
+            log.debug(f"30d returns fetch ({ticker}): {e}")
+            return None
+
+    hood_r = fetch_30d_returns(TICKER)
+    btc_r  = fetch_30d_returns("BTC-USD")
+
+    if not hood_r or not btc_r:
+        log.warning("BTC 상관계수: 데이터 부족")
+        return None
+
+    n = min(len(hood_r), len(btc_r))
+    hood_r, btc_r = hood_r[-n:], btc_r[-n:]
+
+    mean_h = sum(hood_r) / n
+    mean_b = sum(btc_r) / n
+    cov    = sum((hood_r[i] - mean_h) * (btc_r[i] - mean_b) for i in range(n)) / n
+    std_h  = (sum((x - mean_h) ** 2 for x in hood_r) / n) ** 0.5
+    std_b  = (sum((x - mean_b) ** 2 for x in btc_r)  / n) ** 0.5
+
+    if std_h == 0 or std_b == 0:
+        return None
+
+    corr = round(cov / (std_h * std_b), 3)
+    btc_today = _fetch_ticker_change("BTC-USD")
+
+    if corr >= 0.7:
+        signal = "high"      # BTC 강하게 추종
+    elif corr >= 0.4:
+        signal = "moderate"  # 중간 연동
+    else:
+        signal = "low"       # 독립적
+
+    log.info(f"BTC 상관계수: r={corr} ({n}일) | BTC 당일 {btc_today:+.2f}%")
+    return {"corr": corr, "signal": signal, "btc_today": btc_today, "days": n}
+
+
+def format_btc_correlation_block(bd: dict) -> list:
+    corr = bd["corr"]
+    btc  = bd.get("btc_today", 0) or 0
+
+    if bd["signal"] == "high":
+        sig_line = f"🔗 *강한 BTC 연동* (r={corr:.2f}) — BTC 방향이 HOOD를 견인"
+    elif bd["signal"] == "moderate":
+        sig_line = f"🔗 *중간 연동* (r={corr:.2f}) — BTC와 부분적으로 동조"
+    else:
+        sig_line = f"🔓 *낮은 연동* (r={corr:.2f}) — HOOD 개별 팩터 우세"
+
+    # BTC 방향 해석
+    if bd["signal"] == "high" and btc >= 2:
+        interp = "BTC 상승 → HOOD 상승 압력 가능"
+    elif bd["signal"] == "high" and btc <= -2:
+        interp = "BTC 하락 → HOOD 하락 압력 가능"
+    else:
+        interp = ""
+
+    ctx = f"30일 기준 | *BTC 당일 {btc:+.2f}%*"
+    if interp:
+        ctx += f"  |  {interp}"
+
+    return [
+        _sec(f"*₿ HOOD × BTC 상관계수*\n{sig_line}"),
+        _ctx(ctx),
+    ]
+
+
+# ─────────────────────────────────────────────
+# 1-6. Apple App Store 순위 트래킹
+# ─────────────────────────────────────────────
+ROBINHOOD_APP_ID = "938003185"    # App Store ID (미국 기준)
+APP_RANK_CACHE_FILE = Path("app_rank_cache.json")
+
+
+def fetch_appstore_rank() -> Optional[dict]:
+    """
+    Apple App Store 미국 금융 카테고리 상위 200개 무료 앱 RSS에서
+    로빈후드 순위를 파싱.
+    공식 Apple RSS: rss.applemarketingtools.com
+    """
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+    # 캐시 확인 (당일이면 재사용)
+    if APP_RANK_CACHE_FILE.exists():
+        try:
+            cache = json.loads(APP_RANK_CACHE_FILE.read_text())
+            if cache.get("date") == today:
+                log.info(f"App Store 순위 캐시 히트: #{cache.get('rank_finance')} (Finance) | #{cache.get('rank_overall')} (Overall)")
+                return cache
+        except Exception:
+            pass
+
+    log.info("App Store 순위 fetch 시작...")
+    result = {"date": today, "rank_finance": None, "rank_overall": None}
+
+    # 1) 금융 카테고리 top 200
+    finance_url = "https://rss.applemarketingtools.com/api/v2/us/apps/top-free/200/apps.json?genre=6015"
+    resp = safe_get(finance_url)
+    if resp:
+        try:
+            apps = resp.json()["feed"]["results"]
+            for i, app in enumerate(apps):
+                if app.get("id") == ROBINHOOD_APP_ID:
+                    result["rank_finance"] = i + 1
+                    break
+        except Exception as e:
+            log.debug(f"App Store finance parse: {e}")
+
+    # 2) 전체 top 200 (overall 순위용)
+    overall_url = "https://rss.applemarketingtools.com/api/v2/us/apps/top-free/200/apps.json"
+    resp2 = safe_get(overall_url)
+    if resp2:
+        try:
+            apps2 = resp2.json()["feed"]["results"]
+            for i, app in enumerate(apps2):
+                if app.get("id") == ROBINHOOD_APP_ID:
+                    result["rank_overall"] = i + 1
+                    break
+        except Exception as e:
+            log.debug(f"App Store overall parse: {e}")
+
+    log.info(f"App Store 순위: Finance #{result['rank_finance']} | Overall #{result['rank_overall']}")
+    APP_RANK_CACHE_FILE.write_text(json.dumps(result, indent=2))
+    return result
+
+
+def format_appstore_rank_block(prev: Optional[dict], curr: dict) -> list:
+    """
+    현재 순위와 전일 순위를 비교해 추이 표시.
+    prev: 전일 캐시 (없으면 None)
+    """
+    rank_f = curr.get("rank_finance")
+    rank_o = curr.get("rank_overall")
+
+    if rank_f is None and rank_o is None:
+        return [_sec("*📱 App Store*  200위권 밖 (데이터 없음)")]
+
+    def trend(prev_r, curr_r):
+        if prev_r is None or curr_r is None:
+            return ""
+        diff = prev_r - curr_r   # 양수 = 순위 상승 (숫자 작아짐)
+        if diff >= 3:
+            return f" ▲{diff}"
+        elif diff <= -3:
+            return f" ▼{abs(diff)}"
+        return ""
+
+    prev_f = prev.get("rank_finance") if prev else None
+    prev_o = prev.get("rank_overall") if prev else None
+
+    # FOMO 경고: 금융 top 5 진입
+    fomo_warn = ""
+    if rank_f is not None and rank_f <= 5:
+        fomo_warn = "\n⚡ *FOMO 경보* — 금융 카테고리 Top 5 진입! 리테일 수급 유입 가능"
+
+    lines = []
+    if rank_f is not None:
+        lines.append(f"💰 금융 카테고리: *#{rank_f}*{trend(prev_f, rank_f)}")
+    if rank_o is not None:
+        lines.append(f"📊 전체 무료 앱: *#{rank_o}*{trend(prev_o, rank_o)}")
+
+    return [
+        _sec(f"*📱 App Store 순위 (미국)*\n" + "  |  ".join(lines) + fomo_warn),
+        _ctx("Apple RSS 기준 | 전일 대비 ▲상승 ▼하락"),
+    ]
 @dataclass
 class VolumeProfile:
     poc_price: float = 0.0          # Point of Control (거래 집중 가격대)
@@ -2049,6 +2232,25 @@ def run_close():
     if short:
         blocks.extend(format_short_block(short))
         ws.setdefault("short_readings", []).append(short.short_pct)
+
+    # BTC 상관계수
+    btc_corr = calc_btc_correlation()
+    if btc_corr:
+        blocks.extend(format_btc_correlation_block(btc_corr))
+
+    # App Store 순위 (전일 캐시 비교)
+    prev_app_rank = None
+    if APP_RANK_CACHE_FILE.exists():
+        try:
+            prev_app_rank = json.loads(APP_RANK_CACHE_FILE.read_text())
+            yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+            if prev_app_rank.get("date") != yesterday:
+                prev_app_rank = None
+        except Exception:
+            prev_app_rank = None
+    curr_app_rank = fetch_appstore_rank()
+    if curr_app_rank:
+        blocks.extend(format_appstore_rank_block(prev_app_rank, curr_app_rank))
 
     insider_trades = fetch_insider_trades()
     log.info(f"내부자 거래 fetch 결과: 총 {len(insider_trades)}건")
