@@ -61,7 +61,8 @@ class PriceData:
     high: float = 0.0
     low: float = 0.0
     volume: int = 0
-    vol_avg_5d: int = 0      # 최근 5영업일 평균 거래량
+    vol_avg_5d: int = 0
+    market_state: str = ""    # "REGULAR" | "PRE" | "POST" | "CLOSED"
     timestamp: str = ""
 
 
@@ -233,10 +234,19 @@ def fetch_price() -> Optional[PriceData]:
         quotes = result["indicators"]["quote"][0]
         closes = [c for c in quotes["close"] if c is not None]
         volumes = [v for v in quotes["volume"] if v is not None]
+        market_state = meta.get("marketState", "CLOSED")
 
-        prev_close = closes[-2] if len(closes) >= 2 else 0
-        current = closes[-1] if closes else 0
+        # REGULAR/PRE/POST: 실시간 가격(regularMarketPrice) vs 마지막 확정 종가(closes[-1])
+        # CLOSED: 거래 없음 → 확정 종가 간 비교 (알림은 run_normal에서 스킵)
+        if market_state in ("REGULAR", "PRE", "POST"):
+            current = meta.get("regularMarketPrice", closes[-1] if closes else 0)
+            prev_close = closes[-1] if closes else 0   # 마지막 확정 종가
+        else:
+            current = closes[-1] if closes else 0
+            prev_close = closes[-2] if len(closes) >= 2 else 0
+
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
+        log.debug(f"fetch_price: market_state={market_state} current={current:.2f} prev_close={prev_close:.2f} chg={change_pct:+.2f}%")
 
         today_vol = int(meta.get("regularMarketVolume", volumes[-1] if volumes else 0))
         # 당일 제외한 직전 4일 + 당일 포함 최대 5일 평균
@@ -251,6 +261,7 @@ def fetch_price() -> Optional[PriceData]:
             low=round(min(q for q in quotes["low"] if q), 2) if any(quotes["low"]) else 0,
             volume=today_vol,
             vol_avg_5d=vol_avg_5d,
+            market_state=market_state,
             timestamp=datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
         )
     except Exception as e:
@@ -2064,38 +2075,44 @@ def run_normal():
 
     price = fetch_price()
     if price and price.prev_close > 0:
-        abs_pct = abs(price.change_pct)
-        direction = "up" if price.change_pct > 0 else "down"
-        prev_max = state.get("price_alert_max_pct", 0)
-        prev_dir = state.get("price_alert_direction", "")
+        log.info(f"가격: {price.change_pct:+.2f}% | market_state={price.market_state}")
 
-        should_alert = (
-            abs_pct >= 4 and (
-                prev_max == 0
-                or (direction == prev_dir and abs_pct >= prev_max + 1)
-                or (direction != prev_dir and abs_pct >= 4)
+        # 완전 마감(CLOSED)일 때만 가격 알림 스킵 — PRE/POST는 실제 거래 있으므로 허용
+        if price.market_state == "CLOSED":
+            log.info("CLOSED 상태 — 가격 알림 스킵")
+        else:
+            abs_pct = abs(price.change_pct)
+            direction = "up" if price.change_pct > 0 else "down"
+            prev_max = state.get("price_alert_max_pct", 0)
+            prev_dir = state.get("price_alert_direction", "")
+
+            should_alert = (
+                abs_pct >= 4 and (
+                    prev_max == 0
+                    or (direction == prev_dir and abs_pct >= prev_max + 1)
+                    or (direction != prev_dir and abs_pct >= 4)
+                )
             )
-        )
-        if should_alert:
-            emoji = "🚀" if direction == "up" else "💥"
-            label = "상승" if direction == "up" else "하락"
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"{emoji} *$HOOD {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
+            if should_alert:
+                emoji = "🚀" if direction == "up" else "💥"
+                label = "상승" if direction == "up" else "하락"
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
+                    f"{emoji} *$HOOD {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
 
-            # 상대 강도 (β 기반)
-            _beta = get_beta()
-            if _beta:
-                _qqq = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
-                blocks.extend(format_beta_block(calc_beta_divergence(_beta, _qqq, price.change_pct)))
+                # 상대 강도 (β 기반)
+                _beta = get_beta()
+                if _beta:
+                    _qqq = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
+                    blocks.extend(format_beta_block(calc_beta_divergence(_beta, _qqq, price.change_pct)))
 
-            # Volume Profile
-            vp = analyze_volume_profile(price.current)
-            if vp:
-                blocks.extend(format_volume_profile_block(vp))
+                # Volume Profile
+                vp = analyze_volume_profile(price.current)
+                if vp:
+                    blocks.extend(format_volume_profile_block(vp))
 
-            state["price_alert_max_pct"] = abs_pct if direction != prev_dir else max(prev_max, abs_pct)
-            state["price_alert_direction"] = direction
-            ws.setdefault("alerts_fired", []).append(f"주가 {price.change_pct:+.1f}%")
+                state["price_alert_max_pct"] = abs_pct if direction != prev_dir else max(prev_max, abs_pct)
+                state["price_alert_direction"] = direction
+                ws.setdefault("alerts_fired", []).append(f"주가 {price.change_pct:+.1f}%")
 
     closes = fetch_price_history(60)
     technicals = TechnicalSignals()
