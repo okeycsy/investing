@@ -111,7 +111,7 @@ jobs:
         run: |
           git config user.name "hood-monitor[bot]"
           git config user.email "bot@hood-monitor"
-          git add state.json weekly_state.json beta_cache.json 2>/dev/null || true
+          git add state.json weekly_state.json beta_cache.json app_rank_cache.json 2>/dev/null || true
           git diff --staged --quiet || git commit -m "📊 state update [${{ steps.mode.outputs.mode }}] $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git pull --rebase origin main || true
           git push || echo "Push failed — state will be updated next run"
