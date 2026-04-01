@@ -373,50 +373,92 @@ def get_beta() -> Optional[float]:
 
 def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> dict:
     """
-    기대 수익률 vs 실제 수익률 이격도 계산.
-
-    기대 수익률 = β × 시장(QQQ) 수익률  (CAPM 단순화, rf=0 가정)
-    이격도 = 실제 - 기대  (양수: 시장 대비 초과 성과 / 음수: 시장 대비 부진)
+    기대 수익률 vs 실제 수익률 이격도 + 피어 그룹 비교 통합.
+    피어($COIN, $MSTR) 데이터는 여기서 fetch하여 dict에 포함.
     """
     expected = round(beta * market_pct, 2)
     divergence = round(actual_pct - expected, 2)
+
+    # 피어 데이터 fetch (상대 강도 블록에 통합 표시)
+    coin_pct = _fetch_ticker_change("COIN") or 0.0
+    mstr_pct = _fetch_ticker_change("MSTR") or 0.0
+
+    # 피어 평균 대비 HOOD 이격
+    peer_avg = round((coin_pct + mstr_pct) / 2, 2)
+    peer_diff = round(actual_pct - peer_avg, 2)
+
     return {
         "beta": beta,
+        "qqq_pct": market_pct,
         "expected_pct": expected,
         "actual_pct": actual_pct,
         "divergence": divergence,
+        "coin_pct": coin_pct,
+        "mstr_pct": mstr_pct,
+        "peer_avg": peer_avg,
+        "peer_diff": peer_diff,
     }
 
 
 def format_beta_block(bd: dict) -> list:
-    """베타 기반 상대 강도 — 기존 RS(QQQ/SPY ±2%p 단순 비교)를 대체"""
-    div = bd["divergence"]
-    beta = bd["beta"]
+    """상대 강도 통합 블록 — 지수 대비(β 기반) + 피어 대비($COIN/$MSTR)"""
+    div      = bd["divergence"]
+    beta     = bd["beta"]
     expected = bd["expected_pct"]
-    actual = bd["actual_pct"]
-    qqq_pct = round(actual - div - (expected - beta * (actual - div)), 2)  # QQQ 역산
+    actual   = bd["actual_pct"]
+    qqq_pct  = bd["qqq_pct"]
+    peer_diff = bd["peer_diff"]
+    peer_avg  = bd["peer_avg"]
+    coin_pct  = bd["coin_pct"]
+    mstr_pct  = bd["mstr_pct"]
 
+    # ── 지수 대비 (β 기반) ──
     if div >= 3:
-        signal_line = "🟢 *개별 호재 감지* — β 기대치 대비 초과 상승"
+        vs_index = "🟢 *아웃퍼폼*"
+        vs_index_desc = f"β 기대치보다 {div:+.1f}%p 초과 상승"
     elif div >= 1:
-        signal_line = "🟡 *소폭 아웃퍼폼* — 기대 범위 상단"
+        vs_index = "🟡 *소폭 아웃퍼폼*"
+        vs_index_desc = f"기대 범위 상단 ({div:+.1f}%p)"
     elif div <= -3:
-        signal_line = "🔴 *개별 악재 의심* — β 기대치 대비 초과 하락"
+        vs_index = "🔴 *언더퍼폼*"
+        vs_index_desc = f"β 기대치보다 {div:+.1f}%p 초과 하락"
     elif div <= -1:
-        signal_line = "🟠 *소폭 언더퍼폼* — 기대 범위 하단"
+        vs_index = "🟠 *소폭 언더퍼폼*"
+        vs_index_desc = f"기대 범위 하단 ({div:+.1f}%p)"
     else:
-        signal_line = "⚪ *기대 범위 내* — 시장 움직임과 부합"
+        vs_index = "⚪ *기대 범위 내*"
+        vs_index_desc = f"시장 움직임과 부합 ({div:+.1f}%p)"
+
+    # ── 피어 대비 ($COIN / $MSTR) ──
+    if peer_diff >= 2:
+        vs_peer = "🟢 *피어 아웃퍼폼*"
+        vs_peer_desc = f"COIN/MSTR 평균보다 {peer_diff:+.1f}%p 강세"
+    elif peer_diff >= 0.5:
+        vs_peer = "🟡 *피어 소폭 강세*"
+        vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
+    elif peer_diff <= -2:
+        vs_peer = "🔴 *피어 언더퍼폼*"
+        vs_peer_desc = f"COIN/MSTR 평균보다 {peer_diff:+.1f}%p 약세"
+    elif peer_diff <= -0.5:
+        vs_peer = "🟠 *피어 소폭 약세*"
+        vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
+    else:
+        vs_peer = "⚪ *피어 동조*"
+        vs_peer_desc = f"피어 평균과 유사 ({peer_diff:+.1f}%p)"
 
     return [
         _sec(
-            f"*📐 상대 강도 (β 기반)*  β = *{beta:.2f}*\n"
-            f"{signal_line}\n"
-            f"이격도: *{div:+.2f}%p*"
+            f"*📐 상대 강도*  β = *{beta:.2f}*\n"
+            f"지수 대비: {vs_index} — {vs_index_desc}\n"
+            f"피어 대비: {vs_peer} — {vs_peer_desc}"
         ),
         _ctx(
             f"*기대수익률 (HOOD) {expected:+.2f}%* (β×QQQ)  |  "
             f"*실제수익률 (HOOD) {actual:+.2f}%*  |  "
             f"*QQQ {qqq_pct:+.2f}%*"
+        ),
+        _ctx(
+            f"피어: *COIN {coin_pct:+.2f}%*  |  *MSTR {mstr_pct:+.2f}%*  |  평균 {peer_avg:+.2f}%"
         ),
     ]
 
@@ -427,7 +469,11 @@ def format_beta_block(bd: dict) -> list:
 
 
 def _fetch_ticker_change(ticker: str) -> Optional[float]:
-    """전일 종가 대비 당일 변동률 반환 (closes 배열 기준)"""
+    """
+    전일 확정 종가 대비 당일 변동률 반환.
+    REGULAR/PRE/POST: regularMarketPrice(실시간) vs closes[-1](전일 확정종가)
+    CLOSED: closes[-1] vs closes[-2]
+    """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=ticker)
     resp = safe_get(url, params={"interval": "1d", "range": "5d"})
@@ -435,10 +481,21 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
         return None
     try:
         data = resp.json()
-        closes = [c for c in data["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c is not None]
+        result = data["chart"]["result"][0]
+        meta = result["meta"]
+        closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
         if len(closes) < 2:
             return None
-        return round((closes[-1] - closes[-2]) / closes[-2] * 100, 2)
+        market_state = meta.get("marketState", "CLOSED")
+        if market_state in ("REGULAR", "PRE", "POST"):
+            current = meta.get("regularMarketPrice", closes[-1])
+            prev = closes[-1]
+        else:
+            current = closes[-1]
+            prev = closes[-2]
+        if not prev:
+            return None
+        return round((current - prev) / prev * 100, 2)
     except Exception as e:
         log.debug(f"_fetch_ticker_change({ticker}) error: {e}")
         return None
@@ -1934,7 +1991,7 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
             beta_line = f"⚪ *β 범위 내 {sm.beta_excess_pct:+.2f}%p*"
         blocks.append(_ctx(f"기대수익률 {sm.beta_expected_pct:+.2f}% (β×QQQ)  |  {beta_line}"))
 
-    # ── 피어 분기 경고 ──
+    # ── 피어 분기 경고 (Divergence Warning만 유지, 일반 피어 수치는 상대강도 블록에서 표시) ──
     if sm.divergence_warning:
         blocks.append(_sec(
             f"⚠️ *Divergence Warning*\n"
@@ -1942,10 +1999,6 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
         ))
         blocks.append(_ctx(
             f"COIN {sm.peer_coin_pct:+.2f}% / MSTR {sm.peer_mstr_pct:+.2f}% 반등  vs  HOOD 하락 가속"
-        ))
-    elif sm.peer_coin_pct != 0 or sm.peer_mstr_pct != 0:
-        blocks.append(_ctx(
-            f"피어: COIN {sm.peer_coin_pct:+.2f}% | MSTR {sm.peer_mstr_pct:+.2f}%"
         ))
 
     return blocks
