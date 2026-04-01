@@ -4,6 +4,7 @@
     "566657fceebb",
     "e9e72566b42d",
     "f8f5a29a7a7a",
+    "c4b7d0aa1981",
     "eca53674eed8",
     "508264a549ac",
     "473bd60835f8",
@@ -14,8 +15,7 @@
     "16de39781862",
     "4d2adf84b65f",
     "9b0dcf10858d",
-    "372a5fda198d",
-    "416f020c8d87"
+    "372a5fda198d"
   ],
   "last_insider_hashes": [
     "bd55a4ddd2f3",
@@ -116,8 +116,8 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 0,
-  "price_alert_direction": "",
+  "price_alert_max_pct": 6.35,
+  "price_alert_direction": "up",
   "price_alert_date": "2026-04-01",
   "pending_morning_alert": {
     "change_pct": 6.3,
