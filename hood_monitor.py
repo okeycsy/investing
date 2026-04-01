@@ -378,38 +378,41 @@ def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> d
 
 
 def format_beta_block(bd: dict) -> list:
+    """베타 기반 상대 강도 — 기존 RS(QQQ/SPY ±2%p 단순 비교)를 대체"""
     div = bd["divergence"]
-    if div >= 2:
-        div_emoji, div_desc = "🟢", "시장 대비 초과 상승"
-    elif div <= -2:
-        div_emoji, div_desc = "🔴", "시장 대비 초과 하락 (개별 요인)"
+    beta = bd["beta"]
+    expected = bd["expected_pct"]
+    actual = bd["actual_pct"]
+    qqq_pct = round(actual - div - (expected - beta * (actual - div)), 2)  # QQQ 역산
+
+    if div >= 3:
+        signal_line = "🟢 *개별 호재 감지* — β 기대치 대비 초과 상승"
+    elif div >= 1:
+        signal_line = "🟡 *소폭 아웃퍼폼* — 기대 범위 상단"
+    elif div <= -3:
+        signal_line = "🔴 *개별 악재 의심* — β 기대치 대비 초과 하락"
+    elif div <= -1:
+        signal_line = "🟠 *소폭 언더퍼폼* — 기대 범위 하단"
     else:
-        div_emoji, div_desc = "⚪", "기대 범위 내"
+        signal_line = "⚪ *기대 범위 내* — 시장 움직임과 부합"
 
     return [
         _sec(
-            f"*📉 베타 분석*  β = *{bd['beta']:.2f}*\n"
-            f"{div_emoji} 이격도: *{div:+.2f}%p* — {div_desc}"
+            f"*📐 상대 강도 (β 기반)*  β = *{beta:.2f}*\n"
+            f"{signal_line}\n"
+            f"이격도: *{div:+.2f}%p*"
         ),
         _ctx(
-            f"기대 수익률 {bd['expected_pct']:+.2f}% (β×QQQ)  |  "
-            f"실제 수익률 {bd['actual_pct']:+.2f}%  |  "
-            f"벤치마크(QQQ) {bd['actual_pct'] - div - (bd['expected_pct'] - bd['beta'] * (bd['actual_pct'] - div)):+.2f}%"
+            f"*기대수익률 (HOOD) {expected:+.2f}%* (β×QQQ)  |  "
+            f"*실제수익률 (HOOD) {actual:+.2f}%*  |  "
+            f"*QQQ {qqq_pct:+.2f}%*"
         ),
     ]
 
 
 # ─────────────────────────────────────────────
-# 1-2. 시장 대비 상대 강도 분석 (Relative Strength)
+# 1-2. 상대 강도 유틸 (_fetch_ticker_change 공용)
 # ─────────────────────────────────────────────
-@dataclass
-class RelativeStrength:
-    hood_pct: float = 0.0
-    qqq_pct: float = 0.0
-    spy_pct: float = 0.0
-    signal: str = ""        # "relative_weakness" | "market_selloff" | "relative_strength" | "neutral"
-    diff_qqq: float = 0.0   # HOOD - QQQ (음수면 HOOD가 더 하락)
-    diff_spy: float = 0.0
 
 
 def _fetch_ticker_change(ticker: str) -> Optional[float]:
@@ -428,71 +431,6 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
     except Exception as e:
         log.debug(f"_fetch_ticker_change({ticker}) error: {e}")
         return None
-
-
-def check_relative_strength(hood_pct: float) -> Optional[RelativeStrength]:
-    """
-    HOOD 등락률과 QQQ/SPY 벤치마크를 비교해 하락 성격 판별.
-
-    판별 기준 (하락 4% 이상일 때만 의미 있음):
-    - HOOD가 벤치마크보다 2%p 이상 더 하락 → Relative Weakness (개별 악재)
-    - HOOD 하락폭이 벤치마크와 유사 (±2%p 이내) → Market Sell-off (시장 전체 하락)
-
-    상승 시:
-    - HOOD가 벤치마크보다 2%p 이상 더 상승 → Relative Strength (개별 호재)
-    """
-    log.info("Relative Strength 분석 시작...")
-    qqq_pct = _fetch_ticker_change("QQQ")
-    spy_pct = _fetch_ticker_change("SPY")
-
-    if qqq_pct is None or spy_pct is None:
-        log.warning("벤치마크 데이터 fetch 실패 (QQQ/SPY)")
-        return None
-
-    diff_qqq = round(hood_pct - qqq_pct, 2)
-    diff_spy = round(hood_pct - spy_pct, 2)
-    avg_diff = (diff_qqq + diff_spy) / 2
-
-    log.info(f"RS 분석: HOOD {hood_pct:+.2f}% / QQQ {qqq_pct:+.2f}% / SPY {spy_pct:+.2f}% / avg_diff {avg_diff:+.2f}%p")
-
-    # 하락 국면
-    if hood_pct <= -4:
-        signal = "relative_weakness" if avg_diff <= -2 else "market_selloff"
-    # 상승 국면
-    elif hood_pct >= 4:
-        signal = "relative_strength" if avg_diff >= 2 else "market_rally"
-    else:
-        signal = "neutral"
-
-    return RelativeStrength(
-        hood_pct=hood_pct,
-        qqq_pct=qqq_pct,
-        spy_pct=spy_pct,
-        signal=signal,
-        diff_qqq=diff_qqq,
-        diff_spy=diff_spy,
-    )
-
-
-def format_relative_strength_block(rs: RelativeStrength) -> dict:
-    """RS 분석 결과 Slack 블록 포맷"""
-    signal_map = {
-        "relative_weakness": ("🔴 *개별 악재 의심*", "시장보다 크게 하락 — HOOD 자체 요인 가능성 높음"),
-        "market_selloff":    ("🟡 *시장 전체 하락*", "지수와 유사한 낙폭 — 매크로 투매로 판단"),
-        "relative_strength": ("🟢 *개별 호재 감지*", "시장보다 크게 상승 — HOOD 자체 모멘텀 가능성"),
-        "market_rally":      ("🟢 *시장 전체 상승*", "지수와 유사한 상승 — 매크로 반등"),
-        "neutral":           ("⚪ *중립*", "벤치마크 대비 특이 움직임 없음"),
-    }
-    title, desc = signal_map.get(rs.signal, ("⚪", ""))
-    avg_bench = round((rs.qqq_pct + rs.spy_pct) / 2, 2)
-    avg_diff = round((rs.diff_qqq + rs.diff_spy) / 2, 2)
-
-    return {"type": "section", "text": {"type": "mrkdwn", "text": (
-        f"*📐 시장 대비 상대 강도*\n"
-        f"{title} — {desc}\n"
-        f"$HOOD {rs.hood_pct:+.2f}% | QQQ {rs.qqq_pct:+.2f}% / SPY {rs.spy_pct:+.2f}% (벤치 평균 {avg_bench:+.2f}%)\n"
-        f"벤치마크 대비: *{avg_diff:+.2f}%p*"
-    )}}
 
 
 # ─────────────────────────────────────────────
@@ -1783,20 +1721,6 @@ def format_dca_block(signal: DCASignal) -> list:
     return blocks
 
 
-def format_relative_strength_block(rs: RelativeStrength) -> list:
-    signal_map = {
-        "relative_weakness": "🔴 *개별 악재 의심* — 시장보다 크게 하락",
-        "market_selloff":    "🟡 *시장 전체 하락* — 매크로 투매",
-        "relative_strength": "🟢 *개별 호재 감지* — 시장보다 크게 상승",
-        "market_rally":      "🟢 *시장 전체 상승* — 매크로 반등",
-        "neutral":           "⚪ *중립* — 벤치마크 대비 특이 없음",
-    }
-    avg_bench = round((rs.qqq_pct + rs.spy_pct) / 2, 2)
-    avg_diff = round((rs.diff_qqq + rs.diff_spy) / 2, 2)
-    return [
-        _sec(f"*📐 상대 강도*  {signal_map.get(rs.signal, '')}"),
-        _ctx(f"$HOOD {rs.hood_pct:+.2f}%  |  QQQ {rs.qqq_pct:+.2f}% / SPY {rs.spy_pct:+.2f}% (벤치 {avg_bench:+.2f}%)  |  차이 *{avg_diff:+.2f}%p*"),
-    ]
 
 
 def format_volume_profile_block(vp: VolumeProfile) -> list:
@@ -1975,10 +1899,11 @@ def run_normal():
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji} *$HOOD {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
 
-            # RS 분석
-            rs = check_relative_strength(price.change_pct)
-            if rs:
-                blocks.extend(format_relative_strength_block(rs))
+            # 상대 강도 (β 기반)
+            _beta = get_beta()
+            if _beta:
+                _qqq = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
+                blocks.extend(format_beta_block(calc_beta_divergence(_beta, _qqq, price.change_pct)))
 
             # Volume Profile
             vp = analyze_volume_profile(price.current)
@@ -2068,10 +1993,7 @@ def run_close():
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_big} *$HOOD 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
 
-            # RS 분석 (장 마감 후에도 유효)
-            rs = check_relative_strength(price.change_pct)
-            if rs:
-                blocks.extend(format_relative_strength_block(rs))
+            # 상대 강도 (β 기반) — 장 마감 후 run_close의 별도 beta 블록과 통합
 
             # Volume Profile: 장 마감 후엔 1분봉 없으므로 스킵
             # Safety Margin은 closes 계산 후 아래서 처리
