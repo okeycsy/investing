@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-$HOOD Advanced Monitor v3.3
+$HOOD Advanced Monitor v3.2
 ============================
 v3.2 fixes:
   1. Form 4 404 → 신고자 CIK를 accession 번호에서 추출
@@ -656,8 +656,8 @@ def format_appstore_rank_block(prev: Optional[dict], curr: dict) -> list:
     rank_f = curr.get("rank_finance")
     rank_o = curr.get("rank_overall")
 
-    if rank_f is None and rank_o is None:
-        return [_sec("*📱 App Store*  200위권 밖 (데이터 없음)")]
+    if rank_f is None:
+        return [_sec("*📱 App Store*  금융 카테고리 200위권 밖")]
 
     def trend(prev_r, curr_r):
         if prev_r is None or curr_r is None:
