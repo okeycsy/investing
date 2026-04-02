@@ -54,7 +54,19 @@
     "Sale: Quirk Steven M. 27,170주 대규모",
     "Sale: Quirk Steven M. 27,995주 소규모",
     "Sale: Quirk Steven M. 16,837주 소규모",
-    "Sale: Quirk Steven M. 16,497주 소규모"
+    "Sale: Quirk Steven M. 16,497주 소규모",
+    "Purchase: Malka Meyer 211주",
+    "Sale: Malka Meyer 800주",
+    "Purchase: Hegeman John William 211주",
+    "Purchase: Payne Christopher D 283주",
+    "Purchase: SEGAL SUSAN 288주",
+    "Sale: Zoellick Robert B. 800주",
+    "Sale: Treseder Oluwadara Johnson 800주",
+    "Purchase: RUBINSTEIN JONATHAN 422주",
+    "Sale: RUBINSTEIN JONATHAN 800주",
+    "Sale: Loop Paula 800주",
+    "Purchase: Bhatt Baiju 180주",
+    "Sale: Bhatt Baiju 800주"
   ],
   "news_headlines": [
     "1 Cash-Producing Stock Worth Your Attention and 2 We Find Risky",
@@ -150,7 +162,8 @@
     0.518,
     0.518,
     0.518,
-    0.518
+    0.518,
+    0.522
   ],
   "short_readings": [
     37.1,
@@ -175,6 +188,7 @@
     41.5,
     41.5,
     41.5,
-    41.5
+    41.5,
+    42.7
   ]
 }
