@@ -1,8 +1,8 @@
 {
   "last_price": 65.16,
   "last_news_hashes": [
+    "1ee3065b6ede",
     "d1d8d806de33",
-    "f59a651a783e",
     "7875539f36d2",
     "6e74e51d7f8e",
     "6db8bdcc803f",
@@ -108,7 +108,7 @@
     65.16,
     69.3,
     70.11,
-    69.32
+    69.05
   ],
   "weekly_data": {
     "prices": [],
@@ -118,7 +118,7 @@
   },
   "price_alert_max_pct": 0,
   "price_alert_direction": "",
-  "price_alert_date": "2026-04-02",
+  "price_alert_date": "2026-04-03",
   "pending_morning_alert": null,
   "dca_shares": 1896,
   "dca_avg_price": 101.13,
