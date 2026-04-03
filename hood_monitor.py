@@ -97,7 +97,8 @@ class ShortInterestData:
 class InsiderTrade:
     filer: str = ""
     title: str = ""
-    trade_type: str = ""
+    trade_type: str = ""   # "Purchase" | "Sale" | "Award"
+    txn_code: str = ""     # 원본 SEC transaction code (P/S/A/D 등)
     shares: int = 0
     price: float = 0.0
     total_value: float = 0.0
@@ -1398,7 +1399,21 @@ def parse_form4_xml(xml_text: str, filing_date: str, url: str) -> list:
         rel = root.find(".//reportingOwner/reportingOwnerRelationship")
         if rel is None:
             rel = root.find(".//reportingOwnerRelationship")
-        filer_title = rel.findtext("officerTitle", "") if rel is not None else ""
+
+        filer_title = ""
+        if rel is not None:
+            filer_title = rel.findtext("officerTitle", "").strip()
+            # officerTitle 없으면 역할 필드로 fallback
+            if not filer_title:
+                is_director  = rel.findtext("isDirector", "0").strip()
+                is_officer   = rel.findtext("isOfficer", "0").strip()
+                is_10pct     = rel.findtext("isTenPercentOwner", "0").strip()
+                if is_director == "1":
+                    filer_title = "Director"
+                elif is_officer == "1":
+                    filer_title = "Officer"
+                elif is_10pct == "1":
+                    filer_title = "10% Owner"
 
         for txn in root.findall(".//nonDerivativeTransaction"):
             t = _parse_transaction(txn, filer_name, filer_title, filing_date, url)
@@ -1423,12 +1438,8 @@ def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
             txn_code_e = coding.find("transactionCode")
             txn_code = txn_code_e.text.strip() if txn_code_e is not None and txn_code_e.text else ""
 
-        # 제외할 transaction code:
-        # C = 전환 (Class B → Class A 등, 실제 매수 아님)
-        # J = 기타 취득/처분 (스톡옵션 행사 등 시장 무관)
-        # G = 증여
-        # W = 상속
-        # Z = 신탁 관련
+        # 제외 코드: 주주 입장에서 의미 없는 비시장 거래
+        # C=전환, J=기타, G=증여, W=상속, Z=신탁
         SKIP_CODES = {"C", "J", "G", "W", "Z"}
         if txn_code in SKIP_CODES:
             log.debug(f"Form 4 스킵 (code={txn_code}): {filer_name}")
@@ -1437,30 +1448,37 @@ def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
         amounts = txn.find("transactionAmounts")
         if amounts is None:
             return None
+
         shares_e = amounts.find("transactionShares/value")
-        price_e = amounts.find("transactionPricePerShare/value")
-        code_e = amounts.find("transactionAcquiredDisposedCode/value")
+        price_e  = amounts.find("transactionPricePerShare/value")
+        code_e   = amounts.find("transactionAcquiredDisposedCode/value")
+
         shares = float(shares_e.text) if shares_e is not None and shares_e.text else 0
-        price = float(price_e.text) if price_e is not None and price_e.text else 0
-        acq = code_e.text.strip() if code_e is not None and code_e.text else ""
+        price  = float(price_e.text)  if price_e  is not None and price_e.text  else 0
+        acq    = code_e.text.strip()  if code_e   is not None and code_e.text   else ""
 
         if shares == 0:
             return None
 
-        # P = 시장 매수, A = 취득(부여 등), D = 처분/매도, S = 시장 매도
-        if txn_code == "P" or (txn_code == "A" and acq == "A"):
+        # ── 거래 유형 분류 ──────────────────────────────────
+        # P = 장내 매수 (Open Market Purchase)  → 강한 강세 시그널
+        # S = 장내 매도 (Open Market Sale)      → 강한 약세 시그널
+        # A = RSU 귀속/스톡옵션 부여 (Award)    → 보상, 시장 신호 아님
+        # D = 처분 (Disposition, 비시장 매도 등) → 약세 시그널
+        if txn_code == "P":
             trade_type = "Purchase"
-        elif txn_code in ("S", "D") or acq == "D":
+        elif txn_code == "S":
+            trade_type = "Sale"
+        elif txn_code == "A":
+            trade_type = "Award"     # RSU 귀속 / 스톡옵션 부여
+        elif txn_code == "D" or acq == "D":
             trade_type = "Sale"
         else:
-            trade_type = "Other"
-
-        # Other는 알림 불필요
-        if trade_type == "Other":
-            return None
+            return None              # 분류 불가 → 스킵
 
         return InsiderTrade(
             filer=filer_name, title=filer_title, trade_type=trade_type,
+            txn_code=txn_code,
             shares=int(shares), price=round(price, 2),
             total_value=round(shares * price, 2),
             date=filing_date, url=url,
@@ -1902,9 +1920,32 @@ def format_short_block(si: ShortInterestData) -> list:
 def format_insider_block(trades: list) -> list:
     if not trades:
         return []
+
+    # 거래 유형별 표시 맵
+    TYPE_MAP = {
+        "Purchase": ("🟢", "장내 매수"),
+        "Sale":     ("🔴", "장내 매도"),
+        "Award":    ("🔵", "RSU 귀속"),
+    }
+    # txn_code 보조 레이블 (Purchase/Sale 내에서 세분화)
+    CODE_LABEL = {
+        "P": "장내 매수",
+        "S": "장내 매도",
+        "A": "RSU 귀속",
+        "D": "처분 매도",
+    }
+
     lines = []
-    for t in trades[:5]:
-        emoji = "🟢" if t.trade_type == "Purchase" else "🔴"
+    for t in trades[:6]:
+        emoji, type_label = TYPE_MAP.get(t.trade_type, ("⚪", t.trade_type))
+        # txn_code로 세분화된 레이블 우선 사용
+        if t.txn_code in CODE_LABEL:
+            type_label = CODE_LABEL[t.txn_code]
+
+        # 직함 표시 (없으면 생략)
+        title_str = f" _{t.title}_" if t.title else ""
+
+        # 규모 산정
         if t.total_value >= 1_000_000:
             scale = "대규모"
         elif t.total_value >= 100_000:
@@ -1913,9 +1954,19 @@ def format_insider_block(trades: list) -> list:
             scale = "소규모"
         else:
             scale = "대규모" if t.shares >= 50_000 else "중규모" if t.shares >= 5_000 else "소규모"
-        price_str = f" @ ${t.price:.2f}" if t.price > 0 else ""
-        lines.append(f"{emoji} *{t.filer}* ({t.title})  {t.shares:,}주{price_str} {scale} _{t.date}_")
-    return [_sec("*🕴 내부자 거래*\n" + "\n".join(lines))]
+
+        # 가격: RSU 귀속은 가격 없음이 정상이므로 표시 생략
+        price_str = f" @ ${t.price:.2f}" if t.price > 0 and t.trade_type != "Award" else ""
+
+        lines.append(
+            f"{emoji} *{t.filer}*{title_str}\n"
+            f"   {type_label}  {t.shares:,}주{price_str}  {scale}  _{t.date}_"
+        )
+
+    return [
+        _sec("*🕴 내부자 거래*\n" + "\n".join(lines)),
+        _ctx("🟢 장내 매수  🔴 장내 매도  🔵 RSU 귀속(보상, 시장 신호 아님)"),
+    ]
 
 
 def format_13f_block(filings: list) -> list:
