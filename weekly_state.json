@@ -3,7 +3,9 @@
   "alerts_fired": [],
   "insider_trades": [],
   "news_headlines": [
-    "CEO 텐에프, 의미 있는 제품 개발 추진"
+    "CEO 텐에프, 의미 있는 제품 개발 추진",
+    "아동 투자 상품 출시",
+    "재무부와 아동계좌 운영 계약"
   ],
   "rsi_readings": [
     41.26,
@@ -12,7 +14,8 @@
     41.26,
     41.26,
     41.26,
-    41.26
+    41.26,
+    41.97
   ],
   "pcr_readings": [],
   "short_readings": []
