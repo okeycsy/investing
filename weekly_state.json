@@ -2,8 +2,12 @@
   "week_start": "2026-04-06",
   "alerts_fired": [],
   "insider_trades": [],
-  "news_headlines": [],
-  "rsi_readings": [],
+  "news_headlines": [
+    "CEO 텐에프, 의미 있는 제품 개발 추진"
+  ],
+  "rsi_readings": [
+    41.26
+  ],
   "pcr_readings": [],
   "short_readings": []
 }
