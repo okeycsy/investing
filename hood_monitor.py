@@ -989,12 +989,14 @@ def fetch_news() -> list:
         root = ET.fromstring(resp.text)
         news = []
         for item in root.findall(".//item")[:15]:
-            title = item.findtext("title", "")
+            title    = item.findtext("title", "")
             pub_date = item.findtext("pubDate", "")
+            link     = item.findtext("link", "")
             news.append({
                 "title": title,
-                "date": pub_date,
-                "hash": hashlib.md5(title.encode()).hexdigest()[:12],
+                "date":  pub_date,
+                "link":  link,
+                "hash":  hashlib.md5(title.encode()).hexdigest()[:12],
             })
         return news
     except Exception as e:
@@ -1002,36 +1004,73 @@ def fetch_news() -> list:
         return []
 
 
+def _fetch_article_body(url: str, max_chars: int = 600) -> str:
+    """기사 URL에서 본문 앞부분 발췌 (파싱 실패 시 빈 문자열)"""
+    if not url:
+        return ""
+    try:
+        resp = safe_get(url, timeout=8, retries=1)
+        if not resp:
+            return ""
+        import re
+        # script/style 제거 후 태그 제거, 공백 정리
+        text = re.sub(r"<script[^>]*>.*?</script>", "", resp.text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>",  "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        # 의미 있는 본문 시작점 찾기 (짧은 메타 텍스트 스킵)
+        sentences = [s.strip() for s in text.split(".") if len(s.strip()) > 40]
+        body = ". ".join(sentences[:6])
+        return body[:max_chars]
+    except Exception:
+        return ""
+
+
 def translate_news(news: list) -> list:
     """
-    BUG 2 FIX:
-    - HOOD/Robinhood 직접 관련 뉴스만 처리
-    - 출력 언어를 한국어로 강제
-    - 관련 없으면 skip 표시
+    HOOD 관련 뉴스 필터링 + 한국어 요약(15자) + 기사 핵심 번역(2~3문장)
     """
     if not news or not ANTHROPIC_API_KEY:
         log.info(f"translate_news skip — news:{len(news)} api_key:{'있음' if ANTHROPIC_API_KEY else '없음'}")
         return news
 
-    titles = "\n".join(f"{i+1}. {n['title']}" for i, n in enumerate(news))
-    log.info(f"Claude API 호출: 뉴스 번역 ({len(news)}건)")
+    # 기사 본문 발췌 (관련성 판단 전 미리 fetch)
+    for n in news:
+        n["body"] = _fetch_article_body(n.get("link", ""))
+
+    # 제목 + 본문 발췌 함께 전달
+    articles = []
+    for i, n in enumerate(news):
+        entry = f"{i+1}. [제목] {n['title']}"
+        if n.get("body"):
+            entry += f"\n   [본문] {n['body']}"
+        articles.append(entry)
+    content = "\n\n".join(articles)
+
+    log.info(f"Claude API 호출: 뉴스 번역 ({len(news)}건, 본문 포함)")
     prompt = f"""당신은 $HOOD(Robinhood Markets) 투자 알림 봇입니다.
-아래 뉴스 헤드라인 목록을 분석해주세요.
+아래 뉴스 목록(제목+본문 발췌)을 분석해주세요.
 
 규칙:
-1. Robinhood Markets / $HOOD 주가에 직접 영향을 주는 뉴스만 포함 (간접 연관 제외)
+1. Robinhood Markets / $HOOD 주가에 직접 영향을 주는 뉴스만 포함
 2. 포함 기준: 실적, 규제, 경쟁사 직접 비교, 경영진 변동, 주요 제품/서비스, 기관 매수/매도, 소송
 3. 제외 기준: 증권업 일반 뉴스, 금리 일반론, 다른 회사 뉴스에 HOOD가 언급만 된 경우
 4. 반드시 한국어로만 출력
 
 각 뉴스에 대해 JSON 배열로만 응답 (다른 텍스트 없이):
 [
-  {{"idx": 1, "relevant": true, "summary": "15자 이내 한국어 요약", "sentiment": "positive|negative|neutral"}},
+  {{
+    "idx": 1,
+    "relevant": true,
+    "summary": "15자 이내 핵심 요약",
+    "translation": "기사 핵심 내용을 2~3문장으로 자연스러운 한국어로 번역. 투자자 관점에서 중요한 수치·사실 위주로.",
+    "sentiment": "positive|negative|neutral"
+  }},
   {{"idx": 2, "relevant": false}}
 ]
 
 뉴스 목록:
-{titles}"""
+{content}"""
 
     try:
         resp = requests.post(
@@ -1043,10 +1082,10 @@ def translate_news(news: list) -> list:
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 800,
+                "max_tokens": 1500,
                 "messages": [{"role": "user", "content": prompt}],
             },
-            timeout=30,
+            timeout=40,
         )
         if resp.status_code != 200:
             log.error(f"Claude API 오류 (뉴스 번역): HTTP {resp.status_code} — {resp.text[:200]}")
@@ -1060,7 +1099,7 @@ def translate_news(news: list) -> list:
         results = json.loads(text)
 
         relevant = sum(1 for r in results if r.get("relevant", False))
-        skipped = len(results) - relevant
+        skipped  = len(results) - relevant
         log.info(f"뉴스 번역 완료: 총 {len(results)}건 — 관련 {relevant}건 / 스킵 {skipped}건")
 
         for item in results:
@@ -1070,8 +1109,9 @@ def translate_news(news: list) -> list:
             if not item.get("relevant", False):
                 news[idx]["skip"] = True
             else:
-                news[idx]["summary"] = item.get("summary", "")
-                news[idx]["sentiment"] = item.get("sentiment", "neutral")
+                news[idx]["summary"]     = item.get("summary", "")
+                news[idx]["translation"] = item.get("translation", "")
+                news[idx]["sentiment"]   = item.get("sentiment", "neutral")
     except Exception as e:
         log.warning(f"뉴스 번역 예외: {e}")
 
@@ -1988,11 +2028,13 @@ def format_news_block(news: list) -> list:
     relevant = [n for n in news if not n.get("skip") and n.get("summary")]
     if not relevant:
         return []
-    lines = []
+    blocks = []
     for n in relevant[:5]:
         tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
-        lines.append(f"{tag} {n['summary']}")
-    return [_sec("*📰 뉴스*\n" + "\n".join(lines))]
+        blocks.append(_sec(f"*📰 {tag} {n['summary']}*"))
+        if n.get("translation"):
+            blocks.append(_ctx(n["translation"]))
+    return blocks
 
 
 
