@@ -525,30 +525,35 @@ def format_beta_block(bd: dict) -> list:
 
 def _fetch_ticker_change(ticker: str) -> Optional[float]:
     """
-    전일 확정 종가 대비 당일 변동률.
-    regularMarketPrice      = 현재가 (장중 실시간 or 마감 후 확정 종가)
-    regularMarketPreviousClose = 직전 정규장 확정 종가 (Yahoo 공식 필드)
-    두 값 모두 market_state 분기 없이 사용 가능.
+    전일 정규장 종가 대비 현재가 변동률.
+    fetch_price와 동일한 실증된 방식:
+    - includePrePost=true로 오늘 프리/정규/애프터 quotes 포함
+    - current = 오늘 날짜 최신 바
+    - prev    = meta.regularMarketPrice (전일 정규장 종가)
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=ticker)
-    resp = safe_get(url, params={"interval": "1d", "range": "5d"})
+    resp = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
     if not resp:
         return None
     try:
-        data   = resp.json()
-        result = data["chart"]["result"][0]
-        meta   = result["meta"]
-        closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
+        data      = resp.json()
+        result    = data["chart"]["result"][0]
+        meta      = result["meta"]
+        timestamps = result.get("timestamp", [])
+        closes    = result["indicators"]["quote"][0].get("close", [])
 
-        current = float(meta.get("regularMarketPrice") or (closes[-1] if closes else 0))
-        prev    = float(
-            meta.get("regularMarketPreviousClose")
-            or meta.get("previousClose")
-            or (closes[-2] if len(closes) >= 2 else (closes[-1] if closes else 0))
-        )
+        today   = datetime.now(UTC).date()
+        current = None
+        for i in range(len(timestamps) - 1, -1, -1):
+            if i < len(closes) and closes[i] is not None:
+                if datetime.fromtimestamp(timestamps[i], UTC).date() == today:
+                    current = float(closes[i])
+                    break
 
-        if not prev:
+        prev = float(meta.get("regularMarketPrice") or 0)
+
+        if not current or not prev:
             return None
         return round((current - prev) / prev * 100, 2)
     except Exception as e:
