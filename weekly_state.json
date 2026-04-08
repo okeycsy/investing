@@ -3,7 +3,14 @@
   "alerts_fired": [
     "주가 +8.6%"
   ],
-  "insider_trades": [],
+  "insider_trades": [
+    "Sale: Tenev Vladimir 182,667주 대규모",
+    "Sale: Tenev Vladimir 192,333주 대규모",
+    "Sale: Pinner Jeffrey Tsvi 3,035주 중규모",
+    "Sale: Pinner Jeffrey Tsvi 2,800주 중규모",
+    "Sale: Gallagher Daniel Martin Jr 5,403주 중규모",
+    "Sale: Gallagher Daniel Martin Jr 4,597주 중규모"
+  ],
   "news_headlines": [
     "CEO 텐에프, 의미 있는 제품 개발 추진",
     "아동 투자 상품 출시",
@@ -22,7 +29,8 @@
     "Robinhood, Trump 계좌 서비스로 장기 저축 상품 확대",
     "캐시 우드 1,270만 달러 매수, 애널리스트 평가 엇갈림",
     "Robinhood, 트럼프 키즈 계정 운영 지원",
-    "Robinhood Markets 실적 발표 예정"
+    "Robinhood Markets 실적 발표 예정",
+    "Robinhood, 트럼프 계좌 계약 체결, 가입자 400만 돌파"
   ],
   "rsi_readings": [
     41.26,
@@ -72,6 +80,7 @@
     48.7,
     45.74,
     46.4,
+    46.54,
     46.54
   ],
   "pcr_readings": [

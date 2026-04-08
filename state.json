@@ -1,10 +1,11 @@
 {
   "last_price": 65.16,
   "last_news_hashes": [
+    "40e8a0a6f7a5",
+    "b7c84f450bfb",
     "32eb1b349f1c",
     "f6822bfa0853",
     "a1c158252427",
-    "b7c84f450bfb",
     "a08a22f26c07",
     "350671d21dd3",
     "e2b0462aaea1",
@@ -14,10 +15,15 @@
     "5c362b7bc10c",
     "b84a3efac4ba",
     "4a03b26c795c",
-    "bb64b78182ce",
-    "a03ccb02e166"
+    "bb64b78182ce"
   ],
   "last_insider_hashes": [
+    "9bfe28591934",
+    "9024ecd2a667",
+    "eaaf5c51c317",
+    "d84a7c9f5e05",
+    "19818eeca752",
+    "ff324222755a",
     "e90ca05176be",
     "4b33973a7559",
     "24e9fa3f874b",
@@ -26,14 +32,7 @@
     "4b31fdb6bed1",
     "2d403652944d",
     "eb75cb9aa803",
-    "b3bd40461b9c",
-    "6fdef00f1311",
-    "c1b7b88b8362",
-    "3eb027fd4d4d",
-    "bd55a4ddd2f3",
-    "ac17453fcaf6",
-    "338971dc46f4",
-    "65cc7051db01"
+    "b3bd40461b9c"
   ],
   "last_13f_hashes": [],
   "price_history": [
