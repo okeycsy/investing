@@ -223,61 +223,76 @@ def safe_get(url, headers=None, params=None, timeout=15, retries=3):
 # 1. 주가 데이터
 # ─────────────────────────────────────────────
 def fetch_price() -> Optional[PriceData]:
+    """
+    Yahoo Finance v7 quote API 사용.
+    chart API(interval=1d)는 프리마켓에서 CLOSED + 전일종가를 반환하는 문제 있음.
+    quote API는 preMarketPrice / postMarketPrice / regularMarketPrice를 분리 제공.
+    """
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=TICKER)
-    # interval=1m&range=1d: 실시간 marketState + regularMarketPrice 정확히 반환
-    # interval=1d는 프리마켓에서 CLOSED + 전일종가를 반환하는 Yahoo 특성 있음
-    resp = safe_get(url, params={"interval": "1m", "range": "1d"})
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    resp = safe_get(url, params={"symbols": TICKER, "fields": ",".join([
+        "regularMarketPrice", "regularMarketPreviousClose",
+        "preMarketPrice", "postMarketPrice",
+        "marketState", "regularMarketVolume",
+        "regularMarketDayHigh", "regularMarketDayLow",
+    ])})
     if not resp:
         return None
     try:
-        data = resp.json()
-        result = data["chart"]["result"][0]
-        meta = result["meta"]
-        market_state = meta.get("marketState", "CLOSED")
+        data   = resp.json()
+        result = data["quoteResponse"]["result"]
+        if not result:
+            log.warning("fetch_price: quoteResponse empty")
+            return None
+        q = result[0]
 
-        # regularMarketPrice: 장 상태 무관하게 "현재 거래 가능한 최신가"
-        current = float(meta.get("regularMarketPrice") or 0)
+        market_state = q.get("marketState", "CLOSED")
+        reg_price    = q.get("regularMarketPrice", 0)
+        pre_price    = q.get("preMarketPrice")
+        post_price   = q.get("postMarketPrice")
+        prev_close   = q.get("regularMarketPreviousClose", 0)
 
-        # 전일 확정 종가: 1m 요청 시 chartPreviousClose가 정확함
-        prev_close = float(
-            meta.get("chartPreviousClose")
-            or meta.get("regularMarketPreviousClose")
-            or meta.get("previousClose")
-            or 0
-        )
+        # 현재가: 장 상태에 따라 가장 최신 가격 선택
+        if market_state == "PRE" and pre_price:
+            current = float(pre_price)
+        elif market_state in ("POST", "POSTPOST") and post_price:
+            current = float(post_price)
+        else:
+            current = float(reg_price or 0)
+
+        prev_close = float(prev_close or 0)
 
         if not current or not prev_close:
+            log.warning(f"fetch_price: current={current} prev={prev_close} — 데이터 부족")
             return None
 
         change_pct = round((current - prev_close) / prev_close * 100, 2)
 
-        today_vol = int(meta.get("regularMarketVolume", 0))
-
-        # 5일 평균 거래량: 별도 일봉 요청
+        # 5일 평균 거래량
         vol_avg_5d = 0
         try:
-            resp5 = safe_get(url, params={"interval": "1d", "range": "10d"})
-            if resp5:
-                vols = [v for v in resp5.json()["chart"]["result"][0]["indicators"]["quote"][0]["volume"] if v]
-                past_vols = vols[:-1] if len(vols) > 1 else []
-                vol_avg_5d = int(sum(past_vols[-5:]) / len(past_vols[-5:])) if past_vols else 0
+            r5 = safe_get(YAHOO_QUOTE_URL.format(ticker=TICKER),
+                          params={"interval": "1d", "range": "10d"})
+            if r5:
+                vols = [v for v in r5.json()["chart"]["result"][0]["indicators"]["quote"][0]["volume"] if v]
+                past  = vols[:-1] if len(vols) > 1 else []
+                vol_avg_5d = int(sum(past[-5:]) / len(past[-5:])) if past else 0
         except Exception:
             pass
 
         log.info(
-            f"fetch_price: state={market_state} "
-            f"current={current:.2f} prev={prev_close:.2f} chg={change_pct:+.2f}% "
-            f"(chartPreviousClose={meta.get('chartPreviousClose')})"
+            f"fetch_price: state={market_state} current={current:.2f} prev={prev_close:.2f} "
+            f"chg={change_pct:+.2f}% "
+            f"(pre={pre_price} reg={reg_price} post={post_price})"
         )
 
         return PriceData(
             current=round(current, 2),
             prev_close=round(prev_close, 2),
             change_pct=change_pct,
-            high=round(meta.get("regularMarketDayHigh", 0), 2),
-            low=round(meta.get("regularMarketDayLow", 0), 2),
-            volume=today_vol,
+            high=round(q.get("regularMarketDayHigh", 0), 2),
+            low=round(q.get("regularMarketDayLow", 0), 2),
+            volume=int(q.get("regularMarketVolume", 0)),
             vol_avg_5d=vol_avg_5d,
             market_state=market_state,
             timestamp=datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
