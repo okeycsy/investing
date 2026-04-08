@@ -222,14 +222,12 @@ def safe_get(url, headers=None, params=None, timeout=15, retries=3):
 # ─────────────────────────────────────────────
 # 1. 주가 데이터
 # ─────────────────────────────────────────────
-def fetch_price() -> Optional[PriceData]:
+def fetch_price(realtime: bool = True) -> Optional[PriceData]:
     """
     시장 상태별 정확한 현재가/전일종가 계산.
 
-    CLOSED/POST: 확정 일봉 closes[-1] vs closes[-2]
-    PRE/REGULAR: 1분봉 최신 바 vs 전일 확정 종가(closes[-1])
-
-    marketState: meta에 없으므로 UTC 시간으로 직접 판별.
+    realtime=True  (run_normal): 프리/정규/애프터 실시간 가격
+    realtime=False (run_close):  확정 일봉만 사용 (오늘 정규장 종가 vs 어제 정규장 종가)
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=TICKER)
@@ -274,7 +272,7 @@ def fetch_price() -> Optional[PriceData]:
         market_state = "CLOSED"
 
     # ── 3. 현재가 & 전일종가 ─────────────────────────────────────
-    if market_state in ("PRE", "REGULAR", "POST"):
+    if realtime and market_state in ("PRE", "REGULAR", "POST"):
         # 실시간: 1분봉 최신 바
         resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
         if not resp_1m:
@@ -2363,7 +2361,7 @@ def run_close():
     ws = load_weekly_state()
     blocks = []
 
-    price = fetch_price()
+    price = fetch_price(realtime=False)
     if price and price.prev_close > 0:
         abs_pct = abs(price.change_pct)
         direction = "up" if price.change_pct > 0 else "down"
