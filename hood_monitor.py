@@ -237,17 +237,25 @@ def fetch_price() -> Optional[PriceData]:
         volumes = [v for v in quotes["volume"] if v is not None]
         market_state = meta.get("marketState", "CLOSED")
 
-        # REGULAR/PRE/POST: 실시간 가격(regularMarketPrice) vs 마지막 확정 종가(closes[-1])
-        # CLOSED: 거래 없음 → 확정 종가 간 비교 (알림은 run_normal에서 스킵)
+        # chartPreviousClose = Yahoo가 직접 제공하는 "전일 확정 종가"
+        # 장중에 closes[-1]은 오늘 실시간 값이 포함되므로 사용 불가
+        chart_prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+
         if market_state in ("REGULAR", "PRE", "POST"):
             current = meta.get("regularMarketPrice", closes[-1] if closes else 0)
-            prev_close = closes[-1] if closes else 0   # 마지막 확정 종가
+            # 전일 확정 종가: Yahoo 메타값 우선, 없으면 closes 배열에서 역산
+            if chart_prev:
+                prev_close = float(chart_prev)
+            else:
+                # closes[-1]이 오늘 바일 수 있으므로 closes[-2] 사용
+                prev_close = closes[-2] if len(closes) >= 2 else (closes[-1] if closes else 0)
         else:
-            current = closes[-1] if closes else 0
+            # CLOSED: 확정 종가 간 비교
+            current   = closes[-1] if closes else 0
             prev_close = closes[-2] if len(closes) >= 2 else 0
 
         change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
-        log.debug(f"fetch_price: market_state={market_state} current={current:.2f} prev_close={prev_close:.2f} chg={change_pct:+.2f}%")
+        log.info(f"fetch_price: state={market_state} current={current:.2f} prev={prev_close:.2f} chg={change_pct:+.2f}% (chart_prev={chart_prev})")
 
         today_vol = int(meta.get("regularMarketVolume", volumes[-1] if volumes else 0))
         # 당일 제외한 직전 4일 + 당일 포함 최대 5일 평균
@@ -471,9 +479,8 @@ def format_beta_block(bd: dict) -> list:
 
 def _fetch_ticker_change(ticker: str) -> Optional[float]:
     """
-    전일 확정 종가 대비 당일 변동률 반환.
-    REGULAR/PRE/POST: regularMarketPrice(실시간) vs closes[-1](전일 확정종가)
-    CLOSED: closes[-1] vs closes[-2]
+    전일 확정 종가 대비 당일 변동률.
+    chartPreviousClose(Yahoo 메타) 우선 사용 → 장중 closes[-1] 오염 방지.
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=ticker)
@@ -481,19 +488,23 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
     if not resp:
         return None
     try:
-        data = resp.json()
+        data   = resp.json()
         result = data["chart"]["result"][0]
-        meta = result["meta"]
+        meta   = result["meta"]
         closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
-        if len(closes) < 2:
+        if not closes:
             return None
+
         market_state = meta.get("marketState", "CLOSED")
+        chart_prev   = meta.get("chartPreviousClose") or meta.get("previousClose")
+
         if market_state in ("REGULAR", "PRE", "POST"):
             current = meta.get("regularMarketPrice", closes[-1])
-            prev = closes[-1]
+            prev    = float(chart_prev) if chart_prev else (closes[-2] if len(closes) >= 2 else closes[-1])
         else:
             current = closes[-1]
-            prev = closes[-2]
+            prev    = closes[-2] if len(closes) >= 2 else closes[-1]
+
         if not prev:
             return None
         return round((current - prev) / prev * 100, 2)
