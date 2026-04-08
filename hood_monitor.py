@@ -224,104 +224,119 @@ def safe_get(url, headers=None, params=None, timeout=15, retries=3):
 # ─────────────────────────────────────────────
 def fetch_price() -> Optional[PriceData]:
     """
-    Yahoo Finance v8 chart API + includePrePost=true.
+    시장 상태별 정확한 현재가/전일종가 계산.
 
-    실증된 동작:
-    - meta.regularMarketPrice = 전일 정규장 확정 종가 (prev_close로 사용)
-    - quotes 배열 최신 바 = 현재 실시간 가격 (프리/정규/애프터 포함)
-    - meta.marketState 필드 없음 → UTC 시간으로 직접 판별
+    CLOSED/POST: 확정 일봉 closes[-1] vs closes[-2]
+    PRE/REGULAR: 1분봉 최신 바 vs 전일 확정 종가(closes[-1])
+
+    marketState: meta에 없으므로 UTC 시간으로 직접 판별.
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=TICKER)
-    resp = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
-    if not resp:
+
+    # ── 1. 확정 일봉 (prev_close 기준용) ─────────────────────────
+    resp_1d = safe_get(url, params={"interval": "1d", "range": "10d"})
+    if not resp_1d:
         return None
     try:
-        data      = resp.json()
-        result    = data["chart"]["result"][0]
-        meta      = result["meta"]
-        quotes    = result["indicators"]["quote"][0]
-        timestamps = result.get("timestamp", [])
-        closes    = quotes.get("close", [])
-        volumes   = quotes.get("volume", [])
+        closes_daily = [
+            c for c in resp_1d.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+            if c is not None
+        ]
+        volumes_daily = [
+            v for v in resp_1d.json()["chart"]["result"][0]["indicators"]["quote"][0]["volume"]
+            if v is not None
+        ]
+    except Exception as e:
+        log.error(f"fetch_price 일봉 파싱 실패: {e}")
+        return None
 
-        # ── 현재가: 오늘 날짜의 가장 최신 유효 바 ─────────────────
-        today   = datetime.now(UTC).date()
-        current = None
-        current_ts = None
-        for i in range(len(timestamps) - 1, -1, -1):
-            if i < len(closes) and closes[i] is not None:
-                bar_dt = datetime.fromtimestamp(timestamps[i], UTC)
-                if bar_dt.date() == today:
-                    current    = float(closes[i])
-                    current_ts = bar_dt
-                    break
+    if len(closes_daily) < 2:
+        log.warning("fetch_price: 일봉 데이터 부족")
+        return None
+
+    # ── 2. 장 상태 판별 (UTC 시간 기준) ──────────────────────────
+    now_utc = datetime.now(UTC)
+    hm      = now_utc.hour * 60 + now_utc.minute
+    dow     = now_utc.weekday()  # 0=Mon 6=Sun
+
+    if dow >= 5:                                    # 주말
+        market_state = "CLOSED"
+    elif hm < 8 * 60:                              # UTC 00:00~08:00
+        market_state = "CLOSED"
+    elif hm < 13 * 60 + 30:                        # UTC 08:00~13:30 → PRE
+        market_state = "PRE"
+    elif hm < 20 * 60:                             # UTC 13:30~20:00 → REGULAR
+        market_state = "REGULAR"
+    elif hm < 24 * 60:                             # UTC 20:00~24:00 → POST
+        market_state = "POST"
+    else:
+        market_state = "CLOSED"
+
+    # ── 3. 현재가 & 전일종가 ─────────────────────────────────────
+    if market_state in ("PRE", "REGULAR", "POST"):
+        # 실시간: 1분봉 최신 바
+        resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
+        if not resp_1m:
+            return None
+        try:
+            result_1m  = resp_1m.json()["chart"]["result"][0]
+            timestamps = result_1m.get("timestamp", [])
+            closes_1m  = result_1m["indicators"]["quote"][0].get("close", [])
+            today      = now_utc.date()
+            current    = None
+            for i in range(len(timestamps) - 1, -1, -1):
+                if i < len(closes_1m) and closes_1m[i] is not None:
+                    if datetime.fromtimestamp(timestamps[i], UTC).date() == today:
+                        current = round(float(closes_1m[i]), 2)
+                        break
+        except Exception as e:
+            log.error(f"fetch_price 1분봉 파싱 실패: {e}")
+            return None
 
         if current is None:
-            log.warning("fetch_price: 오늘 날짜 quotes 바 없음")
+            log.warning("fetch_price: 오늘 1분봉 바 없음")
             return None
 
-        # ── 전일 종가: meta.regularMarketPrice (Yahoo가 전일 정규장 종가로 유지) ──
-        prev_close = float(meta.get("regularMarketPrice") or 0)
-        if not prev_close:
-            log.warning("fetch_price: prev_close(regularMarketPrice) 없음")
-            return None
+        prev_close = round(float(closes_daily[-1]), 2)   # 전일 확정 종가
+        today_vol  = int(sum(
+            v for i, v in enumerate(result_1m["indicators"]["quote"][0].get("volume", []))
+            if v and i < len(timestamps)
+            and datetime.fromtimestamp(timestamps[i], UTC).date() == today
+        ))
+    else:
+        # CLOSED: 확정 일봉 사용
+        current    = round(float(closes_daily[-1]), 2)
+        prev_close = round(float(closes_daily[-2]), 2)
+        today_vol  = int(volumes_daily[-1]) if volumes_daily else 0
 
-        change_pct = round((current - prev_close) / prev_close * 100, 2)
+    change_pct = round((current - prev_close) / prev_close * 100, 2) if prev_close else 0
 
-        # ── marketState: UTC 시간 기준 직접 판별 ─────────────────
-        now_utc  = datetime.now(UTC)
-        hm       = now_utc.hour * 60 + now_utc.minute
-        weekday  = now_utc.weekday()  # 0=Mon 6=Sun
-        if weekday >= 5:
-            market_state = "CLOSED"
-        elif 8 * 60 <= hm < 13 * 60 + 30:    # UTC 08:00~13:30 (EDT 04:00~09:30)
-            market_state = "PRE"
-        elif 13 * 60 + 30 <= hm < 20 * 60:   # UTC 13:30~20:00 (EDT 09:30~16:00)
-            market_state = "REGULAR"
-        elif 20 * 60 <= hm < 24 * 60:         # UTC 20:00~24:00 (EDT 16:00~20:00)
-            market_state = "POST"
-        else:
-            market_state = "CLOSED"
+    # 5일 평균 거래량
+    past_vols  = volumes_daily[:-1] if len(volumes_daily) > 1 else []
+    vol_avg_5d = int(sum(past_vols[-5:]) / len(past_vols[-5:])) if past_vols else 0
 
-        # ── 당일 거래량 합산 (오늘 바만) ─────────────────────────
-        today_vol = 0
-        for i, ts in enumerate(timestamps):
-            if datetime.fromtimestamp(ts, UTC).date() == today:
-                if i < len(volumes) and volumes[i]:
-                    today_vol += int(volumes[i])
+    log.info(
+        f"fetch_price: state={market_state} "
+        f"current={current:.2f} prev={prev_close:.2f} chg={change_pct:+.2f}%"
+    )
 
-        # ── 5일 평균 거래량 (별도 일봉 요청) ─────────────────────
-        vol_avg_5d = 0
-        try:
-            r5 = safe_get(url, params={"interval": "1d", "range": "10d"})
-            if r5:
-                vols5 = [v for v in r5.json()["chart"]["result"][0]["indicators"]["quote"][0]["volume"] if v]
-                past  = vols5[:-1] if len(vols5) > 1 else []
-                vol_avg_5d = int(sum(past[-5:]) / len(past[-5:])) if past else 0
-        except Exception:
-            pass
+    try:
+        meta = resp_1d.json()["chart"]["result"][0]["meta"]
+    except Exception:
+        meta = {}
 
-        log.info(
-            f"fetch_price: state={market_state} "
-            f"current={current:.2f} prev={prev_close:.2f} chg={change_pct:+.2f}% "
-            f"(latest_bar={current_ts.strftime('%m/%d %H:%M UTC') if current_ts else None})"
-        )
-
-        return PriceData(
-            current=round(current, 2),
-            prev_close=round(prev_close, 2),
-            change_pct=change_pct,
-            high=round(meta.get("regularMarketDayHigh", 0), 2),
-            low=round(meta.get("regularMarketDayLow", 0), 2),
-            volume=today_vol,
-            vol_avg_5d=vol_avg_5d,
-            market_state=market_state,
-            timestamp=datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
-        )
-    except Exception as e:
-        log.error(f"Price parse error: {e}")
-        return None
+    return PriceData(
+        current=current,
+        prev_close=prev_close,
+        change_pct=change_pct,
+        high=round(meta.get("regularMarketDayHigh", 0), 2),
+        low=round(meta.get("regularMarketDayLow", 0), 2),
+        volume=today_vol,
+        vol_avg_5d=vol_avg_5d,
+        market_state=market_state,
+        timestamp=datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+    )
 
 
 def fetch_price_history(days: int = 60) -> list:
