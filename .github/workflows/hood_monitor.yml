@@ -1,20 +1,26 @@
 name: HOOD Monitor
 on:
   schedule:
-    # ── Normal (장중 매시간) ──
-    - cron: '0 14-20 * * 1-5'   # NYSE 장중 UTC 14~20
-    - cron: '0 0-9 * * 1-5'     # KST 낮 09:00~18:00
+    # ── Normal (프리마켓 + 정규장 + 애프터마켓) ──────────────────
+    # 프리마켓: 04:00~09:30 ET = UTC 08:00~13:30
+    # 정규장:   09:30~16:00 ET = UTC 13:30~20:00
+    - cron: '0 8-20 * * 1-5'    # UTC 08~20 (프리+정규장 전체)
 
-    # ── Close (06:00 KST) ──
+    # 애프터마켓: 16:00~20:00 ET = UTC 20:00~00:00
+    # UTC 21은 Close/Morning 전용이므로 22~23만 포함
+    - cron: '0 22-23 * * 1-5'   # UTC 22~23 (애프터 18:00~20:00 ET)
+    - cron: '0 0 * * 2-6'       # UTC 00 (애프터 마지막, 화~토 = 월~금 밤)
+
+    # ── Close (06:00 KST = UTC 21:00) ────────────────────────────
     - cron: '0 21 * * 1-5'
 
-    # ── Morning (06:30 KST, 4%+ 급변동 시에만 알림) ──
+    # ── Morning (06:30 KST = UTC 21:30, 4%+ 급변동 시에만 알림) ──
     - cron: '30 21 * * 1-5'
 
-    # ── 13F (토요일 19:00 KST) ──
+    # ── 13F (토요일 19:00 KST = UTC 10:00) ───────────────────────
     - cron: '0 10 * * 6'
 
-    # ── Weekly (월요일 08:00 KST) ──
+    # ── Weekly (월요일 08:00 KST = 일요일 23:00 UTC) ─────────────
     - cron: '0 23 * * 0'
 
   workflow_dispatch:
@@ -31,7 +37,7 @@ on:
           - 13f
           - weekly
           - dca_status
-          - dca_update        # ← 추가
+          - dca_update
       dca_shares:
         description: '[dca_update 전용] 매수 수량 (예: 10.5)'
         required: false
@@ -40,7 +46,7 @@ on:
         description: '[dca_update 전용] 매수 가격 (예: 64.50)'
         required: false
         default: ''
-      
+
 permissions:
   contents: write  # state.json 커밋용
 
@@ -48,7 +54,6 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,33 +76,40 @@ jobs:
             HOUR=$(date -u +%H)
             MIN=$(date -u +%M)
             DOW=$(date -u +%u)  # 1=Mon ... 7=Sun
-            
+
             # 일요일 23:00 UTC → Weekly (= 월요일 08:00 KST)
             if [ "$DOW" == "7" ] && [ "$HOUR" == "23" ]; then
               echo "mode=weekly" >> $GITHUB_OUTPUT
+
             # 토요일 → 13F
-            elif [ "$DOW" == "6" ]; then
+            elif [ "$DOW" == "6" ] && [ "$HOUR" == "10" ]; then
               echo "mode=13f" >> $GITHUB_OUTPUT
-            # 평일 21:30 UTC → Close
-            elif [ "$HOUR" == "21" ] && [ "$MIN" -ge "25" ]; then
+
+            # 평일 21:00 UTC → Close (06:00 KST)
+            # MIN < 25 로 21:00 cron과 21:30 cron을 구분
+            elif [ "$HOUR" == "21" ] && [ "$MIN" -lt "25" ]; then
               echo "mode=close" >> $GITHUB_OUTPUT
-            # 평일 23:00 UTC → Morning (= 08:00 KST, 종가 기준 알림)
-            elif [ "$HOUR" == "23" ]; then
+
+            # 평일 21:30 UTC → Morning (06:30 KST, 4%+ 시에만 실제 알림)
+            elif [ "$HOUR" == "21" ] && [ "$MIN" -ge "25" ]; then
               echo "mode=morning" >> $GITHUB_OUTPUT
-            # 그 외 평일 → Normal
+
+            # 그 외 평일 → Normal (프리/정규/애프터마켓)
             else
               echo "mode=normal" >> $GITHUB_OUTPUT
             fi
           fi
-          echo "Selected mode: $(cat $GITHUB_OUTPUT | grep mode | cut -d= -f2)"
+
+          SELECTED=$(grep '^mode=' $GITHUB_OUTPUT | tail -1 | cut -d= -f2)
+          echo "▶ Selected mode: $SELECTED (UTC ${HOUR}:$(printf '%02d' ${MIN:-0}), DOW=$DOW)"
 
       - name: Run HOOD Monitor
         env:
           RUN_MODE: ${{ steps.mode.outputs.mode }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          DCA_SHARES: ${{ github.event.inputs.dca_shares }}   # ← 추가
-          DCA_PRICE: ${{ github.event.inputs.dca_price }}     # ← 추가
+          DCA_SHARES: ${{ github.event.inputs.dca_shares }}
+          DCA_PRICE: ${{ github.event.inputs.dca_price }}
         run: python hood_monitor.py
 
       - name: Commit state
