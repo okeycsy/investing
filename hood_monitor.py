@@ -1,44 +1,35 @@
 #!/usr/bin/env python3
-"""
-Yahoo Finance API 응답 구조 확인용 진단 스크립트
-실행: python debug_yahoo.py
-"""
-import json
 import requests
+from datetime import datetime, timezone
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 URL = "https://query1.finance.yahoo.com/v8/finance/chart/HOOD"
 
-def dump_meta(label, params):
-    print(f"\n{'='*60}")
-    print(f"[{label}]  params={params}")
-    print('='*60)
-    try:
-        r = requests.get(URL, params=params, headers={"User-Agent": UA}, timeout=10)
-        print(f"HTTP {r.status_code}")
-        if r.status_code != 200:
-            return
-        meta = r.json()["chart"]["result"][0]["meta"]
-        # 가격/상태 관련 키만 출력
-        keys = [
-            "marketState", "regularMarketPrice", "regularMarketPreviousClose",
-            "chartPreviousClose", "previousClose", "preMarketPrice", "postMarketPrice",
-            "regularMarketVolume", "regularMarketDayHigh", "regularMarketDayLow",
-        ]
-        for k in keys:
-            if k in meta:
-                print(f"  {k}: {meta[k]}")
-        # 위에 없는 키 중 price 관련 있으면 추가 출력
-        extra = {k: v for k, v in meta.items()
-                 if any(x in k.lower() for x in ["price", "close", "market", "pre", "post"])
-                 and k not in keys}
-        if extra:
-            print("  --- 추가 price 관련 필드 ---")
-            for k, v in extra.items():
-                print(f"  {k}: {v}")
-    except Exception as e:
-        print(f"ERROR: {e}")
+def dump(label, params):
+    print(f"\n{'='*60}\n[{label}]\n{'='*60}")
+    r = requests.get(URL, params=params, headers={"User-Agent": UA}, timeout=10)
+    print(f"HTTP {r.status_code}")
+    if r.status_code != 200:
+        print(r.text[:200]); return
+    result = r.json()["chart"]["result"][0]
+    meta = result["meta"]
 
-dump_meta("interval=2m range=2d",  {"interval": "2m",  "range": "2d"})
-dump_meta("interval=1d range=5d",  {"interval": "1d",  "range": "5d"})
-dump_meta("interval=1m range=1d",  {"interval": "1m",  "range": "1d"})
+    for k in ["marketState","regularMarketPrice","regularMarketPreviousClose",
+              "chartPreviousClose","previousClose","preMarketPrice","postMarketPrice",
+              "regularMarketDayHigh","regularMarketDayLow","hasPrePostMarketData"]:
+        print(f"  {k}: {meta.get(k,'— 없음 —')}")
+
+    ts_val = meta.get("regularMarketTime")
+    if ts_val:
+        print(f"  regularMarketTime: {datetime.fromtimestamp(ts_val, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+    timestamps = result.get("timestamp", [])
+    closes = result["indicators"]["quote"][0].get("close", [])
+    print(f"\n  quotes 배열: {len(timestamps)}개 바 (마지막 5개)")
+    for i in range(max(0, len(timestamps)-5), len(timestamps)):
+        dt = datetime.fromtimestamp(timestamps[i], tz=timezone.utc).strftime('%m/%d %H:%M UTC')
+        print(f"    {dt}  close={closes[i] if i < len(closes) else None}")
+
+dump("1m / 1d (기본)", {"interval":"1m","range":"1d"})
+dump("1m / 1d + includePrePost=true", {"interval":"1m","range":"1d","includePrePost":"true"})
+dump("2m / 2d + includePrePost=true", {"interval":"2m","range":"2d","includePrePost":"true"})
