@@ -225,52 +225,58 @@ def safe_get(url, headers=None, params=None, timeout=15, retries=3):
 def fetch_price() -> Optional[PriceData]:
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=TICKER)
-    resp = safe_get(url, params={"interval": "1d", "range": "5d"})
+    # interval=1m&range=1d: 실시간 marketState + regularMarketPrice 정확히 반환
+    # interval=1d는 프리마켓에서 CLOSED + 전일종가를 반환하는 Yahoo 특성 있음
+    resp = safe_get(url, params={"interval": "1m", "range": "1d"})
     if not resp:
         return None
     try:
         data = resp.json()
         result = data["chart"]["result"][0]
         meta = result["meta"]
-        quotes = result["indicators"]["quote"][0]
-        closes = [c for c in quotes["close"] if c is not None]
-        volumes = [v for v in quotes["volume"] if v is not None]
         market_state = meta.get("marketState", "CLOSED")
 
-        # ── 현재가 ────────────────────────────────────────────────
-        # regularMarketPrice: 장중이면 실시간, 마감 후면 확정 종가
-        # 항상 "가장 최근 가격"을 의미하므로 market_state 무관하게 사용
-        current = float(meta.get("regularMarketPrice") or (closes[-1] if closes else 0))
+        # regularMarketPrice: 장 상태 무관하게 "현재 거래 가능한 최신가"
+        current = float(meta.get("regularMarketPrice") or 0)
 
-        # ── 전일 확정 종가 ─────────────────────────────────────────
-        # regularMarketPreviousClose: Yahoo가 공식 제공하는 "직전 정규장 종가"
-        # chartPreviousClose와 달리 명확하게 전 거래일 종가를 가리킴
+        # 전일 확정 종가: 1m 요청 시 chartPreviousClose가 정확함
         prev_close = float(
-            meta.get("regularMarketPreviousClose")
+            meta.get("chartPreviousClose")
+            or meta.get("regularMarketPreviousClose")
             or meta.get("previousClose")
-            or (closes[-2] if len(closes) >= 2 else (closes[-1] if closes else 0))
+            or 0
         )
 
-        change_pct = ((current - prev_close) / prev_close * 100) if prev_close else 0
+        if not current or not prev_close:
+            return None
+
+        change_pct = round((current - prev_close) / prev_close * 100, 2)
+
+        today_vol = int(meta.get("regularMarketVolume", 0))
+
+        # 5일 평균 거래량: 별도 일봉 요청
+        vol_avg_5d = 0
+        try:
+            resp5 = safe_get(url, params={"interval": "1d", "range": "10d"})
+            if resp5:
+                vols = [v for v in resp5.json()["chart"]["result"][0]["indicators"]["quote"][0]["volume"] if v]
+                past_vols = vols[:-1] if len(vols) > 1 else []
+                vol_avg_5d = int(sum(past_vols[-5:]) / len(past_vols[-5:])) if past_vols else 0
+        except Exception:
+            pass
 
         log.info(
             f"fetch_price: state={market_state} "
             f"current={current:.2f} prev={prev_close:.2f} chg={change_pct:+.2f}% "
-            f"(regularMarketPreviousClose={meta.get('regularMarketPreviousClose')}, "
-            f"chartPreviousClose={meta.get('chartPreviousClose')})"
+            f"(chartPreviousClose={meta.get('chartPreviousClose')})"
         )
-
-        today_vol = int(meta.get("regularMarketVolume", volumes[-1] if volumes else 0))
-        # 당일 제외한 직전 4일 + 당일 포함 최대 5일 평균
-        past_vols = [v for v in volumes[:-1] if v] if len(volumes) > 1 else []
-        vol_avg_5d = int(sum(past_vols) / len(past_vols)) if past_vols else 0
 
         return PriceData(
             current=round(current, 2),
             prev_close=round(prev_close, 2),
-            change_pct=round(change_pct, 2),
-            high=round(max(q for q in quotes["high"] if q), 2) if any(quotes["high"]) else 0,
-            low=round(min(q for q in quotes["low"] if q), 2) if any(quotes["low"]) else 0,
+            change_pct=change_pct,
+            high=round(meta.get("regularMarketDayHigh", 0), 2),
+            low=round(meta.get("regularMarketDayLow", 0), 2),
             volume=today_vol,
             vol_avg_5d=vol_avg_5d,
             market_state=market_state,
