@@ -539,39 +539,65 @@ def format_beta_block(bd: dict) -> list:
 def _fetch_ticker_change(ticker: str) -> Optional[float]:
     """
     전일 정규장 종가 대비 현재가 변동률.
-    fetch_price와 동일한 실증된 방식:
-    - includePrePost=true로 오늘 프리/정규/애프터 quotes 포함
-    - current = 오늘 날짜 최신 바
-    - prev    = meta.regularMarketPrice (전일 정규장 종가)
+    fetch_price()와 완전히 동일한 방식:
+    - 1d 일봉 closes[-1] → prev (전일 확정 종가)
+    - 1m + includePrePost 최신 바 → current (오늘 실시간)
+    - 장 마감 후(CLOSED)엔 closes[-1] vs closes[-2]
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=ticker)
-    resp = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
-    if not resp:
+
+    # 1) 확정 일봉
+    resp_1d = safe_get(url, params={"interval": "1d", "range": "10d"})
+    if not resp_1d:
         return None
     try:
-        data      = resp.json()
-        result    = data["chart"]["result"][0]
-        meta      = result["meta"]
-        timestamps = result.get("timestamp", [])
-        closes    = result["indicators"]["quote"][0].get("close", [])
-
-        today   = datetime.now(UTC).date()
-        current = None
-        for i in range(len(timestamps) - 1, -1, -1):
-            if i < len(closes) and closes[i] is not None:
-                if datetime.fromtimestamp(timestamps[i], UTC).date() == today:
-                    current = float(closes[i])
-                    break
-
-        prev = float(meta.get("regularMarketPrice") or 0)
-
-        if not current or not prev:
-            return None
-        return round((current - prev) / prev * 100, 2)
-    except Exception as e:
-        log.debug(f"_fetch_ticker_change({ticker}) error: {e}")
+        closes_daily = [c for c in resp_1d.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c is not None]
+    except Exception:
         return None
+    if len(closes_daily) < 2:
+        return None
+
+    # 2) 장 상태 판별 (fetch_price와 동일)
+    now_utc = datetime.now(UTC)
+    hm  = now_utc.hour * 60 + now_utc.minute
+    dow = now_utc.weekday()
+    if dow >= 5 or hm < 8 * 60 or hm >= 24 * 60:
+        market_state = "CLOSED"
+    elif hm < 13 * 60 + 30:
+        market_state = "PRE"
+    elif hm < 20 * 60:
+        market_state = "REGULAR"
+    else:
+        market_state = "POST"
+
+    if market_state in ("PRE", "REGULAR", "POST"):
+        # 3) 실시간: 1분봉 최신 바
+        resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
+        if not resp_1m:
+            return None
+        try:
+            result_1m  = resp_1m.json()["chart"]["result"][0]
+            timestamps = result_1m.get("timestamp", [])
+            closes_1m  = result_1m["indicators"]["quote"][0].get("close", [])
+            today      = now_utc.date()
+            current    = None
+            for i in range(len(timestamps) - 1, -1, -1):
+                if i < len(closes_1m) and closes_1m[i] is not None:
+                    if datetime.fromtimestamp(timestamps[i], UTC).date() == today:
+                        current = float(closes_1m[i])
+                        break
+        except Exception as e:
+            log.debug(f"_fetch_ticker_change({ticker}) 1m 파싱 오류: {e}")
+            return None
+        prev = float(closes_daily[-1])
+    else:
+        current = float(closes_daily[-1])
+        prev    = float(closes_daily[-2])
+
+    if not current or not prev:
+        return None
+    return round((current - prev) / prev * 100, 2)
 
 
 # ─────────────────────────────────────────────
