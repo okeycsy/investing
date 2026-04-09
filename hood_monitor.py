@@ -1462,10 +1462,57 @@ def _detect_rsi_bullish_divergence(closes: list, lookback: int = 20) -> bool:
     return p2_low < p1_low and r2_low > r1_low
 
 
+def _calc_cmf(highs: list, lows: list, closes: list,
+              volumes: list, period: int = 21) -> Optional[float]:
+    """
+    Chaikin Money Flow (CMF) — 기관 매집/매도 강도 측정.
+    종가가 일봉 range 상단에 가까울수록 + 거래량이 많을수록 양수.
+    prop-desk에서 스마트머니 추적에 사용.
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n < period:
+        return None
+    mfv_sum = vol_sum = 0.0
+    for i in range(n - period, n):
+        hl = highs[i] - lows[i]
+        if hl == 0:
+            continue
+        mfm = ((closes[i] - lows[i]) - (highs[i] - closes[i])) / hl
+        mfv_sum += mfm * volumes[i]
+        vol_sum += volumes[i]
+    return round(mfv_sum / vol_sum, 4) if vol_sum else 0.0
+
+
+def _calc_daily_hvn(highs: list, lows: list, closes: list,
+                    volumes: list, lookback: int = 60) -> Optional[float]:
+    """
+    Daily High Volume Node (HVN) — 일봉 기반 Volume Profile POC 근사.
+    현재가 기준 0.5% 버킷으로 거래량 집중 가격대를 탐색.
+    반환: 현재가 대비 HVN 거리(%), 음수=HVN이 아래(지지), 양수=HVN이 위(저항)
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    lookback = min(lookback, n)
+    if lookback < 20:
+        return None
+    cur = closes[-1]
+    if cur <= 0:
+        return None
+    bucket_size = 0.005  # 0.5% 버킷
+    vol_by_bucket: dict = {}
+    for i in range(n - lookback, n):
+        tp = (highs[i] + lows[i] + closes[i]) / 3
+        pct = (tp / cur - 1)
+        bucket = round(pct / bucket_size) * bucket_size
+        vol_by_bucket[bucket] = vol_by_bucket.get(bucket, 0) + volumes[i]
+    if not vol_by_bucket:
+        return None
+    hvn_bucket = max(vol_by_bucket, key=vol_by_bucket.get)
+    return round(hvn_bucket * 100, 2)
+
+
 def calculate_dca_technical_score(
     ohlcv: dict,
     weekly_ohlcv: dict,
-    vp=None,      # VolumeProfile (Optional)
     sm=None,      # SafetyMargin (Optional)
 ) -> Optional[DCATechnicalScore]:
     """
@@ -1539,17 +1586,23 @@ def calculate_dca_technical_score(
         a3, desc = 0, "데이터 부족"
     items_a.append(DCAScoreItem("Volume Contraction", a3, 8, desc))
 
-    # A4. Whale Flow (7pts) — VolumeProfile 연동
-    if vp:
-        if vp.whale_detected and vp.vol_ratio >= 2.0:
-            a4, desc = 7, f"고래 매집 강력 감지 (30분 평균 {vp.vol_ratio:.1f}x) 🟢"
-        elif vp.whale_detected:
-            a4, desc = 4, f"고래 매집 감지 ({vp.vol_ratio:.1f}x) 🟡"
+    # A4. CMF — Chaikin Money Flow (7pts) [Whale Flow 대체]
+    # 1분봉 의존 제거 → 일봉 OHLCV로 기관 매집 강도 정량화
+    cmf = _calc_cmf(highs, lows, closes, volumes)
+    if cmf is not None:
+        if cmf > 0.15:
+            a4, desc = 7, f"CMF {cmf:+.3f} — 강한 기관 매집 신호 (스마트머니 유입) 🟢"
+        elif cmf > 0.05:
+            a4, desc = 5, f"CMF {cmf:+.3f} — 매수 우세, 기관 자금 유입 중 🟢"
+        elif cmf > -0.05:
+            a4, desc = 2, f"CMF {cmf:+.3f} — 중립, 매수/매도 균형 ⚪"
+        elif cmf > -0.15:
+            a4, desc = 1, f"CMF {cmf:+.3f} — 매도 우세, 기관 이탈 🟡"
         else:
-            a4, desc = 2, f"고래 활동 미감지 (거래량 비율 {vp.vol_ratio:.1f}x) ⚪"
+            a4, desc = 0, f"CMF {cmf:+.3f} — 강한 기관 매도 압력 🔴"
     else:
-        a4, desc = 2, "장 마감 모드 — Whale 실시간 감지 미사용 ⚪"
-    items_a.append(DCAScoreItem("Whale Flow", a4, 7, desc))
+        a4, desc = 2, "CMF 데이터 부족 ⚪"
+    items_a.append(DCAScoreItem("CMF(21) 기관매집", a4, 7, desc))
 
     layers.append(DCALayerScore(
         "Volume / Flow", "A",
@@ -1603,20 +1656,23 @@ def calculate_dca_technical_score(
         b2, desc = 3, "데이터 부족 (최소 50봉 필요)"
     items_b.append(DCAScoreItem("EMA 구조 (20/50/200)", b2, 10, desc))
 
-    # B3. POC 거리 (5pts)
-    if vp and vp.poc_price > 0 and cur > 0:
-        pct_poc = (cur - vp.poc_price) / vp.poc_price * 100
-        if pct_poc < -3:
-            b3, desc = 5, f"POC 대비 {pct_poc:+.1f}% 아래 → 가치 구간, 매집 적기 🟢"
-        elif pct_poc < 0:
-            b3, desc = 3, f"POC 대비 {pct_poc:+.1f}% 아래 → POC 근접, 지지 구간 🟡"
-        elif pct_poc < 3:
-            b3, desc = 2, f"POC 대비 {pct_poc:+.1f}% → POC 근처, 중립 ⚪"
+    # B3. Daily HVN 거리 (5pts) [인트라데이 POC 대체]
+    # 60일 일봉 거래량 분포에서 High Volume Node 계산 → 현재가와의 거리
+    hvn_pct = _calc_daily_hvn(highs, lows, closes, volumes)
+    if hvn_pct is not None:
+        if hvn_pct < -3:
+            b3, desc = 5, f"Daily HVN 대비 {hvn_pct:+.1f}% — HVN 아래, 역사적 지지 구간 🟢"
+        elif hvn_pct < -1:
+            b3, desc = 4, f"Daily HVN 대비 {hvn_pct:+.1f}% — HVN 하단 근접, 가치 구간 🟢"
+        elif hvn_pct < 1:
+            b3, desc = 2, f"Daily HVN 대비 {hvn_pct:+.1f}% — HVN 근처, 중립 ⚪"
+        elif hvn_pct < 4:
+            b3, desc = 1, f"Daily HVN 대비 {hvn_pct:+.1f}% 위 — HVN이 하단 지지 🟡"
         else:
-            b3, desc = 0, f"POC 대비 {pct_poc:+.1f}% 위 → 고평가 구간 🔴"
+            b3, desc = 0, f"Daily HVN 대비 {hvn_pct:+.1f}% 위 — 매물대 상단, 고평가 🔴"
     else:
-        b3, desc = 2, "POC 데이터 없음 (장 마감 모드) — 중립 ⚪"
-    items_b.append(DCAScoreItem("POC 거리", b3, 5, desc))
+        b3, desc = 2, "Daily HVN 계산 불가 (데이터 부족) ⚪"
+    items_b.append(DCAScoreItem("Daily HVN 거리", b3, 5, desc))
 
     layers.append(DCALayerScore(
         "Trend", "B",
@@ -3057,7 +3113,7 @@ def run_close():
         log.info("표시할 관련 뉴스 없음")
 
     # DCA 기술지표 점수 (5-Layer, 100pts)
-    dca_tech = calculate_dca_technical_score(ohlcv, weekly_ohlcv, vp=None, sm=sm)
+    dca_tech = calculate_dca_technical_score(ohlcv, weekly_ohlcv, sm=sm)
     if dca_tech:
         blocks.extend(format_dca_technical_block(dca_tech))
 
