@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Nasdaq 100 Market Scanner v1.0
+Nasdaq 100 Market Scanner v2.0
 ================================
-매일 KST 07:00 실행 (장 마감 후 확정 데이터 기준)
-- 전종목 5-Layer 기술지표 스코어링 (100점)
-- 섹터별 평균 + 강약 분석
-- Top 15 / Bottom 10 추출
-- Claude 섹터 코멘트
+v2.0: yfinance 배치 다운로드 방식으로 전환
+- 전종목을 요청 2~3번에 처리 (개별 87번 → 청크 3번)
+- 429 문제 근본 해결
 """
 
 import os
@@ -19,6 +17,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass, field
 
+try:
+    import yfinance as yf
+except ImportError:
+    print("yfinance 없음 — pip install yfinance")
+    sys.exit(1)
+
 # ─────────────────────────────────────────────
 # 설정
 # ─────────────────────────────────────────────
@@ -27,71 +31,57 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
-YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("market_scan")
 
 # ─────────────────────────────────────────────
-# Nasdaq 100 종목 + 섹터 매핑
+# Nasdaq 100 종목 + 섹터
 # ─────────────────────────────────────────────
 NDX100 = {
     # Technology
-    "AAPL":  "Technology", "MSFT":  "Technology", "NVDA":  "Technology",
-    "AVGO":  "Technology", "ORCL":  "Technology", "CSCO":  "Technology",
-    "ADBE":  "Technology", "TXN":   "Technology", "QCOM":  "Technology",
-    "AMD":   "Technology", "AMAT":  "Technology", "MU":    "Technology",
-    "INTC":  "Technology", "LRCX":  "Technology", "KLAC":  "Technology",
-    "MRVL":  "Technology", "CDNS":  "Technology", "SNPS":  "Technology",
-    "FTNT":  "Technology", "ANSS":  "Technology", "ON":    "Technology",
-    "NXPI":  "Technology", "MCHP":  "Technology",
+    "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
+    "AVGO": "Technology", "ORCL": "Technology", "CSCO": "Technology",
+    "ADBE": "Technology", "TXN":  "Technology", "QCOM": "Technology",
+    "AMD":  "Technology", "AMAT": "Technology", "MU":   "Technology",
+    "INTC": "Technology", "LRCX": "Technology", "KLAC": "Technology",
+    "MRVL": "Technology", "CDNS": "Technology", "SNPS": "Technology",
+    "FTNT": "Technology", "ANSS": "Technology", "ON":   "Technology",
+    "NXPI": "Technology", "MCHP": "Technology", "ASML": "Technology",
+    "TSM":  "Technology", "INTU": "Technology", "ADP":  "Technology",
+    "CRM":  "Technology", "NOW":  "Technology", "PANW": "Technology",
+    "CRWD": "Technology", "TEAM": "Technology", "ZS":   "Technology",
+    "DDOG": "Technology", "WDAY": "Technology", "SNOW": "Technology",
+    "NET":  "Technology", "HUBS": "Technology", "MDB":  "Technology",
     # Communication Services
-    "META":  "Comm Services", "GOOGL": "Comm Services", "GOOG":  "Comm Services",
+    "META":  "Comm Services", "GOOGL": "Comm Services", "GOOG": "Comm Services",
     "NFLX":  "Comm Services", "TMUS":  "Comm Services",
     # Consumer Discretionary
-    "AMZN":  "Cons Discretionary", "TSLA":  "Cons Discretionary",
-    "BKNG":  "Cons Discretionary", "MCD":   "Cons Discretionary",
-    "SBUX":  "Cons Discretionary", "CMG":   "Cons Discretionary",
-    "ABNB":  "Cons Discretionary", "MAR":   "Cons Discretionary",
-    "ORLY":  "Cons Discretionary", "AZO":   "Cons Discretionary",
-    "ROST":  "Cons Discretionary",
+    "AMZN": "Cons Discretionary", "TSLA": "Cons Discretionary",
+    "BKNG": "Cons Discretionary", "MCD":  "Cons Discretionary",
+    "SBUX": "Cons Discretionary", "CMG":  "Cons Discretionary",
+    "ABNB": "Cons Discretionary", "MAR":  "Cons Discretionary",
+    "ORLY": "Cons Discretionary", "AZO":  "Cons Discretionary",
+    "ROST": "Cons Discretionary",
     # Healthcare
-    "AMGN":  "Healthcare", "GILD":  "Healthcare", "VRTX":  "Healthcare",
-    "REGN":  "Healthcare", "MRNA":  "Healthcare", "BIIB":  "Healthcare",
-    "IDXX":  "Healthcare", "DXCM":  "Healthcare", "ALGN":  "Healthcare",
-    "ILMN":  "Healthcare",
-    # Financials
-    "PYPL":  "Financials", "INTC":  "Technology",  # INTC already above
+    "AMGN": "Healthcare", "GILD": "Healthcare", "VRTX": "Healthcare",
+    "REGN": "Healthcare", "MRNA": "Healthcare", "BIIB": "Healthcare",
+    "IDXX": "Healthcare", "DXCM": "Healthcare", "ISRG": "Healthcare",
+    "GEHC": "Healthcare",
     # Consumer Staples
-    "PEP":   "Cons Staples", "COST":  "Cons Staples", "MDLZ":  "Cons Staples",
-    "KHC":   "Cons Staples", "MNST":  "Cons Staples",
+    "PEP":  "Cons Staples", "COST": "Cons Staples", "MDLZ": "Cons Staples",
+    "KHC":  "Cons Staples", "MNST": "Cons Staples",
     # Industrials
-    "HON":   "Industrials", "CTAS":  "Industrials", "PAYX":  "Industrials",
-    "FAST":  "Industrials", "ODFL":  "Industrials",
-    # Software / Cloud (부분적으로 Tech 중복이지만 세분화)
-    "CRM":   "Technology", "NOW":   "Technology", "PANW":  "Technology",
-    "CRWD":  "Technology", "TEAM":  "Technology", "ZS":    "Technology",
-    "DDOG":  "Technology", "SPLK":  "Technology", "WDAY":  "Technology",
-    "OKTA":  "Technology", "SNOW":  "Technology", "NET":   "Technology",
-    "HUBS":  "Technology", "MDB":   "Technology",
-    # Semiconductors (already in Tech but notable)
-    "ASML":  "Technology", "TSM":   "Technology",
-    # Other
-    "ISRG":  "Healthcare", "INTU":  "Technology", "ADP":   "Technology",
-    "VRSK":  "Industrials", "CPRT":  "Industrials", "FANG":  "Energy",
-    "EXC":   "Utilities", "XEL":   "Utilities",
-    "GEHC":  "Healthcare", "CEG":   "Utilities",
-    # Fintech / Financial
-    "COIN":  "Financials",
+    "HON":  "Industrials", "CTAS": "Industrials", "PAYX": "Industrials",
+    "FAST": "Industrials", "ODFL": "Industrials", "VRSK": "Industrials",
+    "CPRT": "Industrials",
+    # Financials
+    "PYPL": "Financials", "COIN": "Financials",
+    # Energy
+    "FANG": "Energy",
+    # Utilities
+    "EXC": "Utilities", "XEL": "Utilities", "CEG": "Utilities",
 }
-
-# 중복 제거 및 최종 리스트
-NDX100 = {k: v for k, v in NDX100.items()}
 
 
 # ─────────────────────────────────────────────
@@ -101,345 +91,299 @@ NDX100 = {k: v for k, v in NDX100.items()}
 class TickerScore:
     ticker: str = ""
     sector: str = ""
-    score: int = 0          # 0~100 (정규화)
-    raw: int = 0            # 0~80 (원점수)
+    score: int = 0
+    raw: int = 0
     grade: str = ""
     grade_emoji: str = ""
     rsi: float = 50.0
     mfi: float = 50.0
-    layers: dict = field(default_factory=dict)  # layer_id → pts
+    layers: dict = field(default_factory=dict)
     error: bool = False
 
 
 # ─────────────────────────────────────────────
-# 유틸
+# 배치 OHLCV 다운로드 (핵심: 전종목 한번에)
 # ─────────────────────────────────────────────
-_last_request_time = 0.0
-_yahoo_session = None
+def batch_download(tickers: list, period: str = "6mo") -> dict:
+    """
+    yfinance 배치 다운로드 — 전종목을 청크(30종목)로 나눠 요청.
+    반환: {ticker: {"closes":[], "highs":[], "lows":[], "volumes":[]}}
+    """
+    result = {}
+    chunk_size = 30  # 한 번에 30종목씩 (안정성)
 
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i: i + chunk_size]
+        log.info(f"배치 다운로드 [{i+1}~{i+len(chunk)}/{len(tickers)}]: {' '.join(chunk[:5])}...")
 
-def _init_yahoo_session():
-    """야후 쿠키 세션 초기화 (fc.yahoo.com 선행 접속)"""
-    global _yahoo_session
-    s = requests.Session()
-    try:
-        s.get("https://fc.yahoo.com", headers={"User-Agent": BROWSER_UA}, timeout=10)
-        log.info("Yahoo 세션 초기화 완료")
-    except Exception as e:
-        log.warning(f"Yahoo 세션 초기화 실패 (무시): {e}")
-    _yahoo_session = s
-    return s
-
-
-def _throttle(base: float = 1.5):
-    """기본 1.5초 + 최대 0.5초 랜덤 jitter"""
-    global _last_request_time
-    import random
-    delay = base + random.uniform(0, 0.5)
-    elapsed = time.time() - _last_request_time
-    if elapsed < delay:
-        time.sleep(delay - elapsed)
-    _last_request_time = time.time()
-
-
-def _safe_get(url, params=None, timeout=15):
-    """429 시 exponential backoff 재시도 (최대 3회)"""
-    global _yahoo_session
-    if _yahoo_session is None:
-        _init_yahoo_session()
-    for attempt in range(3):
         try:
-            _throttle()
-            r = _yahoo_session.get(
-                url, params=params,
-                headers={"User-Agent": BROWSER_UA},
-                timeout=timeout,
+            df = yf.download(
+                chunk,
+                period=period,
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
             )
-            if r.status_code == 200:
-                return r
-            if r.status_code == 429:
-                wait = 10 * (2 ** attempt)  # 10s → 20s → 40s
-                log.warning(f"429 Rate limit — {wait}초 대기 후 재시도 ({attempt+1}/3)")
-                time.sleep(wait)
-                continue
-            log.warning(f"HTTP {r.status_code}: {url[:60]}")
-            return None
         except Exception as e:
-            log.warning(f"Request error (attempt {attempt+1}): {e}")
-            if attempt < 2:
-                time.sleep(5)
-    return None
+            log.error(f"배치 다운로드 실패: {e}")
+            continue
+
+        # 단일 종목이면 컬럼 구조가 다름
+        if len(chunk) == 1:
+            t = chunk[0]
+            try:
+                closes  = df["Close"].dropna().tolist()
+                highs   = df["High"].dropna().tolist()
+                lows    = df["Low"].dropna().tolist()
+                volumes = [int(v) for v in df["Volume"].dropna().tolist()]
+                n = min(len(closes), len(highs), len(lows), len(volumes))
+                if n >= 30:
+                    result[t] = {
+                        "closes": closes[-n:], "highs": highs[-n:],
+                        "lows": lows[-n:],   "volumes": volumes[-n:],
+                    }
+            except Exception as e:
+                log.warning(f"{t} 파싱 실패: {e}")
+            continue
+
+        # 복수 종목
+        for t in chunk:
+            try:
+                if t not in df.columns.get_level_values(0):
+                    log.warning(f"{t}: 데이터 없음")
+                    continue
+                sub = df[t].dropna()
+                closes  = sub["Close"].tolist()
+                highs   = sub["High"].tolist()
+                lows    = sub["Low"].tolist()
+                volumes = [int(v) for v in sub["Volume"].tolist()]
+                n = min(len(closes), len(highs), len(lows), len(volumes))
+                if n < 30:
+                    log.warning(f"{t}: 데이터 부족 ({n}일)")
+                    continue
+                result[t] = {
+                    "closes": closes[-n:], "highs": highs[-n:],
+                    "lows": lows[-n:],   "volumes": volumes[-n:],
+                }
+                log.info(f"  {t}: {n}일 데이터 OK")
+            except Exception as e:
+                log.warning(f"{t} 파싱 실패: {e}")
+
+        # 청크 간 딜레이 (부드럽게)
+        if i + chunk_size < len(tickers):
+            time.sleep(2)
+
+    return result
 
 
 # ─────────────────────────────────────────────
-# 지표 계산
+# 지표 계산 (순수 파이썬, 의존성 없음)
 # ─────────────────────────────────────────────
-def _calc_rsi(closes: list, period: int = 14) -> float:
+def _rsi(closes: list, period: int = 14) -> float:
     if len(closes) < period + 1:
         return 50.0
-    diffs = [closes[i] - closes[i - 1] for i in range(len(closes) - period, len(closes))]
-    gains = sum(d for d in diffs if d > 0) / period
-    losses = sum(-d for d in diffs if d < 0) / period
-    if losses == 0:
-        return 100.0
-    return round(100 - 100 / (1 + gains / losses), 2)
+    diffs = [closes[i] - closes[i-1] for i in range(len(closes)-period, len(closes))]
+    g = sum(d for d in diffs if d > 0) / period
+    l = sum(-d for d in diffs if d < 0) / period
+    return round(100 - 100 / (1 + g / l), 2) if l else 100.0
 
 
-def _calc_macd_hist(closes: list) -> float:
+def _macd_hist(closes: list) -> tuple:
+    """(현재 히스토그램, 전봉 히스토그램)"""
     def ema(data, p):
         if len(data) < p:
             return [0.0] * len(data)
-        k = 2 / (p + 1)
+        k = 2 / (p+1)
         r = [sum(data[:p]) / p]
         for v in data[p:]:
-            r.append(v * k + r[-1] * (1 - k))
+            r.append(v * k + r[-1] * (1-k))
         return r
     if len(closes) < 35:
-        return 0.0
-    e12 = ema(closes, 12)
-    e26 = ema(closes, 26)
+        return 0.0, 0.0
+    e12 = ema(closes, 12); e26 = ema(closes, 26)
     n = min(len(e12), len(e26))
     macd = [e12[i] - e26[i] for i in range(n)]
-    sig = ema(macd, 9)
-    return round(macd[-1] - sig[-1], 6)
+    sig  = ema(macd, 9)
+    cur  = macd[-1] - sig[-1]
+    # 전봉: closes[:-1]로 재계산
+    if len(closes) > 35:
+        e12p = ema(closes[:-1], 12); e26p = ema(closes[:-1], 26)
+        np2  = min(len(e12p), len(e26p))
+        macdp = [e12p[i] - e26p[i] for i in range(np2)]
+        sigp  = ema(macdp, 9)
+        prev  = macdp[-1] - sigp[-1]
+    else:
+        prev = cur
+    return round(cur, 6), round(prev, 6)
 
 
-def _calc_ema(data: list, period: int) -> list:
+def _ema(data: list, period: int) -> list:
     if len(data) < period:
         return []
-    k = 2 / (period + 1)
+    k = 2 / (period+1)
     r = [sum(data[:period]) / period]
     for v in data[period:]:
-        r.append(v * k + r[-1] * (1 - k))
+        r.append(v * k + r[-1] * (1-k))
     return r
 
 
-def _calc_obv(closes: list, volumes: list) -> list:
+def _obv(closes: list, volumes: list) -> list:
     obv = [0]
     for i in range(1, min(len(closes), len(volumes))):
-        if closes[i] > closes[i - 1]:
-            obv.append(obv[-1] + volumes[i])
-        elif closes[i] < closes[i - 1]:
-            obv.append(obv[-1] - volumes[i])
-        else:
-            obv.append(obv[-1])
+        obv.append(obv[-1] + volumes[i] if closes[i] > closes[i-1]
+                   else obv[-1] - volumes[i] if closes[i] < closes[i-1]
+                   else obv[-1])
     return obv
 
 
-def _calc_mfi(highs, lows, closes, volumes, period=14) -> Optional[float]:
+def _mfi(highs, lows, closes, volumes, period=14) -> Optional[float]:
     n = min(len(highs), len(lows), len(closes), len(volumes))
     if n < period + 1:
         return None
-    tp = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
+    tp = [(highs[i]+lows[i]+closes[i])/3 for i in range(n)]
     pos = neg = 0.0
-    for i in range(n - period, n):
+    for i in range(n-period, n):
         mf = tp[i] * volumes[i]
-        if tp[i] > tp[i - 1]:
-            pos += mf
-        else:
-            neg += mf
-    return round(100 - 100 / (1 + pos / neg), 2) if neg else 100.0
+        if tp[i] > tp[i-1]: pos += mf
+        else:                neg += mf
+    return round(100 - 100/(1 + pos/neg), 2) if neg else 100.0
 
 
-def _calc_stoch(highs, lows, closes, period=14, sk=3, sd=3) -> tuple:
+def _stoch(highs, lows, closes, period=14, sk=3, sd=3) -> tuple:
     n = min(len(highs), len(lows), len(closes))
     if n < period + sk + sd:
         return None, None
     raw_k = []
-    for i in range(period - 1, n):
-        hh = max(highs[i - period + 1: i + 1])
-        ll = min(lows[i - period + 1: i + 1])
-        raw_k.append((closes[i] - ll) / (hh - ll) * 100 if hh != ll else 50.0)
-    ks = [sum(raw_k[i - sk + 1: i + 1]) / sk for i in range(sk - 1, len(raw_k))]
+    for i in range(period-1, n):
+        hh = max(highs[i-period+1: i+1])
+        ll = min(lows[i-period+1: i+1])
+        raw_k.append((closes[i]-ll)/(hh-ll)*100 if hh != ll else 50.0)
+    ks = [sum(raw_k[i-sk+1: i+1])/sk for i in range(sk-1, len(raw_k))]
     if len(ks) < sd:
         return None, None
-    return round(ks[-1], 2), round(sum(ks[-sd:]) / sd, 2)
+    return round(ks[-1], 2), round(sum(ks[-sd:])/sd, 2)
 
 
-def _calc_atr(highs, lows, closes, period=14) -> Optional[float]:
+def _atr(highs, lows, closes, period=14) -> Optional[float]:
     n = min(len(highs), len(lows), len(closes))
     if n < period + 1:
         return None
-    trs = [max(highs[i] - lows[i],
-               abs(highs[i] - closes[i - 1]),
-               abs(lows[i] - closes[i - 1])) for i in range(1, n)]
+    trs = [max(highs[i]-lows[i],
+               abs(highs[i]-closes[i-1]),
+               abs(lows[i]-closes[i-1])) for i in range(1, n)]
     return sum(trs[-period:]) / period if len(trs) >= period else None
 
 
 def _rsi_divergence(closes: list, lookback: int = 20) -> bool:
     if len(closes) < lookback + 14:
         return False
-    window = closes[-(lookback + 14):]
-    rsi_s = [_calc_rsi(window[:i + 1]) for i in range(14, len(window))]
+    window = closes[-(lookback+14):]
+    rsi_s  = [_rsi(window[:i+1]) for i in range(14, len(window))]
     if len(rsi_s) < lookback:
         return False
-    pw = closes[-lookback:]
-    rw = rsi_s[-lookback:]
+    pw = closes[-lookback:]; rw = rsi_s[-lookback:]
     mid = len(pw) // 2
     return min(pw[mid:]) < min(pw[:mid]) and min(rw[mid:]) > min(rw[:mid])
 
 
 # ─────────────────────────────────────────────
-# OHLCV fetch
-# ─────────────────────────────────────────────
-def _fetch_ohlcv(ticker: str, days: int = 90) -> dict:
-    """일봉 OHLCV — 90일이면 RSI/MACD/BB/Stoch 모두 계산 가능"""
-    url = YAHOO_QUOTE_URL.format(ticker=ticker)
-    resp = _safe_get(url, params={"interval": "1d", "range": f"{days}d"})
-    if not resp:
-        return {}
-    try:
-        q = resp.json()["chart"]["result"][0]["indicators"]["quote"][0]
-        def _c(lst): return [v if v else 0.0 for v in lst]
-        return {
-            "closes":  _c(q.get("close", [])),
-            "highs":   _c(q.get("high", [])),
-            "lows":    _c(q.get("low", [])),
-            "volumes": [int(v) if v else 0 for v in q.get("volume", [])],
-        }
-    except Exception as e:
-        log.debug(f"OHLCV {ticker}: {e}")
-        return {}
-
-
-# ─────────────────────────────────────────────
 # 5-Layer 스코어 (80점 만점 → 100점 정규화)
-# 주봉/Whale/POC 제외 (API 호출 최소화)
 # ─────────────────────────────────────────────
-def score_ticker(ticker: str, sector: str) -> TickerScore:
+def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     ts = TickerScore(ticker=ticker, sector=sector)
-    ohlcv = _fetch_ohlcv(ticker)
     if not ohlcv or len(ohlcv.get("closes", [])) < 30:
         ts.error = True
         return ts
 
-    c = ohlcv["closes"]
-    h = ohlcv["highs"]
-    l = ohlcv["lows"]
-    v = ohlcv["volumes"]
+    c = ohlcv["closes"]; h = ohlcv["highs"]
+    l = ohlcv["lows"];   v = ohlcv["volumes"]
+    raw = 0; lays = {}
 
-    raw = 0
-    layers = {}
-
-    # ── A. Volume / Flow (28pts) ────────────
+    # ── A. Volume / Flow (28pts) ──────────────
     a = 0
-    # OBV divergence (10pts)
-    obv = _calc_obv(c, v)
-    if len(obv) >= 6:
-        p5 = c[-1] - c[-6]
-        o5 = obv[-1] - obv[-6]
-        if p5 < 0 and o5 > 0:   a += 10
-        elif p5 < 0 and o5 < 0: a += 0
-        elif p5 > 0 and o5 > 0: a += 5
-        else:                    a += 2
-    # MFI (10pts)
-    mfi = _calc_mfi(h, l, c, v)
-    ts.mfi = mfi if mfi is not None else 50.0
-    if mfi is not None:
-        if   mfi < 20: a += 10
-        elif mfi < 30: a += 7
-        elif mfi < 40: a += 4
-        elif mfi > 80: a += 0
-        else:          a += 1
-    # Volume contraction (8pts)
+    obv_s = _obv(c, v)
+    if len(obv_s) >= 6:
+        p5 = c[-1] - c[-6]; o5 = obv_s[-1] - obv_s[-6]
+        a += 10 if p5 < 0 and o5 > 0 else 0 if p5 < 0 else 5 if p5 > 0 and o5 > 0 else 2
+
+    mfi_v = _mfi(h, l, c, v); ts.mfi = mfi_v if mfi_v else 50.0
+    if mfi_v is not None:
+        a += 10 if mfi_v < 20 else 7 if mfi_v < 30 else 4 if mfi_v < 40 else 0 if mfi_v > 80 else 1
+
     if len(v) >= 20:
         v3  = sum(x for x in v[-3:]  if x > 0) / 3
         v20 = sum(x for x in v[-20:] if x > 0) / 20
-        ratio = v3 / v20 if v20 > 0 else 1.0
-        if   ratio < 0.70: a += 8
-        elif ratio < 0.85: a += 5
-        elif ratio < 1.00: a += 2
-    layers["A"] = a
-    raw += a
+        r   = v3 / v20 if v20 else 1.0
+        a += 8 if r < 0.70 else 5 if r < 0.85 else 2 if r < 1.00 else 0
 
-    # ── B. Trend (20pts) ───────────────────
+    lays["A"] = a; raw += a
+
+    # ── B. Trend (20pts) ─────────────────────
     b = 0
-    # MACD histogram 수렴 (10pts)
-    mh = _calc_macd_hist(c)
+    mh, prev_mh = _macd_hist(c)
     if len(c) >= 35:
-        prev_mh = _calc_macd_hist(c[:-1])
-        converging = mh < 0 and mh > prev_mh
-        if converging:  b += 10
-        elif mh > 0 and mh > prev_mh: b += 7
-        elif mh > 0:    b += 5
-        else:           b += 2
-    # EMA 구조 (10pts)
-    e20  = _calc_ema(c, 20)
-    e50  = _calc_ema(c, 50)
-    cur  = c[-1]
+        b += (10 if mh < 0 and mh > prev_mh else
+              7  if mh > 0 and mh > prev_mh else
+              5  if mh > 0 else 2)
+
+    e20 = _ema(c, 20); e50 = _ema(c, 50); cur = c[-1]
     if e20 and e50:
-        v20, v50 = e20[-1], e50[-1]
-        if cur < v20 and v20 > v50:  b += 10
-        elif cur < v50:              b += 7
-        elif cur > v20 > v50:        b += 5
-        elif v20 < v50:              b += 2
-        else:                        b += 4
-    layers["B"] = b
-    raw += b
+        v20e, v50e = e20[-1], e50[-1]
+        b += (10 if cur < v20e and v20e > v50e else
+              7  if cur < v50e else
+              5  if cur > v20e > v50e else
+              2  if v20e < v50e else 4)
 
-    # ── C. Momentum (20pts) ────────────────
-    c_pts = 0
-    # RSI (8pts)
-    rsi = _calc_rsi(c)
-    ts.rsi = rsi
-    if   rsi <= 25: c_pts += 8
-    elif rsi <= 30: c_pts += 7
-    elif rsi <= 40: c_pts += 5
-    elif rsi <= 50: c_pts += 2
-    elif rsi >= 70: c_pts += 0
-    else:           c_pts += 1
-    # Stochastic (7pts)
-    sk_v, sd_v = _calc_stoch(h, l, c)
+    lays["B"] = b; raw += b
+
+    # ── C. Momentum (20pts) ──────────────────
+    cp = 0
+    rsi_v = _rsi(c); ts.rsi = rsi_v
+    cp += (8 if rsi_v <= 25 else 7 if rsi_v <= 30 else
+           5 if rsi_v <= 40 else 2 if rsi_v <= 50 else
+           0 if rsi_v >= 70 else 1)
+
+    sk_v, sd_v = _stoch(h, l, c)
     if sk_v is not None and sd_v is not None:
-        if   sk_v < 20 and sd_v < 20 and sk_v > sd_v: c_pts += 7
-        elif sk_v < 20 and sd_v < 20:                  c_pts += 4
-        elif sk_v < 50 and sk_v > sd_v:                c_pts += 2
-        elif sk_v > 80:                                 c_pts += 0
-        else:                                           c_pts += 1
-    # RSI divergence (5pts)
+        cp += (7 if sk_v < 20 and sd_v < 20 and sk_v > sd_v else
+               4 if sk_v < 20 and sd_v < 20 else
+               2 if sk_v < 50 and sk_v > sd_v else
+               0 if sk_v > 80 else 1)
+
     if _rsi_divergence(c):
-        c_pts += 5
-    layers["C"] = c_pts
-    raw += c_pts
+        cp += 5
 
-    # ── D. Volatility / Entry (12pts) ──────
+    lays["C"] = cp; raw += cp
+
+    # ── D. Volatility / Entry (12pts) ────────
     d = 0
-    # BB 위치 (7pts)
     if len(c) >= 20:
-        sma = sum(c[-20:]) / 20
-        std = (sum((x - sma) ** 2 for x in c[-20:]) / 20) ** 0.5
-        lower = sma - 2 * std
-        upper = sma + 2 * std
-        if cur < lower:                         d += 7
-        elif cur < lower * 1.03:                d += 5
-        elif cur > upper:                       d += 0
-        else:                                   d += 2
-    # ATR 맥락 (5pts)
-    atr = _calc_atr(h, l, c)
-    if atr and atr > 0 and len(c) >= 20:
-        hi20 = max(c[-20:])
-        dd   = abs(cur - hi20)
-        mult = dd / atr
-        if   mult < 1.5: d += 5
-        elif mult < 2.5: d += 2
-        else:            d += 0
-    layers["D"] = d
-    raw += d
+        sma   = sum(c[-20:]) / 20
+        std   = (sum((x-sma)**2 for x in c[-20:]) / 20) ** 0.5
+        lower = sma - 2 * std; upper = sma + 2 * std
+        d += (7 if cur < lower else
+              5 if cur < lower * 1.03 else
+              0 if cur > upper else 2)
 
-    # ── 정규화 (80점 → 100점) ──────────────
+    atr_v = _atr(h, l, c)
+    if atr_v and atr_v > 0 and len(c) >= 20:
+        hi20 = max(c[-20:]); mult = abs(cur - hi20) / atr_v
+        d += 5 if mult < 1.5 else 2 if mult < 2.5 else 0
+
+    lays["D"] = d; raw += d
+
+    # ── 정규화 80→100 ────────────────────────
     score = round(raw / 80 * 100)
+    if   score >= 80: grade, ge = "Strong Buy", "🟢🟢"
+    elif score >= 60: grade, ge = "Buy",        "🟢"
+    elif score >= 40: grade, ge = "Neutral",    "⚪"
+    elif score >= 20: grade, ge = "Caution",    "🟡"
+    else:             grade, ge = "Avoid",      "🔴"
 
-    if   score >= 80: grade, grade_emoji = "Strong Buy", "🟢🟢"
-    elif score >= 60: grade, grade_emoji = "Buy",         "🟢"
-    elif score >= 40: grade, grade_emoji = "Neutral",     "⚪"
-    elif score >= 20: grade, grade_emoji = "Caution",     "🟡"
-    else:             grade, grade_emoji = "Avoid",       "🔴"
-
-    ts.score = score
-    ts.raw   = raw
-    ts.grade = grade
-    ts.grade_emoji = grade_emoji
-    ts.layers = layers
+    ts.score = score; ts.raw = raw; ts.grade = grade
+    ts.grade_emoji = ge; ts.layers = lays
     return ts
 
 
@@ -447,104 +391,87 @@ def score_ticker(ticker: str, sector: str) -> TickerScore:
 # 섹터 집계
 # ─────────────────────────────────────────────
 def aggregate_sectors(results: list) -> dict:
-    """섹터별 평균 점수, 종목 수, 강약 등급"""
     sectors = {}
     for ts in results:
         if ts.error:
             continue
-        s = ts.sector
-        if s not in sectors:
-            sectors[s] = {"scores": [], "tickers": []}
-        sectors[s]["scores"].append(ts.score)
-        sectors[s]["tickers"].append(ts.ticker)
+        if ts.sector not in sectors:
+            sectors[ts.sector] = {"scores": [], "tickers": []}
+        sectors[ts.sector]["scores"].append(ts.score)
+        sectors[ts.sector]["tickers"].append(ts.ticker)
 
     out = {}
     for s, data in sectors.items():
         avg = round(sum(data["scores"]) / len(data["scores"]))
-        if   avg >= 70: grade, emoji = "Strong",  "🟢🟢"
-        elif avg >= 55: grade, emoji = "Bullish",  "🟢"
-        elif avg >= 40: grade, emoji = "Neutral",  "⚪"
-        elif avg >= 25: grade, emoji = "Bearish",  "🟡"
-        else:           grade, emoji = "Weak",     "🔴"
-        out[s] = {
-            "avg": avg, "count": len(data["scores"]),
-            "grade": grade, "emoji": emoji,
-            "tickers": data["tickers"],
-        }
+        emoji, grade = (("🟢🟢","Strong") if avg >= 70 else
+                        ("🟢","Bullish")  if avg >= 55 else
+                        ("⚪","Neutral")  if avg >= 40 else
+                        ("🟡","Bearish")  if avg >= 25 else
+                        ("🔴","Weak"))
+        out[s] = {"avg": avg, "count": len(data["scores"]),
+                  "grade": grade, "emoji": emoji,
+                  "tickers": data["tickers"]}
     return dict(sorted(out.items(), key=lambda x: -x[1]["avg"]))
 
 
 # ─────────────────────────────────────────────
 # Claude 섹터 코멘트
 # ─────────────────────────────────────────────
-def _claude_sector_comment(sectors: dict, top15: list, bottom10: list) -> str:
+def _claude_comment(sectors: dict, top15: list, bottom10: list) -> str:
     if not ANTHROPIC_API_KEY:
         return ""
-    sector_lines = "\n".join(
+    sec_lines = "\n".join(
         f"- {s}: {d['avg']}점 ({d['grade']}, {d['count']}종목)"
         for s, d in sectors.items()
     )
-    top_lines = ", ".join(f"{t.ticker}({t.score})" for t in top15[:8])
-    bot_lines = ", ".join(f"{t.ticker}({t.score})" for t in bottom10[:5])
+    top_s = ", ".join(f"{t.ticker}({t.score})" for t in top15[:8])
+    bot_s = ", ".join(f"{t.ticker}({t.score})" for t in bottom10[:5])
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     prompt = f"""당신은 나스닥 100 섹터 분석 전문가입니다. {today} 기준 기술적 지표 스코어를 바탕으로 시장 현황을 한국어로 간결하게 해석해주세요.
 
 섹터별 평균 기술점수 (100점 만점):
-{sector_lines}
+{sec_lines}
 
-상위 종목: {top_lines}
-하위 종목: {bot_lines}
+상위 종목: {top_s}
+하위 종목: {bot_s}
 
-다음 형식의 JSON으로만 응답하세요:
-{{"market_mood": "한 줄 시장 전체 분위기 (예: '기술주 전반 과매도, 반등 시도 구간')",
-  "sector_comments": [
-    {{"sector": "섹터명", "comment": "15자 이내 핵심 한줄"}},
-    ...
-  ],
-  "opportunity": "주목할 종목 또는 섹터 한줄 인사이트"
-}}"""
+다음 JSON으로만 응답 (markdown 없이):
+{{"market_mood": "한 줄 시장 전체 분위기",
+  "sector_comments": [{{"sector": "섹터명", "comment": "15자 이내 핵심 한줄"}}],
+  "opportunity": "주목할 종목 또는 섹터 한줄 인사이트"}}"""
 
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "content-type": "application/json",
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 600,
-                "messages": [{"role": "user", "content": prompt}],
-            },
+            headers={"x-api-key": ANTHROPIC_API_KEY,
+                     "content-type": "application/json",
+                     "anthropic-version": "2023-06-01"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 600,
+                  "messages": [{"role": "user", "content": prompt}]},
             timeout=30,
         )
         if r.status_code != 200:
             log.warning(f"Claude API {r.status_code}")
             return ""
-        text = ""
-        for block in r.json().get("content", []):
-            if block.get("type") == "text":
-                text += block["text"]
+        text = "".join(b["text"] for b in r.json().get("content", []) if b.get("type") == "text")
         text = text.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(text)
         lines = [f"🌐 *{data.get('market_mood', '')}*"]
         for sc in data.get("sector_comments", []):
             lines.append(f"• {sc['sector']}: {sc['comment']}")
-        opp = data.get("opportunity", "")
-        if opp:
+        if opp := data.get("opportunity", ""):
             lines.append(f"\n💡 {opp}")
         return "\n".join(lines)
     except Exception as e:
-        log.warning(f"Claude comment error: {e}")
+        log.warning(f"Claude error: {e}")
         return ""
 
 
 # ─────────────────────────────────────────────
-# Slack 포맷
+# Slack
 # ─────────────────────────────────────────────
-def _sec(text: str) -> dict:
+def _sec_block(text: str) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
 def _div() -> dict:
@@ -554,148 +481,121 @@ def _ctx(text: str) -> dict:
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
-def build_slack_blocks(
-    results: list,
-    sectors: dict,
-    top15: list,
-    bottom10: list,
-    claude_comment: str,
-    elapsed_sec: float,
-) -> list:
-    today = datetime.now(KST).strftime("%m/%d")
+def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed):
+    today    = datetime.now(KST).strftime("%m/%d")
     ok_count = sum(1 for r in results if not r.error)
-    blocks = []
+    blocks   = []
 
-    # ── 헤더 ──────────────────────────────────────────
     blocks.append({"type": "header", "text": {"type": "plain_text",
         "text": f"📡 NDX 100 기술지표 스캔 — {today}"}})
-
     blocks.append(_ctx(
         f"스캔 종목: *{ok_count}/{len(results)}* | "
-        f"소요: {elapsed_sec:.0f}초 | "
-        f"기준: 일봉 90일 · 4-Layer 100점"
+        f"소요: {elapsed:.0f}초 | 일봉 6개월 · 4-Layer 100점"
     ))
     blocks.append(_div())
 
-    # ── Claude 코멘트 ──────────────────────────────────
     if claude_comment:
-        blocks.append(_sec(claude_comment))
+        blocks.append(_sec_block(claude_comment))
         blocks.append(_div())
 
-    # ── 섹터 히트맵 ───────────────────────────────────
-    sector_lines = ["*📊 섹터별 평균 점수*"]
+    # 섹터 히트맵
+    lines = ["*📊 섹터별 평균 점수*"]
     for s, d in sectors.items():
-        bar_fill = int(d["avg"] / 100 * 8)
-        bar = "█" * bar_fill + "░" * (8 - bar_fill)
-        sector_lines.append(
-            f"{d['emoji']} `{bar}` *{d['avg']:2d}* {s} ({d['count']}종목)"
-        )
-    blocks.append(_sec("\n".join(sector_lines)))
+        fill = int(d["avg"] / 100 * 8)
+        bar  = "█" * fill + "░" * (8 - fill)
+        lines.append(f"{d['emoji']} `{bar}` *{d['avg']:2d}*  {s} ({d['count']}종목)")
+    blocks.append(_sec_block("\n".join(lines)))
     blocks.append(_div())
 
-    # ── Top 15 ─────────────────────────────────────────
-    top_lines = ["*🏆 Top 15 — 매수 신호 강도 순*"]
+    # Top 15
+    lines = ["*🏆 Top 15 — 매수 신호 강도 순*"]
     for i, ts in enumerate(top15, 1):
-        bar_fill = int(ts.score / 100 * 6)
-        bar = "█" * bar_fill + "░" * (6 - bar_fill)
-        top_lines.append(
+        fill = int(ts.score / 100 * 6)
+        bar  = "█" * fill + "░" * (6 - fill)
+        lines.append(
             f"{i:2d}. {ts.grade_emoji} *${ts.ticker}* `{bar}` {ts.score}점"
             f"  RSI {ts.rsi:.0f}  MFI {ts.mfi:.0f}  _{ts.sector}_"
         )
-    blocks.append(_sec("\n".join(top_lines)))
+    blocks.append(_sec_block("\n".join(lines)))
     blocks.append(_div())
 
-    # ── Bottom 10 ──────────────────────────────────────
-    bot_lines = ["*⚠️ Bottom 10 — 약세 경고*"]
+    # Bottom 10
+    lines = ["*⚠️ Bottom 10 — 약세 경고*"]
     for i, ts in enumerate(bottom10, 1):
-        bot_lines.append(
+        lines.append(
             f"{i:2d}. {ts.grade_emoji} *${ts.ticker}*  {ts.score}점"
             f"  RSI {ts.rsi:.0f}  _{ts.sector}_"
         )
-    blocks.append(_sec("\n".join(bot_lines)))
+    blocks.append(_sec_block("\n".join(lines)))
     blocks.append(_div())
 
-    # ── 레이어별 섹터 챔피언 ───────────────────────────
+    # 레이어별 섹터 챔피언
     layer_names = {"A": "Volume/Flow", "B": "Trend", "C": "Momentum", "D": "Volatility"}
-    champ_lines = ["*🏅 레이어별 최강 섹터*"]
+    lines = ["*🏅 레이어별 최강 섹터*"]
     for lid, lname in layer_names.items():
-        best_sector = max(
+        best = max(
             ((s, round(
                 sum(ts.layers.get(lid, 0) for ts in results
                     if not ts.error and ts.sector == s)
                 / max(1, sum(1 for ts in results if not ts.error and ts.sector == s))
-            , 1)) for s in sectors),
-            key=lambda x: x[1],
-            default=("N/A", 0),
+            )) for s in sectors),
+            key=lambda x: x[1], default=("N/A", 0),
         )
-        champ_lines.append(f"• {lname}: *{best_sector[0]}* ({best_sector[1]:.0f}점)")
-    blocks.append(_ctx("\n".join(champ_lines)))
-
-    # ── footer ────────────────────────────────────────
-    blocks.append(_ctx(
-        f"기술지표 기반 참고용 스코어. 투자 결정은 본인 판단하에. "
-        f"다음 스캔: 내일 KST 07:00"
-    ))
+        lines.append(f"• {lname}: *{best[0]}* ({best[1]:.0f}점)")
+    blocks.append(_ctx("\n".join(lines)))
+    blocks.append(_ctx("기술지표 기반 참고용. 투자 결정은 본인 판단하에. 다음 스캔: 내일 KST 07:00"))
     return blocks
 
 
-# ─────────────────────────────────────────────
-# Slack 전송
-# ─────────────────────────────────────────────
 def send_slack(blocks: list):
     if not SLACK_WEBHOOK:
         log.error("SLACK_WEBHOOK URL 없음")
         return
-    # Slack 블록 3000자 제한 대비 분할
-    chunk_size = 40
-    for i in range(0, len(blocks), chunk_size):
-        chunk = blocks[i: i + chunk_size]
+    for i in range(0, len(blocks), 40):
+        chunk = blocks[i: i+40]
         try:
             r = requests.post(SLACK_WEBHOOK,
                               json={"blocks": chunk, "text": "NDX 100 Market Scan"},
                               timeout=15)
-            log.info(f"Slack 전송: {r.status_code} (블록 {i}~{i+len(chunk)-1})")
+            log.info(f"Slack: {r.status_code} (블록 {i}~{i+len(chunk)-1})")
         except Exception as e:
-            log.error(f"Slack 전송 실패: {e}")
+            log.error(f"Slack 실패: {e}")
 
 
 # ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
 def main():
-    log.info(f"=== NDX 100 Market Scan 시작: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} ===")
+    log.info(f"=== NDX 100 Market Scan v2.0 시작: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} ===")
     start = time.time()
 
-    # 야후 세션 선행 초기화 (쿠키 취득)
-    _init_yahoo_session()
+    tickers = list(NDX100.keys())
+    log.info(f"대상: {len(tickers)}종목 — yfinance 배치 다운로드")
 
-    tickers = list(NDX100.items())
-    log.info(f"스캔 대상: {len(tickers)}종목")
+    # 전종목 배치 다운로드 (핵심: 요청 3번으로 끝)
+    ohlcv_map = batch_download(tickers, period="6mo")
+    log.info(f"다운로드 완료: {len(ohlcv_map)}/{len(tickers)}종목")
 
+    # 스코어링 (로컬 계산, 추가 API 호출 없음)
     results = []
-    for i, (ticker, sector) in enumerate(tickers):
-        log.info(f"[{i+1}/{len(tickers)}] {ticker} ({sector})")
-        ts = score_ticker(ticker, sector)
-        if ts.error:
-            log.warning(f"  {ticker}: 데이터 없음")
+    for ticker, sector in NDX100.items():
+        ts = score_ticker(ticker, sector, ohlcv_map.get(ticker, {}))
+        if not ts.error:
+            log.info(f"  {ticker}: {ts.score}점 ({ts.grade}) RSI={ts.rsi:.1f}")
         else:
-            log.info(f"  {ticker}: {ts.score}점 ({ts.grade}) RSI={ts.rsi}")
+            log.warning(f"  {ticker}: 데이터 없음")
         results.append(ts)
 
-    # 집계
     ok_results = [r for r in results if not r.error]
     sectors    = aggregate_sectors(ok_results)
     top15      = sorted(ok_results, key=lambda x: -x.score)[:15]
-    bottom10   = sorted(ok_results, key=lambda x: x.score)[:10]
+    bottom10   = sorted(ok_results, key=lambda x:  x.score)[:10]
 
     elapsed = time.time() - start
     log.info(f"스캔 완료: {len(ok_results)}/{len(results)}종목, {elapsed:.1f}초")
 
-    # Claude 코멘트
-    claude_comment = _claude_sector_comment(sectors, top15, bottom10)
-
-    # Slack 전송
-    blocks = build_slack_blocks(results, sectors, top15, bottom10, claude_comment, elapsed)
+    claude_comment = _claude_comment(sectors, top15, bottom10)
+    blocks = build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed)
     send_slack(blocks)
     log.info("=== 완료 ===")
 
