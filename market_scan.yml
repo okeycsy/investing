@@ -1,0 +1,38 @@
+name: NDX 100 Market Scan
+
+on:
+  schedule:
+    # KST 07:00 = UTC 22:00 (전날) — 장 마감 후 확정 데이터 기준
+    - cron: '0 22 * * 1-5'   # 월~금 (한국 화~토 07:00)
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'debug 모드 (로그만, Slack 전송 안 함)'
+        required: false
+        default: 'false'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run market scan
+        env:
+          # 새 채널 생기면 MARKET_SCAN_WEBHOOK으로 교체, 없으면 기존 채널 사용
+          MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
+          SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          DEBUG_MODE:          ${{ github.event.inputs.debug || 'false' }}
+        run: python market_scan.py
