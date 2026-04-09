@@ -124,6 +124,31 @@ class DCASignal:
     factors: list = field(default_factory=list)
 
 
+@dataclass
+class DCAScoreItem:
+    label: str = ""
+    score: int = 0
+    max_pts: int = 0
+    desc: str = ""
+
+
+@dataclass
+class DCALayerScore:
+    name: str = ""
+    layer_id: str = ""
+    pts: int = 0
+    max_pts: int = 0
+    items: list = field(default_factory=list)
+
+
+@dataclass
+class DCATechnicalScore:
+    layers: list = field(default_factory=list)
+    total: int = 0
+    grade: str = ""
+    grade_emoji: str = ""
+
+
 # ─────────────────────────────────────────────
 # 상태 관리
 # ─────────────────────────────────────────────
@@ -1280,6 +1305,510 @@ def get_technical_signals(closes: list) -> TechnicalSignals:
         elif mp > sp and macd_line < macd_sig:
             ts.macd_alert = "bearish_cross"
     return ts
+
+
+# ─────────────────────────────────────────────
+# DCA 기술지표 점수 시스템 v2 (5-Layer, 100pts)
+# ─────────────────────────────────────────────
+
+def fetch_ohlcv(days: int = 210) -> dict:
+    """일봉 OHLCV 반환 — closes/opens/highs/lows/volumes"""
+    _yahoo_throttle()
+    url = YAHOO_QUOTE_URL.format(ticker=TICKER)
+    resp = safe_get(url, params={"interval": "1d", "range": f"{days}d"})
+    if not resp:
+        return {}
+    try:
+        result = resp.json()["chart"]["result"][0]
+        q = result["indicators"]["quote"][0]
+        def _clean(lst):
+            return [v if v is not None else 0.0 for v in lst]
+        return {
+            "closes":  _clean(q.get("close", [])),
+            "opens":   _clean(q.get("open", [])),
+            "highs":   _clean(q.get("high", [])),
+            "lows":    _clean(q.get("low", [])),
+            "volumes": [int(v) if v else 0 for v in q.get("volume", [])],
+        }
+    except Exception as e:
+        log.error(f"fetch_ohlcv error: {e}")
+        return {}
+
+
+def fetch_weekly_ohlcv(weeks: int = 40) -> dict:
+    """주봉 OHLCV 반환 (MACD 계산에 최소 35주 필요)"""
+    _yahoo_throttle()
+    url = YAHOO_QUOTE_URL.format(ticker=TICKER)
+    resp = safe_get(url, params={"interval": "1wk", "range": f"{weeks * 7 + 14}d"})
+    if not resp:
+        return {}
+    try:
+        result = resp.json()["chart"]["result"][0]
+        q = result["indicators"]["quote"][0]
+        def _clean(lst):
+            return [v if v is not None else 0.0 for v in lst]
+        return {
+            "closes":  _clean(q.get("close", [])),
+            "highs":   _clean(q.get("high", [])),
+            "lows":    _clean(q.get("low", [])),
+            "volumes": [int(v) if v else 0 for v in q.get("volume", [])],
+        }
+    except Exception as e:
+        log.error(f"fetch_weekly_ohlcv error: {e}")
+        return {}
+
+
+def _calc_ema_series(data: list, period: int) -> list:
+    """EMA 시리즈 반환"""
+    if len(data) < period:
+        return []
+    k = 2 / (period + 1)
+    ema = [sum(data[:period]) / period]
+    for v in data[period:]:
+        ema.append(v * k + ema[-1] * (1 - k))
+    return ema
+
+
+def _calc_obv(closes: list, volumes: list) -> list:
+    """OBV(On-Balance Volume) 시리즈"""
+    if len(closes) < 2 or len(volumes) < 2:
+        return []
+    obv = [0]
+    for i in range(1, min(len(closes), len(volumes))):
+        if closes[i] > closes[i - 1]:
+            obv.append(obv[-1] + volumes[i])
+        elif closes[i] < closes[i - 1]:
+            obv.append(obv[-1] - volumes[i])
+        else:
+            obv.append(obv[-1])
+    return obv
+
+
+def _calc_mfi(highs: list, lows: list, closes: list,
+              volumes: list, period: int = 14) -> Optional[float]:
+    """Money Flow Index (거래량 가중 RSI)"""
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n < period + 1:
+        return None
+    typical = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
+    pos_mf = neg_mf = 0.0
+    for i in range(n - period, n):
+        mf = typical[i] * volumes[i]
+        if typical[i] > typical[i - 1]:
+            pos_mf += mf
+        else:
+            neg_mf += mf
+    if neg_mf == 0:
+        return 100.0
+    return round(100 - 100 / (1 + pos_mf / neg_mf), 2)
+
+
+def _calc_stochastic(highs: list, lows: list, closes: list,
+                     period: int = 14, smooth_k: int = 3,
+                     smooth_d: int = 3) -> tuple:
+    """Stochastic %K, %D 반환"""
+    n = min(len(highs), len(lows), len(closes))
+    if n < period + smooth_k + smooth_d:
+        return None, None
+    raw_k = []
+    for i in range(period - 1, n):
+        hh = max(highs[i - period + 1: i + 1])
+        ll = min(lows[i - period + 1: i + 1])
+        raw_k.append(((closes[i] - ll) / (hh - ll) * 100) if hh != ll else 50.0)
+    if len(raw_k) < smooth_k:
+        return None, None
+    k_series = [sum(raw_k[i - smooth_k + 1: i + 1]) / smooth_k
+                for i in range(smooth_k - 1, len(raw_k))]
+    if len(k_series) < smooth_d:
+        return None, None
+    d_val = sum(k_series[-smooth_d:]) / smooth_d
+    return round(k_series[-1], 2), round(d_val, 2)
+
+
+def _calc_atr(highs: list, lows: list, closes: list,
+              period: int = 14) -> Optional[float]:
+    """ATR(14)"""
+    n = min(len(highs), len(lows), len(closes))
+    if n < period + 1:
+        return None
+    tr_list = [max(
+        highs[i] - lows[i],
+        abs(highs[i] - closes[i - 1]),
+        abs(lows[i] - closes[i - 1]),
+    ) for i in range(1, n)]
+    if len(tr_list) < period:
+        return None
+    return round(sum(tr_list[-period:]) / period, 4)
+
+
+def _detect_rsi_bullish_divergence(closes: list, lookback: int = 20) -> bool:
+    """
+    강세 다이버전스: 최근 lookback봉 안에서
+    가격은 더 낮은 저점, RSI는 더 높은 저점이면 True
+    """
+    if len(closes) < lookback + 14:
+        return False
+    window = closes[-(lookback + 14):]
+    rsi_series = [calculate_rsi(window[:i + 1]) for i in range(14, len(window))]
+    if len(rsi_series) < lookback:
+        return False
+    price_w = closes[-lookback:]
+    rsi_w = rsi_series[-lookback:]
+    mid = len(price_w) // 2
+    p1_low = min(price_w[:mid])
+    p2_low = min(price_w[mid:])
+    r1_low = min(rsi_w[:mid])
+    r2_low = min(rsi_w[mid:])
+    return p2_low < p1_low and r2_low > r1_low
+
+
+def calculate_dca_technical_score(
+    ohlcv: dict,
+    weekly_ohlcv: dict,
+    vp=None,      # VolumeProfile (Optional)
+    sm=None,      # SafetyMargin (Optional)
+) -> Optional[DCATechnicalScore]:
+    """
+    5-Layer 100점 DCA 기술지표 점수.
+    각 항목마다 한글 현황 설명 포함.
+    """
+    if not ohlcv or len(ohlcv.get("closes", [])) < 30:
+        log.warning("DCA technical score: OHLCV 데이터 부족")
+        return None
+
+    closes  = ohlcv["closes"]
+    highs   = ohlcv["highs"]
+    lows    = ohlcv["lows"]
+    volumes = ohlcv["volumes"]
+    layers  = []
+
+    # ════════════════════════
+    # A. Volume / Flow (35pts)
+    # ════════════════════════
+    items_a: list = []
+
+    # A1. OBV Divergence (10pts)
+    obv = _calc_obv(closes, volumes)
+    if len(obv) >= 6:
+        p_chg = closes[-1] - closes[-6]
+        o_chg = obv[-1] - obv[-6]
+        if p_chg < 0 and o_chg > 0:
+            a1, desc = 10, "가격 5일 하락 중 OBV 상승 → 스마트머니 매집 감지 🟢"
+        elif p_chg < 0 and o_chg < 0:
+            a1, desc = 0,  "가격·OBV 동반 하락 → 매도 압력 지속 🔴"
+        elif p_chg > 0 and o_chg > 0:
+            a1, desc = 5,  "가격·OBV 동반 상승 → 정상 추세, 눌림 아님 ⚪"
+        else:
+            a1, desc = 2,  "가격 상승 중 OBV 약화 → 상승 추세 신뢰도 낮음 🟡"
+    else:
+        a1, desc = 0, "데이터 부족"
+    items_a.append(DCAScoreItem("OBV Divergence", a1, 10, desc))
+
+    # A2. MFI(14) (10pts)
+    mfi = _calc_mfi(highs, lows, closes, volumes)
+    if mfi is not None:
+        if mfi < 20:
+            a2, desc = 10, f"MFI {mfi:.1f} — 극과매도, 스마트머니 유입 임박 🟢"
+        elif mfi < 30:
+            a2, desc = 7,  f"MFI {mfi:.1f} — 과매도 구간, 매수세 증가 가능 🟢"
+        elif mfi < 40:
+            a2, desc = 4,  f"MFI {mfi:.1f} — 중립 하단, 소폭 매수 우호 🟡"
+        elif mfi > 80:
+            a2, desc = 0,  f"MFI {mfi:.1f} — 과매수, 차익 실현 압력 🔴"
+        else:
+            a2, desc = 1,  f"MFI {mfi:.1f} — 중립 구간 ⚪"
+    else:
+        a2, desc = 0, "MFI 계산 불가"
+    items_a.append(DCAScoreItem("MFI(14)", a2, 10, desc))
+
+    # A3. Volume Contraction (8pts)
+    if len(volumes) >= 20:
+        vol_3d  = sum(v for v in volumes[-3:] if v > 0) / 3
+        vol_20d = sum(v for v in volumes[-20:] if v > 0) / 20
+        ratio = vol_3d / vol_20d if vol_20d > 0 else 1.0
+        pct = ratio * 100
+        if ratio < 0.70:
+            a3, desc = 8, f"최근 3일 거래량 {pct:.0f}% (20일 평균 대비) — 셀링 약화, 건강한 눌림 🟢"
+        elif ratio < 0.85:
+            a3, desc = 5, f"최근 3일 거래량 {pct:.0f}% — 소폭 수축, 보통 눌림 🟡"
+        elif ratio < 1.00:
+            a3, desc = 2, f"최근 3일 거래량 {pct:.0f}% — 평균 수준, 눌림 신호 약함 ⚪"
+        else:
+            a3, desc = 0, f"최근 3일 거래량 {pct:.0f}% — 거래량 급증, 패닉/돌파 점검 필요 🔴"
+    else:
+        a3, desc = 0, "데이터 부족"
+    items_a.append(DCAScoreItem("Volume Contraction", a3, 8, desc))
+
+    # A4. Whale Flow (7pts) — VolumeProfile 연동
+    if vp:
+        if vp.whale_detected and vp.vol_ratio >= 2.0:
+            a4, desc = 7, f"고래 매집 강력 감지 (30분 평균 {vp.vol_ratio:.1f}x) 🟢"
+        elif vp.whale_detected:
+            a4, desc = 4, f"고래 매집 감지 ({vp.vol_ratio:.1f}x) 🟡"
+        else:
+            a4, desc = 2, f"고래 활동 미감지 (거래량 비율 {vp.vol_ratio:.1f}x) ⚪"
+    else:
+        a4, desc = 2, "장 마감 모드 — Whale 실시간 감지 미사용 ⚪"
+    items_a.append(DCAScoreItem("Whale Flow", a4, 7, desc))
+
+    layers.append(DCALayerScore(
+        "Volume / Flow", "A",
+        sum(i.score for i in items_a), 35, items_a))
+
+    # ═══════════════════
+    # B. Trend (25pts)
+    # ═══════════════════
+    items_b: list = []
+
+    # B1. MACD Histogram 바닥 수렴 (10pts)
+    if len(closes) >= 35:
+        ml, ms, mh = calculate_macd(closes)
+        # 최근 3봉 히스토그램 방향 (인덱스 슬라이싱으로 직접 계산)
+        hist_prev = [calculate_macd(closes[:-(3 - j)])[2] for j in range(3)]
+        converging = all(hist_prev[j] > hist_prev[j - 1] for j in range(1, 3)) and mh < 0
+        if converging:
+            b1, desc = 10, f"MACD 히스토그램 {mh:.4f} — 음수 구간 3봉 수렴 (바닥 탐색) 🟢"
+        elif mh > 0 and all(hist_prev[j] > hist_prev[j - 1] for j in range(1, 3)):
+            b1, desc = 7,  f"MACD 히스토그램 {mh:.4f} — 양수 상승 중, 모멘텀 강화 🟡"
+        elif mh > 0:
+            b1, desc = 5,  f"MACD 히스토그램 {mh:.4f} — 양수 구간 ⚪"
+        else:
+            b1, desc = 2,  f"MACD 히스토그램 {mh:.4f} — 음수 발산 중, 하락 모멘텀 🔴"
+    else:
+        b1, desc = 2, "데이터 부족 (35봉 이상 필요)"
+    items_b.append(DCAScoreItem("MACD Histogram 수렴", b1, 10, desc))
+
+    # B2. EMA 구조 (10pts)
+    e20 = _calc_ema_series(closes, 20)
+    e50 = _calc_ema_series(closes, 50)
+    e200 = _calc_ema_series(closes, 200)
+    cur = closes[-1]
+    if e20 and e50 and e200:
+        v20, v50, v200 = e20[-1], e50[-1], e200[-1]
+        if cur < v20 and v20 > v50 > v200:
+            b2, desc = 10, f"가격 < 20EMA < 50EMA < 200EMA 순서 유지 → 장기 추세 건강, 눌림 구간 🟢"
+        elif cur < v50 and v50 > v200:
+            b2, desc = 7,  f"가격 50EMA 아래, 200EMA 위 → 중기 조정, 장기 추세 양호 🟡"
+        elif cur > v20 > v50:
+            b2, desc = 5,  f"가격 > 20EMA > 50EMA → 상승 추세, 눌림 아님 ⚪"
+        elif v20 < v50:
+            b2, desc = 2,  f"20EMA < 50EMA (데드크로스 접근) → 하락 추세 전환 주의 🔴"
+        else:
+            b2, desc = 4,  "EMA 혼재 — 명확한 추세 없음 ⚪"
+    elif e20 and e50:
+        v20, v50 = e20[-1], e50[-1]
+        b2 = 7 if cur < v20 and v20 > v50 else 3
+        desc = f"가격 < 20EMA, 20>50 (200EMA 미계산) 🟡" if b2 == 7 else f"EMA 50일까지 계산 ⚪"
+    else:
+        b2, desc = 3, "데이터 부족 (최소 50봉 필요)"
+    items_b.append(DCAScoreItem("EMA 구조 (20/50/200)", b2, 10, desc))
+
+    # B3. POC 거리 (5pts)
+    if vp and vp.poc_price > 0 and cur > 0:
+        pct_poc = (cur - vp.poc_price) / vp.poc_price * 100
+        if pct_poc < -3:
+            b3, desc = 5, f"POC 대비 {pct_poc:+.1f}% 아래 → 가치 구간, 매집 적기 🟢"
+        elif pct_poc < 0:
+            b3, desc = 3, f"POC 대비 {pct_poc:+.1f}% 아래 → POC 근접, 지지 구간 🟡"
+        elif pct_poc < 3:
+            b3, desc = 2, f"POC 대비 {pct_poc:+.1f}% → POC 근처, 중립 ⚪"
+        else:
+            b3, desc = 0, f"POC 대비 {pct_poc:+.1f}% 위 → 고평가 구간 🔴"
+    else:
+        b3, desc = 2, "POC 데이터 없음 (장 마감 모드) — 중립 ⚪"
+    items_b.append(DCAScoreItem("POC 거리", b3, 5, desc))
+
+    layers.append(DCALayerScore(
+        "Trend", "B",
+        sum(i.score for i in items_b), 25, items_b))
+
+    # ══════════════════════
+    # C. Momentum (20pts)
+    # ══════════════════════
+    items_c: list = []
+
+    # C1. RSI(14) 일봉 (8pts)
+    rsi_val = calculate_rsi(closes)
+    if rsi_val <= 25:
+        c1, desc = 8, f"RSI {rsi_val:.1f} — 극과매도 (역사적 저점) 🟢"
+    elif rsi_val <= 30:
+        c1, desc = 7, f"RSI {rsi_val:.1f} — 과매도, 단기 반등 가능성 🟢"
+    elif rsi_val <= 40:
+        c1, desc = 5, f"RSI {rsi_val:.1f} — 매수 관심 구간 🟡"
+    elif rsi_val <= 50:
+        c1, desc = 2, f"RSI {rsi_val:.1f} — 중립 하단 ⚪"
+    elif rsi_val >= 70:
+        c1, desc = 0, f"RSI {rsi_val:.1f} — 과매수, 추격 매수 위험 🔴"
+    else:
+        c1, desc = 1, f"RSI {rsi_val:.1f} — 중립 ⚪"
+    items_c.append(DCAScoreItem("RSI(14) 일봉", c1, 8, desc))
+
+    # C2. Stochastic(14,3,3) (7pts)
+    sk, sd = _calc_stochastic(highs, lows, closes)
+    if sk is not None and sd is not None:
+        in_os = sk < 20 and sd < 20
+        crossed = sk > sd
+        if in_os and crossed:
+            c2, desc = 7, f"Stoch %K={sk:.1f} %D={sd:.1f} — 과매도 골든크로스 🟢"
+        elif in_os:
+            c2, desc = 4, f"Stoch %K={sk:.1f} %D={sd:.1f} — 과매도, 크로스 대기 🟡"
+        elif sk < 50 and crossed:
+            c2, desc = 2, f"Stoch %K={sk:.1f} %D={sd:.1f} — 중립대 골든크로스 ⚪"
+        elif sk > 80:
+            c2, desc = 0, f"Stoch %K={sk:.1f} — 과매수 🔴"
+        else:
+            c2, desc = 1, f"Stoch %K={sk:.1f} %D={sd:.1f} — 중립 ⚪"
+    else:
+        c2, desc = 1, "데이터 부족 ⚪"
+    items_c.append(DCAScoreItem("Stochastic(14,3,3)", c2, 7, desc))
+
+    # C3. RSI Bullish Divergence (5pts)
+    has_div = _detect_rsi_bullish_divergence(closes)
+    if has_div:
+        c3, desc = 5, "강세 다이버전스 확인 — 가격 저점 갱신, RSI 저점 상승 → 추세 전환 신호 🟢"
+    else:
+        c3, desc = 0, "강세 다이버전스 미감지 — 현재 없음 ⚪"
+    items_c.append(DCAScoreItem("RSI Bullish Divergence", c3, 5, desc))
+
+    layers.append(DCALayerScore(
+        "Momentum", "C",
+        sum(i.score for i in items_c), 20, items_c))
+
+    # ══════════════════════════════
+    # D. Volatility / Entry (12pts)
+    # ══════════════════════════════
+    items_d: list = []
+
+    # D1. 볼린저 밴드 위치 (7pts) — SafetyMargin 연동
+    if sm:
+        if sm.bb_signal == "extreme_oversold":
+            d1, desc = 7, f"BB 하단 이탈 (하단 대비 {sm.pct_from_lower:+.1f}%) — 극과매도, 평균회귀 압력 🟢"
+        elif sm.bb_signal == "oversold":
+            d1, desc = 5, f"BB 하단 근접 ({sm.pct_from_lower:+.1f}%) — 과매도 진입 구간 🟡"
+        elif sm.bb_signal == "overbought":
+            d1, desc = 0, "BB 상단 돌파 — 과열 구간, 매수 자제 🔴"
+        else:
+            d1, desc = 2, f"BB 중단 구간 ({sm.pct_from_lower:+.1f}%) — 중립 ⚪"
+    elif len(closes) >= 20:
+        sma20 = sum(closes[-20:]) / 20
+        std20 = (sum((c - sma20) ** 2 for c in closes[-20:]) / 20) ** 0.5
+        lower = sma20 - 2 * std20
+        pfl = (closes[-1] - lower) / lower * 100 if lower > 0 else 0
+        if closes[-1] < lower:
+            d1, desc = 7, f"BB 하단 이탈 ({pfl:+.1f}%) — 극과매도 🟢"
+        elif pfl < 3:
+            d1, desc = 5, f"BB 하단 근접 ({pfl:+.1f}%) 🟡"
+        else:
+            d1, desc = 2, f"BB 중단 ({pfl:+.1f}%) ⚪"
+    else:
+        d1, desc = 2, "데이터 부족"
+    items_d.append(DCAScoreItem("볼린저 밴드 위치", d1, 7, desc))
+
+    # D2. ATR 맥락 (5pts)
+    atr = _calc_atr(highs, lows, closes)
+    if atr and atr > 0 and len(closes) >= 20:
+        recent_high = max(closes[-20:])
+        drawdown = abs(closes[-1] - recent_high)
+        atr_mult = drawdown / atr
+        if atr_mult < 1.5:
+            d2, desc = 5, f"20일 고점 대비 낙폭 = ATR {atr_mult:.1f}배 → 건강한 조정 범위 🟢"
+        elif atr_mult < 2.5:
+            d2, desc = 2, f"20일 고점 대비 낙폭 = ATR {atr_mult:.1f}배 → 확대 조정 🟡"
+        else:
+            d2, desc = 0, f"20일 고점 대비 낙폭 = ATR {atr_mult:.1f}배 → 과도한 하락, 원인 점검 필요 🔴"
+    else:
+        d2, desc = 2, "ATR 계산 불가 ⚪"
+    items_d.append(DCAScoreItem("ATR 맥락", d2, 5, desc))
+
+    layers.append(DCALayerScore(
+        "Volatility / Entry", "D",
+        sum(i.score for i in items_d), 12, items_d))
+
+    # ════════════════════════════════════
+    # E. Multi-Timeframe Confluence (8pts)
+    # ════════════════════════════════════
+    items_e: list = []
+    w_closes = weekly_ohlcv.get("closes", []) if weekly_ohlcv else []
+
+    # E1. 주봉 RSI (4pts)
+    if len(w_closes) >= 14:
+        wrsi = calculate_rsi(w_closes)
+        if wrsi < 30:
+            e1, desc = 4, f"주봉 RSI {wrsi:.1f} — 주봉 과매도, 중기 반등 구간 🟢"
+        elif wrsi < 40:
+            e1, desc = 3, f"주봉 RSI {wrsi:.1f} — 주봉 과매도 접근 🟡"
+        elif wrsi < 50:
+            e1, desc = 2, f"주봉 RSI {wrsi:.1f} — 중립 하단 ⚪"
+        elif wrsi >= 70:
+            e1, desc = 0, f"주봉 RSI {wrsi:.1f} — 주봉 과매수 🔴"
+        else:
+            e1, desc = 1, f"주봉 RSI {wrsi:.1f} — 중립 ⚪"
+    else:
+        e1, desc = 1, "주봉 데이터 부족 ⚪"
+    items_e.append(DCAScoreItem("주봉 RSI", e1, 4, desc))
+
+    # E2. 주봉 MACD Histogram (4pts)
+    if len(w_closes) >= 35:
+        wml, wms, wmh = calculate_macd(w_closes)
+        if wmh > 0:
+            e2, desc = 4, f"주봉 MACD 히스토그램 {wmh:.4f} — 양전환, 주봉 모멘텀 상승 🟢"
+        else:
+            # 직전봉 히스토그램으로 수렴 여부 확인
+            prev_wmh = calculate_macd(w_closes[:-1])[2] if len(w_closes) > 35 else wmh
+            if wmh > prev_wmh:
+                e2, desc = 3, f"주봉 MACD 히스토그램 {wmh:.4f} — 음수이나 수렴 중 🟡"
+            else:
+                e2, desc = 0, f"주봉 MACD 히스토그램 {wmh:.4f} — 음수 발산 중 🔴"
+    else:
+        e2, desc = 1, "주봉 데이터 부족 (35주 이상 필요) ⚪"
+    items_e.append(DCAScoreItem("주봉 MACD", e2, 4, desc))
+
+    layers.append(DCALayerScore(
+        "Multi-Timeframe", "E",
+        sum(i.score for i in items_e), 8, items_e))
+
+    # ═════════════════
+    # 총점 + 등급
+    # ═════════════════
+    total = max(0, min(100, sum(l.pts for l in layers)))
+    if total >= 80:
+        grade, grade_emoji = "Strong Buy", "🟢🟢"
+    elif total >= 60:
+        grade, grade_emoji = "Buy", "🟢"
+    elif total >= 40:
+        grade, grade_emoji = "Neutral", "⚪"
+    elif total >= 20:
+        grade, grade_emoji = "Caution", "🟡"
+    else:
+        grade, grade_emoji = "Avoid", "🔴"
+
+    log.info(f"DCA 기술지표 점수: {total}/100 ({grade})")
+    return DCATechnicalScore(layers=layers, total=total,
+                             grade=grade, grade_emoji=grade_emoji)
+
+
+def format_dca_technical_block(score: DCATechnicalScore) -> list:
+    """
+    5-Layer DCA 기술지표 점수 Slack 블록.
+    각 레이어별로 분리, 항목마다 (점수/최대) 형식 표기.
+    """
+    layer_emoji = {"A": "📊", "B": "📈", "C": "⚡", "D": "🎯", "E": "🔭"}
+    fill = int(score.total / 100 * 10)
+    bar = "█" * fill + "░" * (10 - fill)
+
+    blocks = [_sec(
+        f"*🧮 DCA 기술지표 점수: {score.total}/100*  "
+        f"{score.grade_emoji} {score.grade}\n`{bar}`"
+    )]
+
+    for layer in score.layers:
+        emoji = layer_emoji.get(layer.layer_id, "•")
+        lines = [f"*{emoji} {layer.layer_id}. {layer.name}  —  {layer.pts}/{layer.max_pts}pts*"]
+        for item in layer.items:
+            lines.append(f"({item.score}/{item.max_pts}) *{item.label}*: {item.desc}")
+        blocks.append(_ctx("\n".join(lines)))
+
+    return blocks
 
 
 # ─────────────────────────────────────────────
@@ -2446,8 +2975,10 @@ def run_close():
         state["price_alert_max_pct"] = 0
         state["price_alert_direction"] = ""
 
-    # closes를 price 블록보다 먼저 fetch (Safety Margin에서도 사용)
-    closes = fetch_price_history(60)
+    # OHLCV fetch (closes + highs/lows/volumes, 210일 — EMA200 + DCA 기술지표용)
+    ohlcv = fetch_ohlcv(days=210)
+    closes = ohlcv.get("closes", fetch_price_history(60))  # fallback
+    weekly_ohlcv = fetch_weekly_ohlcv(weeks=40)
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
 
@@ -2524,6 +3055,11 @@ def run_close():
         log.info(f"뉴스 블록 추가: {len(news_blocks)}개")
     else:
         log.info("표시할 관련 뉴스 없음")
+
+    # DCA 기술지표 점수 (5-Layer, 100pts)
+    dca_tech = calculate_dca_technical_score(ohlcv, weekly_ohlcv, vp=None, sm=sm)
+    if dca_tech:
+        blocks.extend(format_dca_technical_block(dca_tech))
 
     dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news, sm=sm)
     blocks.extend(format_dca_block(dca))
