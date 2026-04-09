@@ -115,25 +115,59 @@ class TickerScore:
 # 유틸
 # ─────────────────────────────────────────────
 _last_request_time = 0.0
+_yahoo_session = None
 
-def _throttle(delay: float = 0.4):
+
+def _init_yahoo_session():
+    """야후 쿠키 세션 초기화 (fc.yahoo.com 선행 접속)"""
+    global _yahoo_session
+    s = requests.Session()
+    try:
+        s.get("https://fc.yahoo.com", headers={"User-Agent": BROWSER_UA}, timeout=10)
+        log.info("Yahoo 세션 초기화 완료")
+    except Exception as e:
+        log.warning(f"Yahoo 세션 초기화 실패 (무시): {e}")
+    _yahoo_session = s
+    return s
+
+
+def _throttle(base: float = 1.5):
+    """기본 1.5초 + 최대 0.5초 랜덤 jitter"""
     global _last_request_time
+    import random
+    delay = base + random.uniform(0, 0.5)
     elapsed = time.time() - _last_request_time
     if elapsed < delay:
         time.sleep(delay - elapsed)
     _last_request_time = time.time()
 
 
-def _safe_get(url, params=None, timeout=12):
-    try:
-        _throttle()
-        r = requests.get(url, params=params,
-                         headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-        if r.status_code == 200:
-            return r
-        log.warning(f"HTTP {r.status_code}: {url[:60]}")
-    except Exception as e:
-        log.warning(f"Request error: {e}")
+def _safe_get(url, params=None, timeout=15):
+    """429 시 exponential backoff 재시도 (최대 3회)"""
+    global _yahoo_session
+    if _yahoo_session is None:
+        _init_yahoo_session()
+    for attempt in range(3):
+        try:
+            _throttle()
+            r = _yahoo_session.get(
+                url, params=params,
+                headers={"User-Agent": BROWSER_UA},
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                return r
+            if r.status_code == 429:
+                wait = 10 * (2 ** attempt)  # 10s → 20s → 40s
+                log.warning(f"429 Rate limit — {wait}초 대기 후 재시도 ({attempt+1}/3)")
+                time.sleep(wait)
+                continue
+            log.warning(f"HTTP {r.status_code}: {url[:60]}")
+            return None
+        except Exception as e:
+            log.warning(f"Request error (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(5)
     return None
 
 
@@ -631,6 +665,9 @@ def send_slack(blocks: list):
 def main():
     log.info(f"=== NDX 100 Market Scan 시작: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} ===")
     start = time.time()
+
+    # 야후 세션 선행 초기화 (쿠키 취득)
+    _init_yahoo_session()
 
     tickers = list(NDX100.items())
     log.info(f"스캔 대상: {len(tickers)}종목")
