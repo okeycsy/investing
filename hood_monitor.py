@@ -539,15 +539,15 @@ def format_beta_block(bd: dict) -> list:
 def _fetch_ticker_change(ticker: str) -> Optional[float]:
     """
     전일 정규장 종가 대비 현재가 변동률.
-    fetch_price()와 완전히 동일한 방식:
-    - 1d 일봉 closes[-1] → prev (전일 확정 종가)
-    - 1m + includePrePost 최신 바 → current (오늘 실시간)
-    - 장 마감 후(CLOSED)엔 closes[-1] vs closes[-2]
+
+    PRE/REGULAR: 1m 실시간 바 vs closes_daily[-1] (전일 확정 종가)
+    POST/CLOSED:  closes_daily[-1] vs closes_daily[-2] (오늘/어제 확정 종가)
+                  → 정규장이 끝난 후엔 당일 정규장 등락을 확정값으로 반환
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=ticker)
 
-    # 1) 확정 일봉
+    # 확정 일봉
     resp_1d = safe_get(url, params={"interval": "1d", "range": "10d"})
     if not resp_1d:
         return None
@@ -558,21 +558,23 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
     if len(closes_daily) < 2:
         return None
 
-    # 2) 장 상태 판별 (fetch_price와 동일)
+    # 장 상태 판별
     now_utc = datetime.now(UTC)
     hm  = now_utc.hour * 60 + now_utc.minute
     dow = now_utc.weekday()
-    if dow >= 5 or hm < 8 * 60 or hm >= 24 * 60:
+    if dow >= 5:
+        market_state = "CLOSED"
+    elif hm < 8 * 60:
         market_state = "CLOSED"
     elif hm < 13 * 60 + 30:
         market_state = "PRE"
     elif hm < 20 * 60:
         market_state = "REGULAR"
     else:
-        market_state = "POST"
+        market_state = "POST"  # 20:00+ UTC = 정규장 종료 후
 
-    if market_state in ("PRE", "REGULAR", "POST"):
-        # 3) 실시간: 1분봉 최신 바
+    if market_state in ("PRE", "REGULAR"):
+        # 정규장 진행 중: 실시간 1m 바 사용
         resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
         if not resp_1m:
             return None
@@ -588,10 +590,11 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
                         current = float(closes_1m[i])
                         break
         except Exception as e:
-            log.debug(f"_fetch_ticker_change({ticker}) 1m 파싱 오류: {e}")
+            log.debug(f"_fetch_ticker_change({ticker}) 1m 오류: {e}")
             return None
         prev = float(closes_daily[-1])
     else:
+        # POST/CLOSED: 정규장 종료 → 확정 일봉으로 계산
         current = float(closes_daily[-1])
         prev    = float(closes_daily[-2])
 
@@ -1103,23 +1106,34 @@ def fetch_news() -> list:
 
 
 def _fetch_article_body(url: str, max_chars: int = 600) -> str:
-    """기사 URL에서 본문 앞부분 발췌 (파싱 실패 시 빈 문자열)"""
+    """기사 URL에서 본문 앞부분 발췌. 페이월/차단 사이트는 조용히 스킵."""
     if not url:
         return ""
+
+    # 페이월/스크래핑 차단 도메인 스킵
+    BLOCKED_DOMAINS = {
+        "investopedia.com", "thestreet.com", "wsj.com", "ft.com",
+        "bloomberg.com", "barrons.com", "marketwatch.com",
+    }
     try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.lstrip("www.")
+        if any(domain.endswith(d) for d in BLOCKED_DOMAINS):
+            return ""
+    except Exception:
+        return ""
+
+    try:
+        import re
         resp = safe_get(url, timeout=8, retries=1)
         if not resp:
             return ""
-        import re
-        # script/style 제거 후 태그 제거, 공백 정리
         text = re.sub(r"<script[^>]*>.*?</script>", "", resp.text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<style[^>]*>.*?</style>",  "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>",   "", text,      flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
-        # 의미 있는 본문 시작점 찾기 (짧은 메타 텍스트 스킵)
         sentences = [s.strip() for s in text.split(".") if len(s.strip()) > 40]
-        body = ". ".join(sentences[:6])
-        return body[:max_chars]
+        return ". ".join(sentences[:6])[:max_chars]
     except Exception:
         return ""
 
