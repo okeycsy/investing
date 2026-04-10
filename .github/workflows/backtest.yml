@@ -1,0 +1,49 @@
+name: V3 Score Backtester
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: '분석 종목 (예: HOOD, NVDA, AAPL)'
+        required: false
+        default: 'HOOD'
+      years:
+        description: '분석 기간 (년)'
+        required: false
+        default: '2'
+        type: choice
+        options: ['1', '2', '3']
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # 2년치 롤링 스코어링 여유 시간
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests yfinance pandas numpy matplotlib seaborn
+
+      - name: Run backtest
+        env:
+          MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
+          SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python backtest.py \
+            --ticker "${{ github.event.inputs.ticker }}" \
+            --years  "${{ github.event.inputs.years }}"
+
+      - name: Upload charts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-charts-${{ github.event.inputs.ticker }}
+          path: outputs/
+          retention-days: 30
