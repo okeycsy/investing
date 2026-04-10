@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Nasdaq 100 Market Scanner v2.0
+S&P 500 Market Scanner v3.0
 ================================
-v2.0: yfinance 배치 다운로드 방식으로 전환
-- 전종목을 요청 2~3번에 처리 (개별 87번 → 청크 3번)
-- 429 문제 근본 해결
+v2.0: yfinance 배치 다운로드 방식으로 전환 (429 해결)
+v2.1: CMF·EvsR·ADX·BB Squeeze 고도화 (Prop-desk 지표)
+v3.0: S&P 500 전체 확대 (~490종목) + --ticker 단일 종목 모드
 """
 
 import os
@@ -12,6 +12,7 @@ import sys
 import time
 import json
 import logging
+import argparse
 import requests
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -36,52 +37,186 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("market_scan")
 
 # ─────────────────────────────────────────────
-# Nasdaq 100 종목 + 섹터
+# S&P 500 종목 + GICS 섹터 (2025 Q1 기준)
+# 편입/제외 변경 시 해당 종목만 수정
 # ─────────────────────────────────────────────
-NDX100 = {
-    # Technology
+SP500 = {
+    # ── Information Technology ────────────────────────────────────────────
     "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
-    "AVGO": "Technology", "ORCL": "Technology", "CSCO": "Technology",
-    "ADBE": "Technology", "TXN":  "Technology", "QCOM": "Technology",
-    "AMD":  "Technology", "AMAT": "Technology", "MU":   "Technology",
-    "INTC": "Technology", "LRCX": "Technology", "KLAC": "Technology",
-    "MRVL": "Technology", "CDNS": "Technology", "SNPS": "Technology",
-    "FTNT": "Technology", "ANSS": "Technology", "ON":   "Technology",
-    "NXPI": "Technology", "MCHP": "Technology", "ASML": "Technology",
-    "TSM":  "Technology", "INTU": "Technology", "ADP":  "Technology",
-    "CRM":  "Technology", "NOW":  "Technology", "PANW": "Technology",
-    "CRWD": "Technology", "TEAM": "Technology", "ZS":   "Technology",
-    "DDOG": "Technology", "WDAY": "Technology", "SNOW": "Technology",
-    "NET":  "Technology", "HUBS": "Technology", "MDB":  "Technology",
-    # Communication Services
-    "META":  "Comm Services", "GOOGL": "Comm Services", "GOOG": "Comm Services",
-    "NFLX":  "Comm Services", "TMUS":  "Comm Services",
-    # Consumer Discretionary
+    "AVGO": "Technology", "ORCL": "Technology", "CRM":  "Technology",
+    "ACN":  "Technology", "CSCO": "Technology", "IBM":  "Technology",
+    "QCOM": "Technology", "AMD":  "Technology", "INTU": "Technology",
+    "TXN":  "Technology", "AMAT": "Technology", "LRCX": "Technology",
+    "ADI":  "Technology", "MU":   "Technology", "KLAC": "Technology",
+    "SNPS": "Technology", "CDNS": "Technology", "PANW": "Technology",
+    "CRWD": "Technology", "MRVL": "Technology", "ON":   "Technology",
+    "NXPI": "Technology", "MCHP": "Technology", "FTNT": "Technology",
+    "STX":  "Technology", "FSLR": "Technology", "KEYS": "Technology",
+    "ANSS": "Technology", "TER":  "Technology", "ENPH": "Technology",
+    "GLW":  "Technology", "HPQ":  "Technology", "HPE":  "Technology",
+    "IT":   "Technology", "CTSH": "Technology", "CDW":  "Technology",
+    "MPWR": "Technology", "SWKS": "Technology", "TRMB": "Technology",
+    "GEN":  "Technology", "PTC":  "Technology", "ZBRA": "Technology",
+    "EPAM": "Technology", "VRSN": "Technology", "WDC":  "Technology",
+    "NTAP": "Technology", "NOW":  "Technology", "DDOG": "Technology",
+    "SNOW": "Technology", "NET":  "Technology", "TEAM": "Technology",
+    "WDAY": "Technology", "ADBE": "Technology", "ZS":   "Technology",
+    "MDB":  "Technology", "HUBS": "Technology", "ADP":  "Technology",
+    "INTC": "Technology", "ASML": "Technology", "TSM":  "Technology",
+    "JNPR": "Technology", "FFIV": "Technology", "AKAM": "Technology",
+    "GDDY": "Technology", "PAYC": "Technology", "OKTA": "Technology",
+    "APP":  "Technology", "PLTR": "Technology",
+    # ── Communication Services ────────────────────────────────────────────
+    "META":  "Comm Services", "GOOGL": "Comm Services", "GOOG":  "Comm Services",
+    "NFLX":  "Comm Services", "TMUS":  "Comm Services", "CMCSA": "Comm Services",
+    "VZ":    "Comm Services", "T":     "Comm Services", "DIS":   "Comm Services",
+    "CHTR":  "Comm Services", "WBD":   "Comm Services", "FOXA":  "Comm Services",
+    "FOX":   "Comm Services", "OMC":   "Comm Services", "IPG":   "Comm Services",
+    "LYV":   "Comm Services", "EA":    "Comm Services", "TTWO":  "Comm Services",
+    "MTCH":  "Comm Services",
+    # ── Consumer Discretionary ────────────────────────────────────────────
     "AMZN": "Cons Discretionary", "TSLA": "Cons Discretionary",
-    "BKNG": "Cons Discretionary", "MCD":  "Cons Discretionary",
+    "MCD":  "Cons Discretionary", "NKE":  "Cons Discretionary",
+    "HD":   "Cons Discretionary", "LOW":  "Cons Discretionary",
+    "BKNG": "Cons Discretionary", "TJX":  "Cons Discretionary",
     "SBUX": "Cons Discretionary", "CMG":  "Cons Discretionary",
     "ABNB": "Cons Discretionary", "MAR":  "Cons Discretionary",
+    "HLT":  "Cons Discretionary", "YUM":  "Cons Discretionary",
+    "DHI":  "Cons Discretionary", "LEN":  "Cons Discretionary",
+    "PHM":  "Cons Discretionary", "NVR":  "Cons Discretionary",
+    "RCL":  "Cons Discretionary", "CCL":  "Cons Discretionary",
+    "NCLH": "Cons Discretionary", "MGM":  "Cons Discretionary",
+    "WYNN": "Cons Discretionary", "LVS":  "Cons Discretionary",
+    "CZR":  "Cons Discretionary", "F":    "Cons Discretionary",
+    "GM":   "Cons Discretionary", "ROST": "Cons Discretionary",
     "ORLY": "Cons Discretionary", "AZO":  "Cons Discretionary",
-    "ROST": "Cons Discretionary",
-    # Healthcare
-    "AMGN": "Healthcare", "GILD": "Healthcare", "VRTX": "Healthcare",
-    "REGN": "Healthcare", "MRNA": "Healthcare", "BIIB": "Healthcare",
-    "IDXX": "Healthcare", "DXCM": "Healthcare", "ISRG": "Healthcare",
-    "GEHC": "Healthcare",
-    # Consumer Staples
-    "PEP":  "Cons Staples", "COST": "Cons Staples", "MDLZ": "Cons Staples",
-    "KHC":  "Cons Staples", "MNST": "Cons Staples",
-    # Industrials
-    "HON":  "Industrials", "CTAS": "Industrials", "PAYX": "Industrials",
-    "FAST": "Industrials", "ODFL": "Industrials", "VRSK": "Industrials",
-    "CPRT": "Industrials",
-    # Financials
-    "PYPL": "Financials", "COIN": "Financials",
-    # Energy
-    "FANG": "Energy",
-    # Utilities
-    "EXC": "Utilities", "XEL": "Utilities", "CEG": "Utilities",
+    "GPC":  "Cons Discretionary", "KMX":  "Cons Discretionary",
+    "AN":   "Cons Discretionary", "APTV": "Cons Discretionary",
+    "TSCO": "Cons Discretionary", "DRI":  "Cons Discretionary",
+    "RL":   "Cons Discretionary", "TPR":  "Cons Discretionary",
+    "LKQ":  "Cons Discretionary", "BWA":  "Cons Discretionary",
+    "BBY":  "Cons Discretionary", "ETSY": "Cons Discretionary",
+    "EBAY": "Cons Discretionary", "EXPE": "Cons Discretionary",
+    "ULTA": "Cons Discretionary", "LULU": "Cons Discretionary",
+    "POOL": "Cons Discretionary", "WH":   "Cons Discretionary",
+    "H":    "Cons Discretionary", "MHK":  "Cons Discretionary",
+    "GNTX": "Cons Discretionary",
+    # ── Consumer Staples ──────────────────────────────────────────────────
+    "WMT":  "Cons Staples", "COST": "Cons Staples", "PG":   "Cons Staples",
+    "KO":   "Cons Staples", "PEP":  "Cons Staples", "PM":   "Cons Staples",
+    "MO":   "Cons Staples", "MDLZ": "Cons Staples", "CL":   "Cons Staples",
+    "KMB":  "Cons Staples", "CHD":  "Cons Staples", "SJM":  "Cons Staples",
+    "CAG":  "Cons Staples", "HRL":  "Cons Staples", "CPB":  "Cons Staples",
+    "MKC":  "Cons Staples", "K":    "Cons Staples", "GIS":  "Cons Staples",
+    "HSY":  "Cons Staples", "STZ":  "Cons Staples", "TAP":  "Cons Staples",
+    "MNST": "Cons Staples", "KHC":  "Cons Staples", "WBA":  "Cons Staples",
+    "SYY":  "Cons Staples", "ADM":  "Cons Staples", "BG":   "Cons Staples",
+    "EL":   "Cons Staples",
+    # ── Healthcare ────────────────────────────────────────────────────────
+    "JNJ":  "Healthcare", "UNH":  "Healthcare", "PFE":  "Healthcare",
+    "ABBV": "Healthcare", "MRK":  "Healthcare", "TMO":  "Healthcare",
+    "ABT":  "Healthcare", "DHR":  "Healthcare", "BMY":  "Healthcare",
+    "AMGN": "Healthcare", "LLY":  "Healthcare", "SYK":  "Healthcare",
+    "MDT":  "Healthcare", "BSX":  "Healthcare", "EW":   "Healthcare",
+    "BDX":  "Healthcare", "ISRG": "Healthcare", "VRTX": "Healthcare",
+    "REGN": "Healthcare", "GILD": "Healthcare", "BIIB": "Healthcare",
+    "MRNA": "Healthcare", "IDXX": "Healthcare", "DXCM": "Healthcare",
+    "GEHC": "Healthcare", "HCA":  "Healthcare", "CI":   "Healthcare",
+    "CVS":  "Healthcare", "MCK":  "Healthcare", "CAH":  "Healthcare",
+    "ABC":  "Healthcare", "IQV":  "Healthcare", "ZBH":  "Healthcare",
+    "HOLX": "Healthcare", "MTD":  "Healthcare", "WAT":  "Healthcare",
+    "TFX":  "Healthcare", "BAX":  "Healthcare", "STE":  "Healthcare",
+    "HSIC": "Healthcare", "CNC":  "Healthcare", "MOH":  "Healthcare",
+    "HUM":  "Healthcare", "VTRS": "Healthcare", "INCY": "Healthcare",
+    "ALNY": "Healthcare", "RMD":  "Healthcare", "PODD": "Healthcare",
+    "COO":  "Healthcare", "ALGN": "Healthcare", "DVA":  "Healthcare",
+    "LH":   "Healthcare", "DGX":  "Healthcare", "BIO":  "Healthcare",
+    "TECH": "Healthcare", "SOLV": "Healthcare",
+    # ── Financials ────────────────────────────────────────────────────────
+    "JPM":  "Financials", "BAC":  "Financials", "WFC":  "Financials",
+    "MS":   "Financials", "GS":   "Financials", "BLK":  "Financials",
+    "C":    "Financials", "AXP":  "Financials", "SCHW": "Financials",
+    "USB":  "Financials", "PNC":  "Financials", "TFC":  "Financials",
+    "COF":  "Financials", "MTB":  "Financials", "RF":   "Financials",
+    "HBAN": "Financials", "CFG":  "Financials", "FITB": "Financials",
+    "KEY":  "Financials", "BK":   "Financials", "STT":  "Financials",
+    "NTRS": "Financials", "CB":   "Financials", "MET":  "Financials",
+    "PRU":  "Financials", "AFL":  "Financials", "ALL":  "Financials",
+    "AIG":  "Financials", "HIG":  "Financials", "TRV":  "Financials",
+    "PGR":  "Financials", "CINF": "Financials", "WRB":  "Financials",
+    "SPGI": "Financials", "MCO":  "Financials", "ICE":  "Financials",
+    "CME":  "Financials", "NDAQ": "Financials", "FIS":  "Financials",
+    "FISV": "Financials", "FI":   "Financials", "GPN":  "Financials",
+    "V":    "Financials", "MA":   "Financials", "PYPL": "Financials",
+    "COIN": "Financials", "AMP":  "Financials", "RJF":  "Financials",
+    "BEN":  "Financials", "IVZ":  "Financials", "TROW": "Financials",
+    "HOOD": "Financials", "MKTX": "Financials", "BR":   "Financials",
+    "KKR":  "Financials", "BX":   "Financials", "APO":  "Financials",
+    "ARES": "Financials", "OWL":  "Financials",
+    # ── Industrials ───────────────────────────────────────────────────────
+    "HON":  "Industrials", "GE":   "Industrials", "CAT":  "Industrials",
+    "DE":   "Industrials", "EMR":  "Industrials", "ETN":  "Industrials",
+    "PH":   "Industrials", "ROK":  "Industrials", "DOV":  "Industrials",
+    "ITW":  "Industrials", "MMM":  "Industrials", "FTV":  "Industrials",
+    "XYL":  "Industrials", "HUBB": "Industrials", "AME":  "Industrials",
+    "GNRC": "Industrials", "CARR": "Industrials", "OTIS": "Industrials",
+    "CTAS": "Industrials", "PAYX": "Industrials", "FAST": "Industrials",
+    "ODFL": "Industrials", "VRSK": "Industrials", "CPRT": "Industrials",
+    "EXPD": "Industrials", "CHRW": "Industrials", "FDX":  "Industrials",
+    "UPS":  "Industrials", "NSC":  "Industrials", "CSX":  "Industrials",
+    "UNP":  "Industrials", "WAB":  "Industrials", "JBHT": "Industrials",
+    "GWW":  "Industrials", "MAS":  "Industrials", "SWK":  "Industrials",
+    "SNA":  "Industrials", "IR":   "Industrials", "TT":   "Industrials",
+    "LII":  "Industrials", "ALLE": "Industrials", "NDSN": "Industrials",
+    "ROP":  "Industrials", "CSL":  "Industrials", "AXON": "Industrials",
+    "LMT":  "Industrials", "GD":   "Industrials", "RTX":  "Industrials",
+    "NOC":  "Industrials", "BA":   "Industrials", "HII":  "Industrials",
+    "TDG":  "Industrials", "TXT":  "Industrials", "HEI":  "Industrials",
+    "SAIC": "Industrials", "LDOS": "Industrials", "BAH":  "Industrials",
+    "CACI": "Industrials",
+    # ── Materials ─────────────────────────────────────────────────────────
+    "LIN":  "Materials", "APD":  "Materials", "SHW":  "Materials",
+    "ECL":  "Materials", "DD":   "Materials", "NEM":  "Materials",
+    "FCX":  "Materials", "NUE":  "Materials", "STLD": "Materials",
+    "RS":   "Materials", "BALL": "Materials", "IP":   "Materials",
+    "PKG":  "Materials", "AMCR": "Materials", "EMN":  "Materials",
+    "FMC":  "Materials", "MOS":  "Materials", "IFF":  "Materials",
+    "CE":   "Materials", "ALB":  "Materials", "RPM":  "Materials",
+    "PPG":  "Materials", "SEE":  "Materials", "AVY":  "Materials",
+    "CF":   "Materials",
+    # ── Real Estate ───────────────────────────────────────────────────────
+    "AMT":  "Real Estate", "PLD":  "Real Estate", "EQIX": "Real Estate",
+    "CCI":  "Real Estate", "SBAC": "Real Estate", "DLR":  "Real Estate",
+    "WELL": "Real Estate", "PSA":  "Real Estate", "EQR":  "Real Estate",
+    "AVB":  "Real Estate", "CPT":  "Real Estate", "ESS":  "Real Estate",
+    "UDR":  "Real Estate", "INVH": "Real Estate", "MAA":  "Real Estate",
+    "NNN":  "Real Estate", "O":    "Real Estate", "SPG":  "Real Estate",
+    "BXP":  "Real Estate", "ARE":  "Real Estate", "VTR":  "Real Estate",
+    "VICI": "Real Estate", "IRM":  "Real Estate", "EXR":  "Real Estate",
+    "CUBE": "Real Estate", "FR":   "Real Estate", "WY":   "Real Estate",
+    "HST":  "Real Estate", "KIM":  "Real Estate", "REG":  "Real Estate",
+    # ── Utilities ─────────────────────────────────────────────────────────
+    "NEE":  "Utilities", "DUK":  "Utilities", "SO":   "Utilities",
+    "D":    "Utilities", "AEP":  "Utilities", "EXC":  "Utilities",
+    "XEL":  "Utilities", "ES":   "Utilities", "ETR":  "Utilities",
+    "FE":   "Utilities", "PPL":  "Utilities", "CMS":  "Utilities",
+    "NI":   "Utilities", "ATO":  "Utilities", "LNT":  "Utilities",
+    "WEC":  "Utilities", "EVRG": "Utilities", "SRE":  "Utilities",
+    "PCG":  "Utilities", "ED":   "Utilities", "CEG":  "Utilities",
+    "NRG":  "Utilities", "VST":  "Utilities", "EIX":  "Utilities",
+    "AWK":  "Utilities", "AES":  "Utilities",
+    # ── Energy ────────────────────────────────────────────────────────────
+    "XOM":  "Energy", "CVX":  "Energy", "COP":  "Energy",
+    "EOG":  "Energy", "DVN":  "Energy", "FANG": "Energy",
+    "OXY":  "Energy", "HES":  "Energy", "MRO":  "Energy",
+    "APA":  "Energy", "EQT":  "Energy", "AR":   "Energy",
+    "CTRA": "Energy", "SLB":  "Energy", "HAL":  "Energy",
+    "BKR":  "Energy", "MPC":  "Energy", "VLO":  "Energy",
+    "PSX":  "Energy", "OKE":  "Energy", "WMB":  "Energy",
+    "KMI":  "Energy", "LNG":  "Energy", "TRGP": "Energy",
+    "DINO": "Energy",
 }
+
 
 
 # ─────────────────────────────────────────────
@@ -114,7 +249,7 @@ def batch_download(tickers: list, period: str = "6mo") -> dict:
     반환: {ticker: {"closes":[], "highs":[], "lows":[], "volumes":[]}}
     """
     result = {}
-    chunk_size = 30  # 한 번에 30종목씩 (안정성)
+    chunk_size = 25  # 500종목 대응: 25종목씩 (안정성 우선)
 
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i: i + chunk_size]
@@ -177,7 +312,7 @@ def batch_download(tickers: list, period: str = "6mo") -> dict:
 
         # 청크 간 딜레이 (부드럽게)
         if i + chunk_size < len(tickers):
-            time.sleep(2)
+            time.sleep(3)
 
     return result
 
@@ -666,7 +801,7 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed):
     blocks   = []
 
     blocks.append({"type": "header", "text": {"type": "plain_text",
-        "text": f"📡 NDX 100 기술지표 스캔 — {today}"}})
+        "text": f"📡 S&P 500 기술지표 스캔 — {today}"}})
     blocks.append(_ctx(
         f"스캔 종목: *{ok_count}/{len(results)}* | "
         f"소요: {elapsed:.0f}초 | 일봉 6개월 · 4-Layer v2 (CMF·EvsR·ADX·BBSq)"
@@ -729,7 +864,7 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed):
     return blocks
 
 
-def send_slack(blocks: list):
+def send_slack(blocks: list, text: str = "S&P 500 Market Scan"):
     if not SLACK_WEBHOOK:
         log.error("SLACK_WEBHOOK URL 없음")
         return
@@ -737,7 +872,7 @@ def send_slack(blocks: list):
         chunk = blocks[i: i+40]
         try:
             r = requests.post(SLACK_WEBHOOK,
-                              json={"blocks": chunk, "text": "NDX 100 Market Scan"},
+                              json={"blocks": chunk, "text": text},
                               timeout=15)
             log.info(f"Slack: {r.status_code} (블록 {i}~{i+len(chunk)-1})")
         except Exception as e:
@@ -745,22 +880,163 @@ def send_slack(blocks: list):
 
 
 # ─────────────────────────────────────────────
+# 단일 종목 Slack 블록 (--ticker 모드용)
+# ─────────────────────────────────────────────
+def _layer_bar(pts: int, max_pts: int, width: int = 8) -> str:
+    fill = round(pts / max_pts * width) if max_pts else 0
+    return "█" * fill + "░" * (width - fill)
+
+def _pct(val: float) -> str:
+    return f"{val:+.0%}" if abs(val) < 10 else f"{val:+.1f}"
+
+def build_single_blocks(ts: TickerScore, elapsed: float) -> list:
+    today  = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    sector = ts.sector or "Unknown"
+    blocks = []
+
+    # ── 헤더 ──────────────────────────────────
+    blocks.append({"type": "header", "text": {"type": "plain_text",
+        "text": f"🔍 ${ts.ticker} 단일 종목 스캔"}})
+    blocks.append(_ctx(f"{today} | {elapsed:.1f}초 | 4-Layer v2"))
+    blocks.append(_div())
+
+    # ── 종합 점수 ─────────────────────────────
+    fill = int(ts.score / 100 * 10)
+    bar  = "█" * fill + "░" * (10 - fill)
+    squeeze_tag = "  🔥 *BB Squeeze 발동*" if ts.squeeze else ""
+    blocks.append(_sec_block(
+        f"{ts.grade_emoji} *{ts.score}점*  `{bar}`  _{ts.grade}_{squeeze_tag}\n"
+        f"섹터: *{sector}*"
+    ))
+    blocks.append(_div())
+
+    # ── 레이어별 상세 ─────────────────────────
+    max_pts = {"A": 28, "B": 20, "C": 20, "D": 12}
+    layer_labels = {
+        "A": "Volume / Flow",
+        "B": "Trend",
+        "C": "Momentum",
+        "D": "Volatility · Entry",
+    }
+    detail = {
+        "A": (f"CMF {ts.cmf:+.3f}  |  MFI {ts.mfi:.0f}"
+              f"  |  EvsR {ts.evsr:.2f}{'  ⚡흡수' if ts.evsr >= 1.5 else ''}"),
+        "B": (f"ADX {ts.adx:.0f}"
+              f"{'(추세확립)' if ts.adx >= 25 else '(횡보)' if ts.adx < 15 else ''}"
+              f"  |  MACD/EMA 기반"),
+        "C": f"RSI {ts.rsi:.1f}  |  Stoch/Div 포함",
+        "D": f"BB{'🔥Squeeze' if ts.squeeze else ''}  |  ATR 낙폭 기반",
+    }
+    lines = ["*📊 레이어별 상세*"]
+    for lid, lname in layer_labels.items():
+        pts  = ts.layers.get(lid, 0)
+        mxp  = max_pts[lid]
+        bar2 = _layer_bar(pts, mxp)
+        lines.append(
+            f"▸ *{lname}*  `{bar2}` {pts}/{mxp}pt\n"
+            f"   _{detail[lid]}_"
+        )
+    blocks.append(_sec_block("\n".join(lines)))
+    blocks.append(_div())
+
+    # ── Claude 단일 코멘트 ────────────────────
+    if ANTHROPIC_API_KEY:
+        comment = _claude_single_comment(ts)
+        if comment:
+            blocks.append(_sec_block(comment))
+            blocks.append(_div())
+
+    blocks.append(_ctx(
+        "기술지표 기반 참고용. 투자 결정은 본인 판단하에.\n"
+        f"전체 스캔: `python market_scan.py` | 종목 스캔: `--ticker {ts.ticker}`"
+    ))
+    return blocks
+
+
+def _claude_single_comment(ts: TickerScore) -> str:
+    """단일 종목용 Claude 간단 코멘트"""
+    try:
+        prompt = (
+            f"다음은 ${ts.ticker}({ts.sector}) 기술지표 스코어입니다 (100점 만점):\n"
+            f"총점: {ts.score}점 ({ts.grade})\n"
+            f"Layer A(Volume/Flow): {ts.layers.get('A',0)}/28 — CMF {ts.cmf:+.3f}, MFI {ts.mfi:.0f}, EvsR {ts.evsr:.2f}\n"
+            f"Layer B(Trend): {ts.layers.get('B',0)}/20 — ADX {ts.adx:.0f}\n"
+            f"Layer C(Momentum): {ts.layers.get('C',0)}/20 — RSI {ts.rsi:.1f}\n"
+            f"Layer D(Volatility): {ts.layers.get('D',0)}/12 — BBSqueeze {'발동' if ts.squeeze else '없음'}\n\n"
+            "이 데이터를 바탕으로 한국어로 2~3문장, 핵심만 날카롭게 평가해주세요. "
+            "가격 예측 금지. 기술적 상태 진단만."
+        )
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_API_KEY,
+                     "content-type": "application/json",
+                     "anthropic-version": "2023-06-01"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 300,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return ""
+        text = "".join(b["text"] for b in r.json().get("content", []) if b.get("type") == "text")
+        return f"🤖 *Claude 진단*\n{text.strip()}"
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
 def main():
-    log.info(f"=== NDX 100 Market Scan v2.1 시작: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} ===")
+    # ── CLI 파싱 ──────────────────────────────
+    parser = argparse.ArgumentParser(description="S&P 500 Market Scanner v3.0")
+    parser.add_argument("--ticker", type=str, default="",
+                        help="단일 종목 스캔 (예: --ticker HOOD). 없으면 전체 스캔.")
+    args = parser.parse_args()
+
+    single_ticker = args.ticker.strip().upper()
+
+    # ══════════════════════════════════════════
+    # 모드 A: 단일 종목 스캔
+    # ══════════════════════════════════════════
+    if single_ticker:
+        log.info(f"=== 단일 종목 스캔: ${single_ticker} ===")
+        start = time.time()
+
+        sector = SP500.get(single_ticker, "Unknown")
+        ohlcv_map = batch_download([single_ticker], period="6mo")
+        ts = score_ticker(single_ticker, sector, ohlcv_map.get(single_ticker, {}))
+
+        elapsed = time.time() - start
+        if ts.error:
+            log.error(f"${single_ticker}: 데이터 없음 또는 다운로드 실패")
+            sys.exit(1)
+
+        log.info(
+            f"${single_ticker}: {ts.score}점 ({ts.grade}) | "
+            f"RSI={ts.rsi:.1f} CMF={ts.cmf:+.3f} ADX={ts.adx:.0f} "
+            f"EvsR={ts.evsr:.2f} Squeeze={ts.squeeze} | {elapsed:.1f}초"
+        )
+        blocks = build_single_blocks(ts, elapsed)
+        send_slack(blocks, text=f"${single_ticker} 단일 종목 스캔")
+        log.info("=== 완료 ===")
+        return
+
+    # ══════════════════════════════════════════
+    # 모드 B: S&P 500 전체 스캔
+    # ══════════════════════════════════════════
+    log.info(f"=== S&P 500 Market Scan v3.0 시작: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} ===")
     start = time.time()
 
-    tickers = list(NDX100.keys())
-    log.info(f"대상: {len(tickers)}종목 — yfinance 배치 다운로드")
+    tickers = list(SP500.keys())
+    log.info(f"대상: {len(tickers)}종목 — yfinance 배치 다운로드 (청크 25, 딜레이 3s)")
 
-    # 전종목 배치 다운로드 (핵심: 요청 3번으로 끝)
+    # 전종목 배치 다운로드
     ohlcv_map = batch_download(tickers, period="6mo")
     log.info(f"다운로드 완료: {len(ohlcv_map)}/{len(tickers)}종목")
 
-    # 스코어링 (로컬 계산, 추가 API 호출 없음)
+    # 스코어링 (로컬 계산)
     results = []
-    for ticker, sector in NDX100.items():
+    for ticker, sector in SP500.items():
         ts = score_ticker(ticker, sector, ohlcv_map.get(ticker, {}))
         if not ts.error:
             log.info(f"  {ticker}: {ts.score}점 ({ts.grade}) RSI={ts.rsi:.1f}")
@@ -778,7 +1054,7 @@ def main():
 
     claude_comment = _claude_comment(sectors, top15, bottom10)
     blocks = build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed)
-    send_slack(blocks)
+    send_slack(blocks, text="S&P 500 Market Scan")
     log.info("=== 완료 ===")
 
 
