@@ -648,20 +648,24 @@ def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
 
     # ── CMF (50pt) ───────────────────────────────────────────────────────
     # 단일 최강 예측 지표 (ρ=+0.259)
-    # 음→양 전환 타이밍이 핵심: 전환 중 > 완료 > 유지
+    # 백테스트 확정 순서: 양수유지 > 전환중 > 전환완료 (전환완료는 이미 늦음)
     cmf_info = _cmf_turning(h, l, c, v)
     ts.cmf   = cmf_info["now"]
     a = 0
-    if cmf_info["turning"] and cmf_info["positive"]:
-        a += 50   # 음→양 전환 완료: 최강 매집 신호
-    elif cmf_info["turning"]:
-        a += 37   # 음수지만 방향 전환 중: 선제 진입 타이밍
-    elif cmf_info["positive"]:
-        a += 25   # 양수 유지: 매수 압력 지속
+    # 백테스트 검증 결과 (HOOD 2년):
+    #   양수유지  WR 76%, avg +7.9%  → 실제 최강 (매수 압력 확립)
+    #   전환중    WR 61%, avg +4.6%  → 선제 신호 (유효)
+    #   전환완료  WR 33%, avg -3.3%  → 실제 최악 (이미 늦은 진입)
+    if cmf_info["positive"] and not cmf_info["turning"]:
+        a += 50   # 양수 유지: 매수 압력 확립 — 실제 최강 신호
+    elif cmf_info["turning"] and not cmf_info["positive"]:
+        a += 30   # 전환 중: 음수에서 상승 중 — 선제 진입
+    elif cmf_info["turning"] and cmf_info["positive"]:
+        a += 10   # 전환 완료: 이미 반등 진행 — 늦은 진입
     elif cmf_info["now"] > -0.05:
-        a += 10   # 중립: 관망
+        a += 5    # 중립: 관망
     else:
-        a += 0    # 강한 매도 압력: 진입 불가
+        a += 0    # 매도 압력: 진입 불가
 
     # EvsR은 참고용으로 계산만 (점수 미반영, Slack 표시용)
     ts.evsr  = _evsr_absorption(h, l, c, v)
