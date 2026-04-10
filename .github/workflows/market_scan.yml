@@ -1,15 +1,20 @@
-name: NDX 100 Market Scan
+name: S&P 500 Market Scan
 
 on:
   schedule:
     # KST 07:00 = UTC 22:00 (전날) — 장 마감 후 확정 데이터 기준
     - cron: '0 22 * * 1-5'
   workflow_dispatch:
+    inputs:
+      ticker:
+        description: '단일 종목 스캔 (예: HOOD, NVDA). 비워두면 S&P 500 전체 스캔.'
+        required: false
+        default: ''
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20   # S&P 500 전체: ~5~8분. 단일 종목: ~10초
 
     steps:
       - name: Checkout
@@ -28,4 +33,11 @@ jobs:
           MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
           SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python market_scan.py
+        run: |
+          if [ -n "${{ github.event.inputs.ticker }}" ]; then
+            echo "▶ 단일 종목 모드: ${{ github.event.inputs.ticker }}"
+            python market_scan.py --ticker "${{ github.event.inputs.ticker }}"
+          else
+            echo "▶ S&P 500 전체 스캔"
+            python market_scan.py
+          fi
