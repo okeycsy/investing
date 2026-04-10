@@ -132,6 +132,7 @@ def compute_rolling_scores(df: pd.DataFrame, ticker: str,
             "raw":   ts.raw   if not ts.error else None,
             "cmf":   ts.cmf,
             "evsr":  ts.evsr,
+            "upvol": ts.upvol,
             "adx":   ts.adx,
             "rsi":   ts.rsi,
             "squeeze": ts.squeeze,
@@ -240,6 +241,66 @@ def bucket_analysis(df: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────
 # 5-A. 레이어별 독립 예측력 분석
 # ─────────────────────────────────────────────
+def layer_A_subanalysis(df: pd.DataFrame) -> dict:
+    """
+    Layer A 세부 지표 독립 예측력 분석.
+    CMF / EvsR / UpVol 각각의 Spearman ρ, 엣지, 버킷 성과를 분리해서 측정.
+    반환: {indicator: {horizon: {corr, spearman, edge, bucket_stats}}}
+    """
+    indicators = {
+        "CMF":   ("cmf",   [-0.15, -0.05, 0.05, 0.15],
+                            ["강매도(<-0.15)", "매도압력", "중립", "매수압력", "강매수(>0.15)"]),
+        "EvsR":  ("evsr",  [1.0, 1.5, 2.0, 2.5],
+                            ["흡수없음(<1)", "약흡수", "중흡수", "강흡수", "최강흡수(>2.5)"]),
+        "UpVol": ("upvol", [0.75, 1.0, 1.5, 2.0],
+                            ["강하락거래량", "하락거래량우세", "중립", "상승거래량우세", "강상승거래량(>2)"]),
+    }
+    results = {}
+    for name, (col, thresholds, labels) in indicators.items():
+        if col not in df.columns:
+            continue
+        ind_results = {"col": col, "labels": labels, "horizons": {}, "buckets": {}}
+
+        # 버킷 분류
+        def assign_bucket(val):
+            for idx, t in enumerate(thresholds):
+                if val <= t:
+                    return labels[idx]
+            return labels[-1]
+        df_copy = df.copy()
+        df_copy["_bucket"] = df_copy[col].apply(assign_bucket)
+
+        for h in HORIZONS:
+            ret_col = f"return_{h}d"
+            sub = df[[col, ret_col]].dropna()
+            if len(sub) < 10:
+                ind_results["horizons"][h] = None
+                continue
+            spearman = sub[col].rank().corr(sub[ret_col].rank())
+            median   = sub[col].median()
+            top_ret  = sub[sub[col] >= median][ret_col].mean()
+            bot_ret  = sub[sub[col] <  median][ret_col].mean()
+            ind_results["horizons"][h] = {
+                "spearman": round(spearman, 4),
+                "edge":     round(top_ret - bot_ret, 4),
+            }
+
+        # 버킷별 10d 성과
+        for label in labels:
+            bucket_sub = df_copy[df_copy["_bucket"] == label]["return_10d"].dropna()
+            if len(bucket_sub) < 3:
+                ind_results["buckets"][label] = None
+                continue
+            ind_results["buckets"][label] = {
+                "count":   len(bucket_sub),
+                "avg":     round(bucket_sub.mean(), 4),
+                "winrate": round((bucket_sub > 0).mean(), 4),
+                "ev":      round(bucket_sub.mean() * (bucket_sub > 0).mean(), 4),
+            }
+        results[name] = ind_results
+    return results
+
+
 def layer_correlation_analysis(df: pd.DataFrame) -> dict:
     """
     각 레이어(A/B/C/D)와 미래 수익률의 상관관계 분석.
@@ -575,6 +636,50 @@ def generate_layer_charts(df: pd.DataFrame, layer_corr: dict,
     return files
 
 
+def generate_subanalysis_chart(sub_results: dict, ticker: str, output_dir: Path) -> list:
+    """
+    Layer A 세부 지표별 버킷 성과 차트 (CMF / EvsR / UpVol 각각).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    colors_pos = ["#e74c3c","#e67e22","#f1c40f","#2ecc71","#27ae60"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle(f"${ticker} — Layer A 세부 지표별 10d EV 분석", fontsize=13, fontweight="bold")
+
+    for ax, (name, data) in zip(axes, sub_results.items()):
+        labels   = data["labels"]
+        buckets  = data["buckets"]
+        evs      = [buckets[l]["ev"]*100 if buckets.get(l) else 0 for l in labels]
+        counts   = [buckets[l]["count"]  if buckets.get(l) else 0 for l in labels]
+        wrs      = [buckets[l]["winrate"]*100 if buckets.get(l) else 0 for l in labels]
+        bar_colors = [colors_pos[min(i, len(colors_pos)-1)] if e >= 0
+                      else "#95a5a6" for i, e in enumerate(evs)]
+        bars = ax.bar(range(len(labels)), evs, color=bar_colors, alpha=0.85,
+                      edgecolor="white", linewidth=0.5)
+        for bar, wr, cnt in zip(bars, wrs, counts):
+            if cnt > 0:
+                ax.text(bar.get_x() + bar.get_width()/2,
+                        bar.get_height() + (0.05 if bar.get_height() >= 0 else -0.3),
+                        f"WR{wr:.0f}%\nn={cnt}", ha="center", fontsize=7, color="#333")
+        ax.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
+        h_data = data["horizons"].get(10)
+        sp = f"ρ={h_data['spearman']:+.3f}" if h_data else ""
+        ax.set_title(f"{name}  {sp}", fontsize=11, fontweight="bold")
+        ax.set_ylabel("EV 10d (%)", fontsize=9)
+        ax.set_xticks(range(len(labels)))
+        short = [l.split("(")[0][:8] for l in labels]
+        ax.set_xticklabels(short, fontsize=7, rotation=15, ha="right")
+
+    plt.tight_layout()
+    p = output_dir / f"{ticker}_subA.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    files.append(p)
+    log.info(f"Layer A 세부 차트: {p}")
+    return files
+
+
 # ─────────────────────────────────────────────
 # 7. Slack 텍스트 메시지 생성
 # ─────────────────────────────────────────────
@@ -582,7 +687,8 @@ def build_slack_text(ticker: str, bucket_results: dict,
                      sweet_spot: dict, df: pd.DataFrame,
                      years: int, image_urls: list = None,
                      layer_corr: dict = None, combo_results: list = None,
-                     layer_image_urls: list = None) -> list:
+                     layer_image_urls: list = None,
+                     sub_results: dict = None) -> list:
     """Slack blocks 생성"""
     today   = datetime.now(KST).strftime("%Y-%m-%d")
     n_total = len(df)
@@ -714,6 +820,35 @@ def build_slack_text(ticker: str, bucket_results: dict,
             blocks.append(_sec("\n".join(lines_cb)))
 
     # ── 레이어 분석 이미지 ────────────────────
+    # ── Layer A 세부 분석 텍스트 ────────────────
+    if sub_results:
+        blocks.append(_div())
+        lines_sub = ["*🔬 Layer A 세부 지표 분석 (10d Spearman ρ)*", "```",
+                     f"{'지표':<8} {'ρ(10d)':>8}  {'엣지(10d)':>10}  {'엣지(30d)':>10}",
+                     "─" * 44]
+        for name, data in sub_results.items():
+            h10 = data["horizons"].get(10)
+            h30 = data["horizons"].get(30)
+            sp  = f"{h10['spearman']:+.3f}" if h10 else "N/A"
+            e10 = f"{h10['edge']*100:+.1f}%" if h10 else "N/A"
+            e30 = f"{h30['edge']*100:+.1f}%" if h30 else "N/A"
+            mark = " ✅" if (h10 and h10["spearman"] > 0.05) else (" ⚠️" if (h10 and h10["spearman"] < 0) else "")
+            lines_sub.append(f"{name:<8} {sp:>8}  {e10:>10}  {e30:>10}{mark}")
+        lines_sub.append("```")
+
+        # 최강 버킷 요약
+        for name, data in sub_results.items():
+            best = max(
+                [(l, d) for l, d in data["buckets"].items() if d and d["count"] >= 5],
+                key=lambda x: x[1]["ev"], default=(None, None)
+            )
+            if best[0]:
+                lines_sub.append(
+                    f"*{name}* 최강구간: _{best[0]}_ "
+                    f"→ WR {best[1]['winrate']*100:.0f}%  EV {best[1]['ev']*100:+.2f}%  n={best[1]['count']}"
+                )
+        blocks.append(_sec("\n".join(lines_sub)))
+
     layer_img_labels = ["🔬 레이어 상관계수", "📊 레이어 엣지", "🧩 콤보 랭킹"]
     if layer_image_urls:
         for url, label in zip(layer_image_urls, layer_img_labels):
@@ -812,7 +947,32 @@ def print_summary(ticker: str, bucket_results: dict,
 # ─────────────────────────────────────────────
 # 8-B. 레이어 콘솔 요약
 # ─────────────────────────────────────────────
-def print_layer_summary(layer_corr: dict, combo_results: list):
+def print_layer_summary(layer_corr: dict, combo_results: list,
+                        sub_results: dict = None):
+    # Layer A 세부 먼저 출력
+    if sub_results:
+        print(f"\n{'='*62}")
+        print("  Layer A 세부 지표 예측력 (Spearman ρ, 10d)")
+        print(f"{'='*62}")
+        print(f"{'지표':<8} {'ρ(10d)':>8}  {'엣지(10d)':>10}  {'엣지(30d)':>10}")
+        print("-" * 44)
+        for name, data in sub_results.items():
+            h10 = data['horizons'].get(10)
+            h30 = data['horizons'].get(30)
+            sp  = f"{h10['spearman']:+.3f}" if h10 else " N/A "
+            e10 = f"{h10['edge']*100:+.1f}%" if h10 else "N/A"
+            e30 = f"{h30['edge']*100:+.1f}%" if h30 else "N/A"
+            mark = " ✅" if (h10 and h10['spearman'] > 0.05) else ""
+            print(f"{name:<8} {sp:>8}  {e10:>10}  {e30:>10}{mark}")
+        print("-" * 44)
+        for name, data in sub_results.items():
+            best = max(
+                [(l,d) for l,d in data['buckets'].items() if d and d['count']>=5],
+                key=lambda x: x[1]['ev'], default=(None,None)
+            )
+            if best[0]:
+                print(f"  {name} 최강: {best[0]} → WR {best[1]['winrate']*100:.0f}% EV {best[1]['ev']*100:+.2f}%")
+
     print(f"\n{'='*62}")
     print("  레이어별 예측력 (Spearman ρ)")
     print(f"{'='*62}")
@@ -884,17 +1044,19 @@ def main():
     layer_corr    = layer_correlation_analysis(scored)
     layer_buckets = layer_bucket_analysis(scored)
     combo_results = layer_combo_analysis(scored)
+    sub_results   = layer_A_subanalysis(scored)
 
     # ⑦ 콘솔 출력
     print_summary(ticker, bucket_results, sweet_spot, scored)
-    print_layer_summary(layer_corr, combo_results)
+    print_layer_summary(layer_corr, combo_results, sub_results)
 
     # ⑧ 차트 생성
     output_dir = Path(args.output)
     chart_files       = generate_charts(scored, bucket_results, ticker, output_dir)
     layer_chart_files = generate_layer_charts(scored, layer_corr, layer_buckets,
                                               combo_results, ticker, output_dir)
-    all_files = chart_files + layer_chart_files
+    sub_chart_files   = generate_subanalysis_chart(sub_results, ticker, output_dir)
+    all_files = chart_files + layer_chart_files + sub_chart_files
     print(f"차트 저장 완료:")
     for f in all_files:
         print(f"  → {f}")
@@ -902,13 +1064,14 @@ def main():
     # ⑨ Imgur 업로드 → Slack 전송
     if not args.no_slack:
         image_urls       = [upload_to_imgur(f) for f in chart_files]
-        layer_image_urls = [upload_to_imgur(f) for f in layer_chart_files]
+        layer_image_urls = [upload_to_imgur(f) for f in layer_chart_files + sub_chart_files]
         blocks = build_slack_text(
             ticker, bucket_results, sweet_spot, scored, args.years,
             image_urls=image_urls,
             layer_corr=layer_corr,
             combo_results=combo_results,
             layer_image_urls=layer_image_urls,
+            sub_results=sub_results,
         )
         send_slack(blocks)
 
