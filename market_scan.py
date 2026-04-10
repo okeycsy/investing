@@ -235,6 +235,7 @@ class TickerScore:
     cmf:         float = 0.0    # Chaikin Money Flow
     adx:         float = 0.0    # ADX 추세 강도
     evsr:        float = 0.0    # Effort vs Result (흡수 비율)
+    upvol:       float = 1.0    # 상승일/하락일 거래량 비율
     squeeze:     bool  = False  # BB Squeeze 발동 여부
     layers:      dict  = field(default_factory=dict)
     error:       bool  = False
@@ -624,20 +625,21 @@ def _ema20_reclaim(closes: list) -> dict:
 
 
 # ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
-# 4-Layer 스코어 v3 — 바닥확인 + 반등추세추종
+# 2-Layer 스코어 v4 — 백테스트 기반 최적화
 #
-# 철학: "많이 떨어짐" → "바닥에서 회복 중" 으로 전환
-#   A. Volume (35pt) — 거래량이 1순위 증거
-#      CMF 방향전환(15) + EvsR 흡수(12) + 상승일 거래량(8)
-#   B. Bottom Confirm (25pt) — 바닥 확인 신호
-#      RSI Divergence(10) + Stoch 골든크로스(8) + MACD 전환(7) + RSI 방향(3-1)
-#   C. Trend Birth (20pt) — 추세 시작 신호
-#      EMA20 회복(10) + ADX·DI 전환(10)
-#   D. Entry Filter (0~8pt + 패널티) — 진입 품질 보정
-#      BB 위치 + ATR 낙폭 여지
+# 백테스트 결과 (HOOD 2년):
+#   A (Volume)  ρ=+0.146  ✅ 유일하게 유의미한 예측력
+#   B (Bottom)  ρ=+0.027  ✅ 미약하지만 A와 조합 시 승률 +2%
+#   C (Trend)   ρ=-0.059  ❌ 역방향 — 타이밍 후행으로 제거
+#   D (Entry)   ρ=-0.076  ❌ 역방향 — 노이즈로 제거
 #
-# 만점 80점 → 100점 정규화
+#   A. Volume (50pt) — 거래량이 방향을 먼저 말한다
+#      CMF 방향전환(22) + EvsR 흡수(18) + 상승일 거래량(10)
+#   B. Bottom Confirm (30pt) — 바닥 확인 보조
+#      RSI Divergence(12) + RSI 방향(4) + Stoch 골든크로스(9) + MACD 전환(5)
+#
+# 만점 80pt → 100점 정규화
+# C/D 함수는 보존 — 재설계 후 재검증 예정
 # ─────────────────────────────────────────────
 def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     ts = TickerScore(ticker=ticker, sector=sector)
@@ -649,131 +651,81 @@ def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     l = ohlcv["lows"];   v = ohlcv["volumes"]
     raw = 0; lays = {}
 
-    # ── A. Volume (35pt) ─────────────────────────────────────────────────
-    # 거래량이 방향성을 먼저 말해준다.
-    # CMF 방향전환(15) + EvsR 흡수(12) + 상승일 거래량 비율(8)
+    # ── A. Volume (50pt) ─────────────────────────────────────────────────
+    # 거래량이 방향성을 먼저 말해준다 (ρ=+0.146, 가장 강한 예측력)
+    # CMF 방향전환(22) + EvsR 흡수(18) + 상승일 거래량 비율(10)
     a = 0
 
-    # ① CMF 방향 전환 — 핵심: 음→양 전환 중이 최고
+    # ① CMF 방향 전환 — 음→양 전환 중이 최고 신호
     cmf_info = _cmf_turning(h, l, c, v)
     ts.cmf   = cmf_info["now"]
     if cmf_info["positive"] and cmf_info["turning"]:
-        a += 15  # 음수에서 올라와 양수 돌파 완료 = 가장 강한 매집 신호
+        a += 22  # 음수→양수 전환 완료 = 스마트머니 매집 확인
     elif cmf_info["turning"]:
-        a += 11  # 아직 음수지만 방향 전환 중
+        a += 16  # 아직 음수지만 방향 전환 중
     elif cmf_info["positive"]:
-        a += 8   # 이미 양수 (전환 타이밍은 지났지만 매수 압력 유지)
+        a += 11  # 이미 양수 (매수 압력 유지)
     elif cmf_info["now"] > -0.05:
-        a += 3   # 중립 근처
+        a += 4   # 중립 근처
     else:
         a += 0   # 강한 매도 압력
 
-    # ② EvsR Absorption — 고거래량인데 가격이 안 움직임 = 스마트머니 흡수
+    # ② EvsR Absorption — 고거래량 + 가격 불변 = 스마트머니 흡수
     evsr_v = _evsr_absorption(h, l, c, v)
     ts.evsr = evsr_v
-    a += (12 if evsr_v >= 2.5 else
-           9  if evsr_v >= 2.0 else
-           6  if evsr_v >= 1.5 else
-           3  if evsr_v >= 1.0 else 0)
+    a += (18 if evsr_v >= 2.5 else
+          13  if evsr_v >= 2.0 else
+           9  if evsr_v >= 1.5 else
+           4  if evsr_v >= 1.0 else 0)
 
-    # ③ 상승일 거래량 비율 — 최근 10일, 상승일 거래량 / 하락일 거래량
+    # ③ 상승일 거래량 비율 — 최근 10일 상승일 거래량 / 하락일 거래량
     upvol = _upvol_ratio(c, v, period=10)
-    a += (8 if upvol >= 2.0 else
-           5 if upvol >= 1.5 else
-           2 if upvol >= 1.0 else 0)
+    ts.upvol = upvol
+    a += (10 if upvol >= 2.0 else   # 반등 초입 핵심 신호
+           6  if upvol >= 1.5 else
+           2  if upvol >= 1.0 else 0)
 
     lays["A"] = a; raw += a
 
-    # ── B. Bottom Confirmation (25pt) ────────────────────────────────────
-    # 가격/모멘텀 지표가 바닥을 확인해주는가
-    # RSI Divergence(10) + RSI 방향(3) + Stoch 골든크로스(8) + MACD 전환(7)
+    # ── B. Bottom Confirmation (30pt) ────────────────────────────────────
+    # A와 조합 시 승률 +2% 기여 (A↑+B↑ vs A↑+B↓: 72% vs 70%)
+    # RSI Divergence(12) + RSI 방향(4) + Stoch 골든크로스(9) + MACD 전환(5)
     b = 0
 
-    # ① RSI Bullish Divergence — 가격 신저 + RSI 저점 상승 = 바닥 확인 1순위
+    # ① RSI Bullish Divergence — 가격 신저 + RSI 저점 상승 = 바닥 확인
     if _rsi_divergence(c):
-        b += 10
+        b += 12
 
-    # ② RSI 방향 — 과매도에서 올라오는 중인지 (방향이 핵심)
+    # ② RSI 방향 — 과매도권에서 올라오는 중 (절대값보다 방향이 핵심)
     rsi_v = _rsi(c); ts.rsi = rsi_v
     rsi_5  = _rsi(c[:-5]) if len(c) > 19 else rsi_v
     if rsi_v > rsi_5 and rsi_v < 50:
-        b += 3   # 과매도권에서 RSI가 올라오는 중 (방향이 중요)
+        b += 4   # 방향 전환 확인
     elif rsi_v < 30:
-        b += 1   # 아직 과매도 (방향 미확인)
+        b += 1   # 과매도 (방향 미확인)
 
-    # ③ Stochastic 골든크로스 — 과매도 탈출의 단기 확인
+    # ③ Stochastic 골든크로스 — 과매도 탈출 단기 확인
     sk_v, sd_v = _stoch(h, l, c)
     if sk_v is not None and sd_v is not None:
-        b += (8 if sk_v < 30 and sk_v > sd_v else
-               5 if sk_v < 50 and sk_v > sd_v else
-               2 if sk_v > sd_v else 0)
+        b += (9 if sk_v < 30 and sk_v > sd_v else
+              6  if sk_v < 50 and sk_v > sd_v else
+              2  if sk_v > sd_v else 0)
 
-    # ④ MACD 히스토그램 전환 — 음→양 전환이 핵심
+    # ④ MACD 히스토그램 — 음→양 전환이 핵심
     mh, prev_mh = _macd_hist(c)
     if mh > 0 and prev_mh <= 0:
-        b += 7   # 이번 봉에 양전환 = 모멘텀 전환의 가장 명확한 신호
+        b += 5   # 이번 봉 양전환 = 가장 명확한 모멘텀 전환
     elif mh > 0 and mh > prev_mh:
-        b += 5   # 양수 구간 확장 중
+        b += 3   # 양수 확장 중
     elif mh < 0 and mh > prev_mh:
-        b += 2   # 아직 음수지만 수렴 중
+        b += 1   # 수렴 중
 
     lays["B"] = b; raw += b
 
-    # ── C. Trend Birth (20pt) ────────────────────────────────────────────
-    # 바닥에서 새로운 상승추세가 탄생하는가
-    # EMA20 회복(10) + ADX/DI 전환(10)
-    cp = 0
-
-    # ① EMA20 회복 — 추세추종의 핵심: 단기 이평 돌파
-    ema_info = _ema20_reclaim(c)
-    if ema_info["just_crossed"]:
-        cp += 10  # 최근 5봉 내 EMA20 돌파 = 추세 전환 초입의 골든 타이밍
-    elif ema_info["above"] and ema_info["distance_pct"] < 3.0:
-        cp += 7   # EMA20 위, 아직 멀리 안 감
-    elif ema_info["above"] and ema_info["distance_pct"] < 7.0:
-        cp += 4   # EMA20 위지만 좀 올라온 상태
-    elif not ema_info["above"] and ema_info["distance_pct"] > -3.0:
-        cp += 2   # EMA20 바로 아래 (곧 돌파 가능)
-
-    # ② ADX + DI 전환 — 새 추세 탄생 확인
-    adx_v, pdi_v, ndi_v = _adx(h, l, c)
-    ts.adx = adx_v
-    if pdi_v > ndi_v and adx_v >= 20:
-        cp += 10  # +DI > -DI + 추세 확립 = 상승추세 시작 확인
-    elif pdi_v > ndi_v:
-        cp += 6   # +DI > -DI지만 추세 약함
-    elif pdi_v > ndi_v * 0.9:
-        cp += 3   # DI 거의 역전 직전
-
-    lays["C"] = cp; raw += cp
-
-    # ── D. Entry Filter (0~8pt, 패널티 있음) ─────────────────────────────
-    # 진입 품질 보정
-    d = 0
-
-    # ① BB 위치 — 하단 근처 = 진입 여지, 상단 = 패널티
-    bb = _bb_squeeze(c, h, l)
-    ts.squeeze = bb["squeeze"]
-    if bb["below_lower"]:
-        d += 5
-    elif bb["near_lower"]:
-        d += 3
-    elif bb["squeeze"] and bb["bb_pos"] < 0:
-        d += 2
-    elif bb["bb_pos"] > 0.7:
-        d -= 3   # 상단 근접 패널티
-
-    # ② ATR 낙폭 — 반등 여지 확인
-    atr_v = _atr(h, l, c)
-    if atr_v and atr_v > 0 and len(c) >= 20:
-        hi20 = max(c[-20:])
-        mult = abs(c[-1] - hi20) / atr_v
-        d += (3 if mult >= 3.0 else
-               2 if mult >= 2.0 else
-               1 if mult >= 1.0 else 0)
-
-    d = max(0, d)
-    lays["D"] = d; raw += d
+    # C, D 레이어: 백테스트에서 역방향 확인 → 제거
+    # 함수(_ema20_reclaim, _adx, _bb_squeeze)는 보존 — 재설계 후 재검증 예정
+    lays["C"] = 0
+    lays["D"] = 0
 
     # ── 정규화 80→100 ────────────────────────
     score = round(raw / 80 * 100)
