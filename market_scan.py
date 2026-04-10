@@ -625,21 +625,16 @@ def _ema20_reclaim(closes: list) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 2-Layer 스코어 v4 — 백테스트 기반 최적화
+# 단일 레이어 스코어 v5 — 세부 백테스트 기반 최종 최적화
 #
-# 백테스트 결과 (HOOD 2년):
-#   A (Volume)  ρ=+0.146  ✅ 유일하게 유의미한 예측력
-#   B (Bottom)  ρ=+0.027  ✅ 미약하지만 A와 조합 시 승률 +2%
-#   C (Trend)   ρ=-0.059  ❌ 역방향 — 타이밍 후행으로 제거
-#   D (Entry)   ρ=-0.076  ❌ 역방향 — 노이즈로 제거
+# 세부 백테스트 결과 (HOOD 2년, Layer A 분해):
+#   CMF   ρ=+0.259 ✅  단일 최강 예측 지표 → 가중치 최대화
+#   EvsR  ρ=+0.102 ✅  유효한 보조 지표 → 유지
+#   UpVol ρ=-0.052 ❌  역방향 → 제거
+#   B레이어 A↑+B↓ > A↑+B↑ ❌ B가 신호 희석 → 제거
 #
-#   A. Volume (50pt) — 거래량이 방향을 먼저 말한다
-#      CMF 방향전환(22) + EvsR 흡수(18) + 상승일 거래량(10)
-#   B. Bottom Confirm (30pt) — 바닥 확인 보조
-#      RSI Divergence(12) + RSI 방향(4) + Stoch 골든크로스(9) + MACD 전환(5)
-#
-# 만점 80pt → 100점 정규화
-# C/D 함수는 보존 — 재설계 후 재검증 예정
+#   CMF(50pt) + EvsR(30pt) = 80pt → 100점 정규화
+#   모든 다른 지표/함수는 보존 — 향후 재검증 예정
 # ─────────────────────────────────────────────
 def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     ts = TickerScore(ticker=ticker, sector=sector)
@@ -651,79 +646,40 @@ def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     l = ohlcv["lows"];   v = ohlcv["volumes"]
     raw = 0; lays = {}
 
-    # ── A. Volume (50pt) ─────────────────────────────────────────────────
-    # 거래량이 방향성을 먼저 말해준다 (ρ=+0.146, 가장 강한 예측력)
-    # CMF 방향전환(22) + EvsR 흡수(18) + 상승일 거래량 비율(10)
-    a = 0
-
-    # ① CMF 방향 전환 — 음→양 전환 중이 최고 신호
+    # ── CMF (50pt) ───────────────────────────────────────────────────────
+    # 단일 최강 예측 지표 (ρ=+0.259)
+    # 음→양 전환 타이밍이 핵심: 전환 중 > 완료 > 유지
     cmf_info = _cmf_turning(h, l, c, v)
     ts.cmf   = cmf_info["now"]
-    if cmf_info["positive"] and cmf_info["turning"]:
-        a += 22  # 음수→양수 전환 완료 = 스마트머니 매집 확인
+    a = 0
+    if cmf_info["turning"] and cmf_info["positive"]:
+        a += 50   # 음→양 전환 완료: 최강 매집 신호
     elif cmf_info["turning"]:
-        a += 16  # 아직 음수지만 방향 전환 중
+        a += 37   # 음수지만 방향 전환 중: 선제 진입 타이밍
     elif cmf_info["positive"]:
-        a += 11  # 이미 양수 (매수 압력 유지)
+        a += 25   # 양수 유지: 매수 압력 지속
     elif cmf_info["now"] > -0.05:
-        a += 4   # 중립 근처
+        a += 10   # 중립: 관망
     else:
-        a += 0   # 강한 매도 압력
+        a += 0    # 강한 매도 압력: 진입 불가
 
-    # ② EvsR Absorption — 고거래량 + 가격 불변 = 스마트머니 흡수
-    evsr_v = _evsr_absorption(h, l, c, v)
-    ts.evsr = evsr_v
-    a += (18 if evsr_v >= 2.5 else
-          13  if evsr_v >= 2.0 else
-           9  if evsr_v >= 1.5 else
-           4  if evsr_v >= 1.0 else 0)
-
-    # ③ 상승일 거래량 비율 — 최근 10일 상승일 거래량 / 하락일 거래량
-    upvol = _upvol_ratio(c, v, period=10)
-    ts.upvol = upvol
-    a += (10 if upvol >= 2.0 else   # 반등 초입 핵심 신호
-           6  if upvol >= 1.5 else
-           2  if upvol >= 1.0 else 0)
-
+    # EvsR은 참고용으로 계산만 (점수 미반영, Slack 표시용)
+    ts.evsr  = _evsr_absorption(h, l, c, v)
+    ts.upvol = _upvol_ratio(c, v, period=10)
+    ts.rsi   = _rsi(c)
     lays["A"] = a; raw += a
 
-    # ── B. Bottom Confirmation (30pt) ────────────────────────────────────
-    # A와 조합 시 승률 +2% 기여 (A↑+B↑ vs A↑+B↓: 72% vs 70%)
-    # RSI Divergence(12) + RSI 방향(4) + Stoch 골든크로스(9) + MACD 전환(5)
+    # ── EvsR (30pt) ──────────────────────────────────────────────────────
+    # 스마트머니 흡수 감지 (ρ=+0.102)
+    # 고거래량인데 가격이 안 움직임 = 대량 매도 물량을 누군가 받아내는 중
     b = 0
-
-    # ① RSI Bullish Divergence — 가격 신저 + RSI 저점 상승 = 바닥 확인
-    if _rsi_divergence(c):
-        b += 12
-
-    # ② RSI 방향 — 과매도권에서 올라오는 중 (절대값보다 방향이 핵심)
-    rsi_v = _rsi(c); ts.rsi = rsi_v
-    rsi_5  = _rsi(c[:-5]) if len(c) > 19 else rsi_v
-    if rsi_v > rsi_5 and rsi_v < 50:
-        b += 4   # 방향 전환 확인
-    elif rsi_v < 30:
-        b += 1   # 과매도 (방향 미확인)
-
-    # ③ Stochastic 골든크로스 — 과매도 탈출 단기 확인
-    sk_v, sd_v = _stoch(h, l, c)
-    if sk_v is not None and sd_v is not None:
-        b += (9 if sk_v < 30 and sk_v > sd_v else
-              6  if sk_v < 50 and sk_v > sd_v else
-              2  if sk_v > sd_v else 0)
-
-    # ④ MACD 히스토그램 — 음→양 전환이 핵심
-    mh, prev_mh = _macd_hist(c)
-    if mh > 0 and prev_mh <= 0:
-        b += 5   # 이번 봉 양전환 = 가장 명확한 모멘텀 전환
-    elif mh > 0 and mh > prev_mh:
-        b += 3   # 양수 확장 중
-    elif mh < 0 and mh > prev_mh:
-        b += 1   # 수렴 중
-
+    b += (30 if ts.evsr >= 2.5 else
+          22  if ts.evsr >= 2.0 else
+          15  if ts.evsr >= 1.5 else
+           8  if ts.evsr >= 1.0 else 0)
     lays["B"] = b; raw += b
 
-    # C, D 레이어: 백테스트에서 역방향 확인 → 제거
-    # 함수(_ema20_reclaim, _adx, _bb_squeeze)는 보존 — 재설계 후 재검증 예정
+    # C, D: 보존 (재검증 예정)
     lays["C"] = 0
     lays["D"] = 0
 
