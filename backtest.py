@@ -954,7 +954,7 @@ def main():
                 "count": data["count"],
                 "horizons": {
                     str(h): {k: round(v, 6) if isinstance(v, float) else v
-                             for k, v in (hd.items() if hd else {}).items()}
+                             for k, v in (hd if hd else {}).items()}
                     for h, hd in data["horizons"].items()
                 }
             }
@@ -963,7 +963,7 @@ def main():
         "layer_corr": {
             lid: {"name": data["name"],
                   "horizons": {str(h): {k: round(v,4) if isinstance(v,float) else v
-                                        for k,v in (hd.items() if hd else {}).items()}
+                                        for k,v in (hd if hd else {}).items()}
                                for h, hd in data["horizons"].items()}}
             for lid, data in layer_corr.items()
         }
