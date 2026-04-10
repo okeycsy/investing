@@ -44,8 +44,9 @@ except ImportError:
 # ─────────────────────────────────────────────
 # 설정
 # ─────────────────────────────────────────────
-SLACK_WEBHOOK  = os.environ.get("MARKET_SCAN_WEBHOOK") or os.environ.get("SLACK_WEBHOOK_URL", "")
-KST            = timezone(timedelta(hours=9))
+SLACK_WEBHOOK    = os.environ.get("MARKET_SCAN_WEBHOOK") or os.environ.get("SLACK_WEBHOOK_URL", "")
+IMGUR_CLIENT_ID  = os.environ.get("IMGUR_CLIENT_ID", "")   # imgur.com/oauth2/addclient 에서 발급
+KST              = timezone(timedelta(hours=9))
 OUTLIER_CLIP   = 0.01   # 상하위 1% 이상치 제거
 WARMUP_DAYS    = 130    # 지표 워밍업 (EMA50·MACD 안정화에 필요한 최소 일수)
 BUCKETS        = [(0,20),(21,40),(41,60),(61,75),(76,100)]   # 점수 구간
@@ -337,7 +338,7 @@ def generate_charts(df: pd.DataFrame, bucket_results: dict,
 # ─────────────────────────────────────────────
 def build_slack_text(ticker: str, bucket_results: dict,
                      sweet_spot: dict, df: pd.DataFrame,
-                     years: int) -> list:
+                     years: int, image_urls: list = None) -> list:
     """Slack blocks 생성"""
     today   = datetime.now(KST).strftime("%Y-%m-%d")
     n_total = len(df)
@@ -421,11 +422,54 @@ def build_slack_text(ticker: str, bucket_results: dict,
     lines3.append(f"61점 이상 발생 빈도: *{high_pct:.1f}%* ({int(high_pct * n_total / 100)}일)")
     blocks.append(_sec("\n".join(lines3)))
 
+    # ── 이미지 (Imgur URL 있을 때만) ─────────────
+    img_labels = ["📊 히트맵 (점수구간 × 수익률)", "📈 수익률 분포 (고득점 vs 저득점)"]
+    if image_urls:
+        for url, label in zip(image_urls, img_labels):
+            if url:
+                blocks.append(_div())
+                blocks.append({"type": "section",
+                                "text": {"type": "mrkdwn", "text": f"*{label}*"}})
+                blocks.append({"type": "image",
+                                "image_url": url,
+                                "alt_text": label})
+
     blocks.append(_ctx(
         "V3 Scoring 백테스트 | 과거 통계 기반 참고용 | "
         "히트맵·분포 차트는 로컬 outputs/ 폴더 확인"
     ))
     return blocks
+
+
+def upload_to_imgur(image_path: Path) -> str:
+    """
+    PNG를 Imgur 익명 업로드 → 공개 URL 반환.
+    실패 시 빈 문자열 반환 (graceful degradation).
+    Client ID 발급: https://imgur.com/oauth2/addclient (Anonymous usage 선택, 1분)
+    """
+    if not IMGUR_CLIENT_ID:
+        log.warning("IMGUR_CLIENT_ID 없음 — 이미지 업로드 생략")
+        return ""
+    try:
+        with open(image_path, "rb") as f:
+            image_data = f.read()
+        r = requests.post(
+            "https://api.imgur.com/3/image",
+            headers={"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"},
+            data={"image": image_data, "type": "file",
+                  "title": image_path.stem, "description": "V3 Backtest Chart"},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            url = r.json()["data"]["link"]
+            log.info(f"Imgur 업로드 성공: {image_path.name} → {url}")
+            return url
+        else:
+            log.warning(f"Imgur 업로드 실패: {r.status_code} {r.text[:100]}")
+            return ""
+    except Exception as e:
+        log.warning(f"Imgur 업로드 오류: {e}")
+        return ""
 
 
 def send_slack(blocks: list):
@@ -518,9 +562,11 @@ def main():
     for f in chart_files:
         print(f"  → {f}")
 
-    # ⑧ Slack 전송
+    # ⑧ Imgur 업로드 → Slack 전송
     if not args.no_slack:
-        blocks = build_slack_text(ticker, bucket_results, sweet_spot, scored, args.years)
+        image_urls = [upload_to_imgur(f) for f in chart_files]
+        blocks = build_slack_text(ticker, bucket_results, sweet_spot,
+                                  scored, args.years, image_urls=image_urls)
         send_slack(blocks)
 
     elapsed = time.time() - start
