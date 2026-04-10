@@ -49,9 +49,17 @@ IMGUR_CLIENT_ID  = os.environ.get("IMGUR_CLIENT_ID", "")   # imgur.com/oauth2/ad
 KST              = timezone(timedelta(hours=9))
 OUTLIER_CLIP   = 0.01   # 상하위 1% 이상치 제거
 WARMUP_DAYS    = 130    # 지표 워밍업 (EMA50·MACD 안정화에 필요한 최소 일수)
-BUCKETS        = [(0,20),(21,40),(41,60),(61,75),(76,100)]   # 점수 구간
-BUCKET_LABELS  = ["0-20","21-40","41-60","61-75","76-100"]
-HORIZONS       = [5, 10, 20]   # 미래 수익률 계산 기간 (거래일)
+BUCKETS        = [(0,10),(11,20),(21,30),(31,40),(41,50),(51,60),(61,75),(76,100)]
+BUCKET_LABELS  = ["0-10","11-20","21-30","31-40","41-50","51-60","61-75","76-100"]
+HORIZONS       = [5, 10, 20, 30, 60]   # 확장: 30d·60d 추가
+
+# 레이어별 메타 (독립 예측력 분석용)
+LAYERS = {
+    "A": {"name": "Volume/Flow",  "max": 35},
+    "B": {"name": "Bottom Conf",  "max": 25},
+    "C": {"name": "Trend Birth",  "max": 20},
+    "D": {"name": "Entry Filter", "max":  8},
+}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("backtest")
@@ -229,6 +237,146 @@ def bucket_analysis(df: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────
 # 5. Sweet Spot 탐지
 # ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+# 5-A. 레이어별 독립 예측력 분석
+# ─────────────────────────────────────────────
+def layer_correlation_analysis(df: pd.DataFrame) -> dict:
+    """
+    각 레이어(A/B/C/D)와 미래 수익률의 상관관계 분석.
+    반환:
+      corr     : Pearson 상관계수 (선형 관계)
+      spearman : Spearman 순위 상관계수 (비선형 포함)
+      top_avg  : 레이어 상위 50% 날짜의 평균 수익률
+      bot_avg  : 레이어 하위 50% 날짜의 평균 수익률
+      edge     : top_avg - bot_avg (실질 엣지)
+    """
+    results = {}
+    for lid, meta in LAYERS.items():
+        col = f"layer_{lid}"
+        if col not in df.columns:
+            continue
+        layer_results = {}
+        for h in HORIZONS:
+            ret_col = f"return_{h}d"
+            sub = df[[col, ret_col]].dropna()
+            if len(sub) < 10:
+                layer_results[h] = None
+                continue
+            corr     = sub[col].corr(sub[ret_col])
+            spearman = sub[col].rank().corr(sub[ret_col].rank())
+            median_score = sub[col].median()
+            top_ret = sub[sub[col] >= median_score][ret_col].mean()
+            bot_ret = sub[sub[col] <  median_score][ret_col].mean()
+            layer_results[h] = {
+                "corr":     round(corr, 4),
+                "spearman": round(spearman, 4),
+                "top_avg":  round(top_ret, 4),
+                "bot_avg":  round(bot_ret, 4),
+                "edge":     round(top_ret - bot_ret, 4),
+            }
+        results[lid] = {"name": meta["name"], "max": meta["max"],
+                        "horizons": layer_results}
+    return results
+
+
+def layer_bucket_analysis(df: pd.DataFrame) -> dict:
+    """
+    레이어별로 점수 구간(낮음/중간/높음)을 3분위수로 나눠 Forward Return 분석.
+    점수 범위가 레이어마다 다르므로 동적으로 분위수 사용.
+    반환: {layer_id: {tier: {horizon: stats}}}
+    """
+    results = {}
+    tiers = {"LOW": (0, 0.33), "MID": (0.33, 0.67), "HIGH": (0.67, 1.0)}
+
+    for lid in LAYERS:
+        col = f"layer_{lid}"
+        if col not in df.columns:
+            continue
+        tier_results = {}
+        for tier_name, (lo_q, hi_q) in tiers.items():
+            lo = df[col].quantile(lo_q)
+            hi = df[col].quantile(hi_q)
+            if tier_name == "LOW":
+                mask = df[col] <= lo
+            elif tier_name == "HIGH":
+                mask = df[col] > hi
+            else:
+                mask = (df[col] > lo) & (df[col] <= hi)
+            sub = df[mask]
+            h_results = {}
+            for h in HORIZONS:
+                ret_col = f"return_{h}d"
+                data = sub[ret_col].dropna()
+                if len(data) < 3:
+                    h_results[h] = None
+                    continue
+                h_results[h] = {
+                    "count":   len(data),
+                    "avg":     round(data.mean(), 4),
+                    "winrate": round((data > 0).mean(), 4),
+                    "ev":      round(data.mean() * (data > 0).mean(), 4),
+                }
+            tier_results[tier_name] = {"count": mask.sum(), "horizons": h_results}
+        results[lid] = tier_results
+    return results
+
+
+def layer_combo_analysis(df: pd.DataFrame) -> list:
+    """
+    레이어 조합 분석: 특정 레이어가 동시에 높을 때의 성과.
+    전략: 각 레이어를 중앙값 기준으로 High/Low 이진화 →
+          모든 2-레이어 조합 + A+B+C 3중 조합 테스트.
+    반환: 10d EV 기준 내림차순 정렬 리스트
+    """
+    df = df.copy()
+    for lid in LAYERS:
+        col = f"layer_{lid}"
+        if col in df.columns:
+            median = df[col].median()
+            df[f"{lid}_hi"] = (df[col] >= median).astype(int)
+
+    combos = []
+    layer_ids = list(LAYERS.keys())
+
+    # 2-레이어 조합
+    for i, l1 in enumerate(layer_ids):
+        for l2 in layer_ids[i+1:]:
+            for v1, v2 in [(1,1), (1,0), (0,1)]:
+                label1 = f"{l1}{'↑' if v1 else '↓'}"
+                label2 = f"{l2}{'↑' if v2 else '↓'}"
+                mask = (df[f"{l1}_hi"] == v1) & (df[f"{l2}_hi"] == v2)
+                sub  = df[mask]
+                ret  = sub["return_10d"].dropna()
+                if len(ret) < 5:
+                    continue
+                combos.append({
+                    "combo":   f"{label1} & {label2}",
+                    "count":   len(ret),
+                    "avg_10d": round(ret.mean(), 4),
+                    "wr_10d":  round((ret > 0).mean(), 4),
+                    "ev_10d":  round(ret.mean() * (ret > 0).mean(), 4),
+                })
+
+    # A+B+C 3중 조합 (핵심 3레이어)
+    for va, vb, vc in [(1,1,1), (1,1,0), (1,0,1), (0,1,1)]:
+        mask = ((df["A_hi"] == va) & (df["B_hi"] == vb) & (df["C_hi"] == vc))
+        sub  = df[mask]
+        ret  = sub["return_10d"].dropna()
+        if len(ret) < 5:
+            continue
+        label = f"A{'↑' if va else '↓'}&B{'↑' if vb else '↓'}&C{'↑' if vc else '↓'}"
+        combos.append({
+            "combo":   label,
+            "count":   len(ret),
+            "avg_10d": round(ret.mean(), 4),
+            "wr_10d":  round((ret > 0).mean(), 4),
+            "ev_10d":  round(ret.mean() * (ret > 0).mean(), 4),
+        })
+
+    return sorted(combos, key=lambda x: -x["ev_10d"])
+
+
 def find_sweet_spot(bucket_results: dict, horizon: int = 10) -> dict:
     """
     EV(기대값) 기준 최적 점수 구간 탐지.
@@ -333,12 +481,132 @@ def generate_charts(df: pd.DataFrame, bucket_results: dict,
     return files
 
 
+def generate_layer_charts(df: pd.DataFrame, layer_corr: dict,
+                           layer_buckets: dict, combo_results: list,
+                           ticker: str, output_dir: Path) -> list:
+    """
+    레이어 분석 전용 차트 3종:
+    ① 레이어별 Spearman 상관계수 (horizon별 막대)
+    ② 레이어별 HIGH vs LOW 수익률 비교 (엣지 시각화)
+    ③ 상위 콤보 EV 랭킹
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    layer_ids  = list(LAYERS.keys())
+    layer_names = [LAYERS[l]["name"] for l in layer_ids]
+    horizon_labels = [f"{h}d" for h in HORIZONS]
+    colors = ["#3498db","#2ecc71","#e67e22","#9b59b6","#e74c3c"]
+
+    # ── ① 레이어별 Spearman 상관계수 히트맵 ──────────────
+    corr_data = []
+    for h in HORIZONS:
+        row = []
+        for lid in layer_ids:
+            hd = layer_corr[lid]["horizons"].get(h)
+            row.append(hd["spearman"] if hd else np.nan)
+        corr_data.append(row)
+
+    corr_df = pd.DataFrame(corr_data,
+                           index=horizon_labels,
+                           columns=layer_names)
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    sns.heatmap(corr_df, annot=True, fmt=".3f", center=0,
+                cmap="RdYlGn", linewidths=0.5,
+                vmin=-0.3, vmax=0.3,
+                cbar_kws={"label": "Spearman ρ"},
+                ax=ax, annot_kws={"size": 12, "weight": "bold"})
+    ax.set_title(f"${ticker} — 레이어별 순위상관계수 (Spearman ρ)\n양수=예측력 있음 / 음수=역방향 / 0=무관",
+                 fontsize=12, pad=10)
+    ax.set_xlabel("레이어", fontsize=11)
+    ax.set_ylabel("Forward Return 기간", fontsize=11)
+    plt.tight_layout()
+    p = output_dir / f"{ticker}_layer_corr.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    files.append(p)
+    log.info(f"레이어 상관계수 차트: {p}")
+
+    # ── ② 레이어 HIGH vs LOW 엣지 (10d/20d/30d) ─────────
+    target_horizons = [h for h in [10, 20, 30] if h in HORIZONS]
+    x = np.arange(len(layer_ids))
+    width = 0.25
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for idx, h in enumerate(target_horizons):
+        edges = []
+        for lid in layer_ids:
+            hi_avg = layer_buckets[lid]["HIGH"]["horizons"].get(h)
+            lo_avg = layer_buckets[lid]["LOW"]["horizons"].get(h)
+            if hi_avg and lo_avg:
+                edge = (hi_avg["avg"] - lo_avg["avg"]) * 100
+            else:
+                edge = 0.0
+            edges.append(edge)
+        offset = (idx - len(target_horizons)/2 + 0.5) * width
+        bars = ax.bar(x + offset, edges, width,
+                      label=f"{h}d", color=colors[idx], alpha=0.8,
+                      edgecolor="white", linewidth=0.5)
+        for bar, val in zip(bars, edges):
+            if abs(val) > 0.3:
+                ax.text(bar.get_x() + bar.get_width()/2,
+                        bar.get_height() + (0.1 if val >= 0 else -0.4),
+                        f"{val:+.1f}%", ha="center", va="bottom",
+                        fontsize=8, fontweight="bold")
+
+    ax.axhline(0, color="black", linewidth=1, linestyle="--", alpha=0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{lid}\n{LAYERS[lid]['name']}" for lid in layer_ids], fontsize=10)
+    ax.set_ylabel("HIGH − LOW 평균수익률 (%)", fontsize=11)
+    ax.set_title(f"${ticker} — 레이어별 실질 엣지 (상위 50% − 하위 50%)\n양수 = 해당 레이어가 높을수록 수익률 ↑ (예측력 있음)",
+                 fontsize=12, pad=10)
+    ax.legend(fontsize=10)
+    plt.tight_layout()
+    p = output_dir / f"{ticker}_layer_edge.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    files.append(p)
+    log.info(f"레이어 엣지 차트: {p}")
+
+    # ── ③ 상위 콤보 EV 랭킹 ──────────────────────────────
+    top_combos = [c for c in combo_results if c["ev_10d"] > 0][:12]
+    if top_combos:
+        labels = [c["combo"] for c in top_combos]
+        evs    = [c["ev_10d"] * 100 for c in top_combos]
+        wrs    = [c["wr_10d"] * 100 for c in top_combos]
+        counts = [c["count"] for c in top_combos]
+
+        fig, ax = plt.subplots(figsize=(11, 5))
+        bar_colors = ["#2ecc71" if e > 0 else "#e74c3c" for e in evs]
+        bars = ax.barh(labels[::-1], evs[::-1], color=bar_colors[::-1],
+                       alpha=0.85, edgecolor="white")
+        for bar, wr, cnt in zip(bars, wrs[::-1], counts[::-1]):
+            ax.text(bar.get_width() + 0.05,
+                    bar.get_y() + bar.get_height()/2,
+                    f"WR {wr:.0f}%  n={cnt}",
+                    va="center", fontsize=8, color="#555")
+        ax.axvline(0, color="black", linewidth=1, linestyle="--", alpha=0.5)
+        ax.set_xlabel("Expected Value 10d (%)", fontsize=11)
+        ax.set_title(f"${ticker} — 레이어 조합별 EV 랭킹 (10d)\n↑↓ = 해당 레이어가 중앙값 이상/미만",
+                     fontsize=12, pad=10)
+        plt.tight_layout()
+        p = output_dir / f"{ticker}_layer_combo.png"
+        plt.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close()
+        files.append(p)
+        log.info(f"콤보 차트: {p}")
+
+    return files
+
+
 # ─────────────────────────────────────────────
 # 7. Slack 텍스트 메시지 생성
 # ─────────────────────────────────────────────
 def build_slack_text(ticker: str, bucket_results: dict,
                      sweet_spot: dict, df: pd.DataFrame,
-                     years: int, image_urls: list = None) -> list:
+                     years: int, image_urls: list = None,
+                     layer_corr: dict = None, combo_results: list = None,
+                     layer_image_urls: list = None) -> list:
     """Slack blocks 생성"""
     today   = datetime.now(KST).strftime("%Y-%m-%d")
     n_total = len(df)
@@ -434,9 +702,56 @@ def build_slack_text(ticker: str, bucket_results: dict,
                                 "image_url": url,
                                 "alt_text": label})
 
+    # ── 레이어 분석 요약 (텍스트) ──────────────
+    if layer_corr:
+        blocks.append(_div())
+        lines_lc = ["*🔬 레이어별 예측력 분석 (Spearman ρ, 10d 기준)*", "```",
+                    f"{'레이어':<14} {'ρ(10d)':>8}  {'엣지(10d)':>10}  {'엣지(30d)':>10}",
+                    "─" * 48]
+        for lid, meta in LAYERS.items():
+            h10 = layer_corr[lid]["horizons"].get(10)
+            h30 = layer_corr[lid]["horizons"].get(30)
+            sp  = f"{h10['spearman']:+.3f}" if h10 else " N/A "
+            e10 = f"{h10['edge']*100:+.1f}%" if h10 else "N/A"
+            e30 = f"{h30['edge']*100:+.1f}%" if h30 else "N/A"
+            lines_lc.append(f"{lid}:{meta['name']:<12} {sp:>8}  {e10:>10}  {e30:>10}")
+        lines_lc.append("```")
+        lines_lc.append("_ρ > 0.1 = 예측력 있음 | ρ < 0 = 역방향 (설계 문제)_")
+        blocks.append(_sec("\n".join(lines_lc)))
+
+    # ── 콤보 Top 5 ───────────────────────────
+    if combo_results:
+        top5 = [c for c in combo_results if c["ev_10d"] > 0][:5]
+        if top5:
+            blocks.append(_div())
+            lines_cb = ["*🧩 레이어 조합 Top 5 (10d EV 기준)*", "```",
+                        f"{'조합':<18} {'n':>5}  {'평균':>8}  {'승률':>6}  {'EV':>8}",
+                        "─" * 52]
+            for c in top5:
+                lines_cb.append(
+                    f"{c['combo']:<18} {c['count']:>5}  "
+                    f"{c['avg_10d']*100:>+7.1f}%  "
+                    f"{c['wr_10d']*100:>5.0f}%  "
+                    f"{c['ev_10d']*100:>+7.2f}%"
+                )
+            lines_cb.append("```")
+            blocks.append(_sec("\n".join(lines_cb)))
+
+    # ── 레이어 분석 이미지 ────────────────────
+    layer_img_labels = ["🔬 레이어 상관계수", "📊 레이어 엣지", "🧩 콤보 랭킹"]
+    if layer_image_urls:
+        for url, label in zip(layer_image_urls, layer_img_labels):
+            if url:
+                blocks.append(_div())
+                blocks.append({"type": "section",
+                                "text": {"type": "mrkdwn", "text": f"*{label}*"}})
+                blocks.append({"type": "image",
+                                "image_url": url,
+                                "alt_text": label})
+
     blocks.append(_ctx(
         "V3 Scoring 백테스트 | 과거 통계 기반 참고용 | "
-        "히트맵·분포 차트는 로컬 outputs/ 폴더 확인"
+        "전체 차트는 outputs/ 폴더 또는 Imgur 링크 확인"
     ))
     return blocks
 
@@ -519,6 +834,42 @@ def print_summary(ticker: str, bucket_results: dict,
 
 
 # ─────────────────────────────────────────────
+# 8-B. 레이어 콘솔 요약
+# ─────────────────────────────────────────────
+def print_layer_summary(layer_corr: dict, combo_results: list):
+    print(f"\n{'='*62}")
+    print("  레이어별 예측력 (Spearman ρ)")
+    print(f"{'='*62}")
+    print(f"{'레이어':<16} {'5d':>7}  {'10d':>7}  {'20d':>7}  {'30d':>7}  {'60d':>7}")
+    print("-" * 62)
+    for lid, data in layer_corr.items():
+        vals = []
+        for h in HORIZONS:
+            hd = data["horizons"].get(h)
+            vals.append(f"{hd['spearman']:+.3f}" if hd else "  N/A ")
+        mark = ""
+        h10 = data["horizons"].get(10)
+        if h10:
+            if h10["spearman"] > 0.1:  mark = " ✅"
+            elif h10["spearman"] < -0.05: mark = " ⚠️ 역방향"
+        print(f"{lid}:{data['name']:<14} " + "  ".join(f"{v:>7}" for v in vals) + mark)
+    print("-" * 62)
+
+    print(f"\n{'='*62}")
+    print("  레이어 조합 Top 10 (10d EV 기준)")
+    print(f"{'='*62}")
+    print(f"{'조합':<20} {'n':>5}  {'평균':>8}  {'승률':>6}  {'EV':>8}")
+    print("-" * 62)
+    for c in [x for x in combo_results if x["ev_10d"] > 0][:10]:
+        print(f"{c['combo']:<20} {c['count']:>5}  "
+              f"{c['avg_10d']*100:>+7.1f}%  "
+              f"{c['wr_10d']*100:>5.0f}%  "
+              f"{c['ev_10d']*100:>+7.2f}%")
+    print("-" * 62)
+    print()
+
+
+# ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
 def main():
@@ -552,27 +903,43 @@ def main():
     # ⑤ Sweet Spot 탐지
     sweet_spot = find_sweet_spot(bucket_results, horizon=10)
 
-    # ⑥ 콘솔 출력
-    print_summary(ticker, bucket_results, sweet_spot, scored)
+    # ⑥ 레이어 독립 예측력 분석
+    log.info("레이어 상관관계 분석 중...")
+    layer_corr    = layer_correlation_analysis(scored)
+    layer_buckets = layer_bucket_analysis(scored)
+    combo_results = layer_combo_analysis(scored)
 
-    # ⑦ 차트 생성
+    # ⑦ 콘솔 출력
+    print_summary(ticker, bucket_results, sweet_spot, scored)
+    print_layer_summary(layer_corr, combo_results)
+
+    # ⑧ 차트 생성
     output_dir = Path(args.output)
-    chart_files = generate_charts(scored, bucket_results, ticker, output_dir)
+    chart_files       = generate_charts(scored, bucket_results, ticker, output_dir)
+    layer_chart_files = generate_layer_charts(scored, layer_corr, layer_buckets,
+                                              combo_results, ticker, output_dir)
+    all_files = chart_files + layer_chart_files
     print(f"차트 저장 완료:")
-    for f in chart_files:
+    for f in all_files:
         print(f"  → {f}")
 
-    # ⑧ Imgur 업로드 → Slack 전송
+    # ⑨ Imgur 업로드 → Slack 전송
     if not args.no_slack:
-        image_urls = [upload_to_imgur(f) for f in chart_files]
-        blocks = build_slack_text(ticker, bucket_results, sweet_spot,
-                                  scored, args.years, image_urls=image_urls)
+        image_urls       = [upload_to_imgur(f) for f in chart_files]
+        layer_image_urls = [upload_to_imgur(f) for f in layer_chart_files]
+        blocks = build_slack_text(
+            ticker, bucket_results, sweet_spot, scored, args.years,
+            image_urls=image_urls,
+            layer_corr=layer_corr,
+            combo_results=combo_results,
+            layer_image_urls=layer_image_urls,
+        )
         send_slack(blocks)
 
     elapsed = time.time() - start
     log.info(f"=== 완료: {elapsed:.1f}초 ===")
 
-    # ⑨ 결과 JSON 저장 (재사용 가능)
+    # ⑩ 결과 JSON 저장
     json_path = output_dir / f"{ticker}_backtest.json"
     output_dir.mkdir(parents=True, exist_ok=True)
     summary = {
@@ -581,6 +948,7 @@ def main():
         "score_mean": round(scored["score"].mean(), 2),
         "score_median": round(scored["score"].median(), 2),
         "sweet_spot": sweet_spot,
+        "top_combos": combo_results[:10],
         "bucket_results": {
             label: {
                 "count": data["count"],
@@ -591,6 +959,13 @@ def main():
                 }
             }
             for label, data in bucket_results.items()
+        },
+        "layer_corr": {
+            lid: {"name": data["name"],
+                  "horizons": {str(h): {k: round(v,4) if isinstance(v,float) else v
+                                        for k,v in (hd.items() if hd else {}).items()}
+                               for h, hd in data["horizons"].items()}}
+            for lid, data in layer_corr.items()
         }
     }
     with open(json_path, "w", encoding="utf-8") as f:
