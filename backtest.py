@@ -323,55 +323,32 @@ def layer_bucket_analysis(df: pd.DataFrame) -> dict:
 
 def layer_combo_analysis(df: pd.DataFrame) -> list:
     """
-    레이어 조합 분석: 특정 레이어가 동시에 높을 때의 성과.
-    전략: 각 레이어를 중앙값 기준으로 High/Low 이진화 →
-          모든 2-레이어 조합 + A+B+C 3중 조합 테스트.
+    레이어 조합 분석: LAYERS dict 기준으로 동적 생성.
+    각 레이어를 중앙값 기준 High/Low 이진화 → 2-레이어 조합 전수 탐색.
     반환: 10d EV 기준 내림차순 정렬 리스트
     """
     df = df.copy()
-    for lid in LAYERS:
-        col = f"layer_{lid}"
-        if col in df.columns:
-            median = df[col].median()
-            df[f"{lid}_hi"] = (df[col] >= median).astype(int)
+    layer_ids = [lid for lid in LAYERS if f"layer_{lid}" in df.columns]
+    for lid in layer_ids:
+        median = df[f"layer_{lid}"].median()
+        df[f"{lid}_hi"] = (df[f"layer_{lid}"] >= median).astype(int)
 
     combos = []
-    layer_ids = list(LAYERS.keys())
-
-    # 2-레이어 조합
     for i, l1 in enumerate(layer_ids):
         for l2 in layer_ids[i+1:]:
             for v1, v2 in [(1,1), (1,0), (0,1)]:
-                label1 = f"{l1}{'↑' if v1 else '↓'}"
-                label2 = f"{l2}{'↑' if v2 else '↓'}"
                 mask = (df[f"{l1}_hi"] == v1) & (df[f"{l2}_hi"] == v2)
-                sub  = df[mask]
-                ret  = sub["return_10d"].dropna()
+                ret  = df[mask]["return_10d"].dropna()
                 if len(ret) < 5:
                     continue
+                label = f"{l1}{'↑' if v1 else '↓'} & {l2}{'↑' if v2 else '↓'}"
                 combos.append({
-                    "combo":   f"{label1} & {label2}",
+                    "combo":   label,
                     "count":   len(ret),
                     "avg_10d": round(ret.mean(), 4),
                     "wr_10d":  round((ret > 0).mean(), 4),
                     "ev_10d":  round(ret.mean() * (ret > 0).mean(), 4),
                 })
-
-    # A+B+C 3중 조합 (핵심 3레이어)
-    for va, vb, vc in [(1,1,1), (1,1,0), (1,0,1), (0,1,1)]:
-        mask = ((df["A_hi"] == va) & (df["B_hi"] == vb) & (df["C_hi"] == vc))
-        sub  = df[mask]
-        ret  = sub["return_10d"].dropna()
-        if len(ret) < 5:
-            continue
-        label = f"A{'↑' if va else '↓'}&B{'↑' if vb else '↓'}&C{'↑' if vc else '↓'}"
-        combos.append({
-            "combo":   label,
-            "count":   len(ret),
-            "avg_10d": round(ret.mean(), 4),
-            "wr_10d":  round((ret > 0).mean(), 4),
-            "ev_10d":  round(ret.mean() * (ret > 0).mean(), 4),
-        })
 
     return sorted(combos, key=lambda x: -x["ev_10d"])
 
