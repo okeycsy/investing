@@ -54,11 +54,10 @@ BUCKET_LABELS  = ["0-10","11-20","21-30","31-40","41-50","51-60","61-75","76-100
 HORIZONS       = [5, 10, 20, 30, 60]   # 확장: 30d·60d 추가
 
 # 레이어별 메타 (독립 예측력 분석용)
+# v4: C/D 백테스트에서 역방향 확인 → 제거. A/B만 실제 배점.
 LAYERS = {
-    "A": {"name": "Volume/Flow",  "max": 35},
-    "B": {"name": "Bottom Conf",  "max": 25},
-    "C": {"name": "Trend Birth",  "max": 20},
-    "D": {"name": "Entry Filter", "max":  8},
+    "A": {"name": "Volume/Flow",  "max": 50},
+    "B": {"name": "Bottom Conf",  "max": 30},
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
