@@ -130,9 +130,21 @@ def compute_rolling_scores(df: pd.DataFrame, ticker: str,
             "close": closes[i],
             "score": ts.score if not ts.error else None,
             "raw":   ts.raw   if not ts.error else None,
-            "cmf":   ts.cmf,
-            "evsr":  ts.evsr,
-            "upvol": ts.upvol,
+            "cmf":       ts.cmf,
+            "evsr":      ts.evsr,
+            "upvol":     ts.upvol,
+            "cmf_state": (
+                "전환완료" if ts.layers.get("A",0) == 50 else
+                "전환중"   if ts.layers.get("A",0) == 37 else
+                "양수유지" if ts.layers.get("A",0) == 25 else
+                "중립"     if ts.layers.get("A",0) == 10 else "매도압력"
+            ),
+            "evsr_tier": (
+                "최강(≥2.5)" if ts.evsr >= 2.5 else
+                "강(≥2.0)"   if ts.evsr >= 2.0 else
+                "중(≥1.5)"   if ts.evsr >= 1.5 else
+                "약(≥1.0)"   if ts.evsr >= 1.0 else "없음(<1.0)"
+            ),
             "adx":   ts.adx,
             "rsi":   ts.rsi,
             "squeeze": ts.squeeze,
@@ -241,6 +253,46 @@ def bucket_analysis(df: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────
 # 5-A. 레이어별 독립 예측력 분석
 # ─────────────────────────────────────────────
+def cmf_evsr_cross_analysis(df: pd.DataFrame) -> dict:
+    """
+    CMF 상태 × EvsR 강도 교차 분석.
+    76-100점 역전 원인: CMF 전환완료 타이밍이 실제로 늦은지 확인.
+    반환: {cmf_state: {evsr_tier: {count, avg_10d, wr_10d, ev_10d, avg_20d}}}
+    """
+    cmf_order  = ["전환완료", "전환중", "양수유지", "중립", "매도압력"]
+    evsr_order = ["최강(≥2.5)", "강(≥2.0)", "중(≥1.5)", "약(≥1.0)", "없음(<1.0)"]
+    results = {"cmf_order": cmf_order, "evsr_order": evsr_order, "matrix": {}}
+
+    for cs in cmf_order:
+        results["matrix"][cs] = {}
+        cs_sub = df[df["cmf_state"] == cs]
+        # CMF 상태별 단독 성과
+        ret10 = cs_sub["return_10d"].dropna()
+        ret20 = cs_sub["return_20d"].dropna()
+        results["matrix"][cs]["_total"] = {
+            "count":   len(ret10),
+            "avg_10d": round(ret10.mean(), 4) if len(ret10) else None,
+            "wr_10d":  round((ret10 > 0).mean(), 4) if len(ret10) else None,
+            "ev_10d":  round(ret10.mean() * (ret10 > 0).mean(), 4) if len(ret10) else None,
+            "avg_20d": round(ret20.mean(), 4) if len(ret20) else None,
+        }
+        for es in evsr_order:
+            sub = cs_sub[cs_sub["evsr_tier"] == es]
+            r10 = sub["return_10d"].dropna()
+            r20 = sub["return_20d"].dropna()
+            if len(r10) < 3:
+                results["matrix"][cs][es] = None
+                continue
+            results["matrix"][cs][es] = {
+                "count":   len(r10),
+                "avg_10d": round(r10.mean(), 4),
+                "wr_10d":  round((r10 > 0).mean(), 4),
+                "ev_10d":  round(r10.mean() * (r10 > 0).mean(), 4),
+                "avg_20d": round(r20.mean(), 4) if len(r20) else None,
+            }
+    return results
+
+
 def layer_A_subanalysis(df: pd.DataFrame) -> dict:
     """
     Layer A 세부 지표 독립 예측력 분석.
@@ -680,6 +732,65 @@ def generate_subanalysis_chart(sub_results: dict, ticker: str, output_dir: Path)
     return files
 
 
+def generate_cross_chart(cross_results: dict, ticker: str, output_dir: Path) -> list:
+    """
+    CMF 상태별 10d 평균 수익률 vs EvsR 강도 히트맵.
+    76-100 역전 원인을 시각적으로 확인.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cmf_order  = cross_results["cmf_order"]
+    evsr_order = cross_results["evsr_order"]
+    matrix     = cross_results["matrix"]
+
+    # ① CMF 상태별 단독 성과 바차트
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle(f"${ticker} — CMF 상태별 성과 분석 (76-100 역전 검증)", fontsize=12, fontweight="bold")
+
+    states   = [s for s in cmf_order if matrix[s]["_total"]["count"] > 0]
+    avgs_10d = [matrix[s]["_total"]["avg_10d"]*100 for s in states]
+    avgs_20d = [matrix[s]["_total"]["avg_20d"]*100 if matrix[s]["_total"]["avg_20d"] else 0 for s in states]
+    counts   = [matrix[s]["_total"]["count"] for s in states]
+    wrs      = [matrix[s]["_total"]["wr_10d"]*100 if matrix[s]["_total"]["wr_10d"] else 0 for s in states]
+    colors   = ["#27ae60" if v >= 0 else "#e74c3c" for v in avgs_10d]
+
+    x = range(len(states))
+    w = 0.35
+    b1 = ax1.bar([i-w/2 for i in x], avgs_10d, w, label="10d", color=colors, alpha=0.85)
+    b2 = ax1.bar([i+w/2 for i in x], avgs_20d, w, label="20d",
+                 color=[c+"88" for c in ["#27ae60","#27ae60","#f39c12","#95a5a6","#e74c3c"]], alpha=0.75)
+    for bar, wr, cnt in zip(b1, wrs, counts):
+        ax1.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.1,
+                 f"WR{wr:.0f}%\nn={cnt}", ha="center", fontsize=7)
+    ax1.axhline(0, color="black", lw=0.8, linestyle="--", alpha=0.5)
+    ax1.set_xticks(list(x)); ax1.set_xticklabels(states, fontsize=8)
+    ax1.set_ylabel("평균 수익률 (%)"); ax1.set_title("CMF 상태별 10d/20d 평균수익률")
+    ax1.legend(fontsize=9)
+
+    # ② CMF × EvsR 교차 히트맵 (10d EV)
+    heat = []
+    for cs in cmf_order:
+        row = []
+        for es in evsr_order:
+            d = matrix[cs].get(es)
+            row.append(d["ev_10d"]*100 if d else float("nan"))
+        heat.append(row)
+    heat_df = pd.DataFrame(heat, index=cmf_order, columns=evsr_order)
+    mask = heat_df.isna()
+    sns.heatmap(heat_df, annot=True, fmt=".1f", center=0, cmap="RdYlGn",
+                linewidths=0.5, mask=mask, ax=ax2,
+                cbar_kws={"label": "EV 10d (%)"},
+                annot_kws={"size": 9, "weight": "bold"})
+    ax2.set_title("CMF 상태 × EvsR 강도 — EV 10d (%)\n← 빈칸: 샘플 3개 미만")
+    ax2.set_xlabel("EvsR 강도"); ax2.set_ylabel("CMF 상태")
+
+    plt.tight_layout()
+    p = output_dir / f"{ticker}_cross.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    log.info(f"교차 분석 차트: {p}")
+    return [p]
+
+
 # ─────────────────────────────────────────────
 # 7. Slack 텍스트 메시지 생성
 # ─────────────────────────────────────────────
@@ -688,7 +799,8 @@ def build_slack_text(ticker: str, bucket_results: dict,
                      years: int, image_urls: list = None,
                      layer_corr: dict = None, combo_results: list = None,
                      layer_image_urls: list = None,
-                     sub_results: dict = None) -> list:
+                     sub_results: dict = None,
+                     cross_results: dict = None) -> list:
     """Slack blocks 생성"""
     today   = datetime.now(KST).strftime("%Y-%m-%d")
     n_total = len(df)
@@ -860,6 +972,25 @@ def build_slack_text(ticker: str, bucket_results: dict,
                                 "image_url": url,
                                 "alt_text": label})
 
+    # ── CMF 상태별 단독 성과 요약 ──────────────
+    if cross_results:
+        blocks.append(_div())
+        matrix = cross_results["matrix"]
+        lines_cr = ["*🔬 CMF 상태별 성과 (76-100 역전 검증)*", "```",
+                    f"{'상태':<8} {'n':>5}  {'10d avg':>8}  {'WR':>6}  {'20d avg':>8}",
+                    "─" * 44]
+        for cs in cross_results["cmf_order"]:
+            d = matrix[cs]["_total"]
+            if not d["count"]: continue
+            avg10 = f"{d['avg_10d']*100:+.1f}%" if d["avg_10d"] is not None else "N/A"
+            avg20 = f"{d['avg_20d']*100:+.1f}%" if d["avg_20d"] is not None else "N/A"
+            wr    = f"{d['wr_10d']*100:.0f}%"   if d["wr_10d"]  is not None else "N/A"
+            mark  = " ⭐" if cs == "전환중" else ""
+            lines_cr.append(f"{cs:<8} {d['count']:>5}  {avg10:>8}  {wr:>6}  {avg20:>8}{mark}")
+        lines_cr.append("```")
+        lines_cr.append("_전환중 = 음수→양수 진행 중 (선제 진입 타이밍)_")
+        blocks.append(_sec("\n".join(lines_cr)))
+
     blocks.append(_ctx(
         "V3 Scoring 백테스트 | 과거 통계 기반 참고용 | "
         "전체 차트는 outputs/ 폴더 또는 Imgur 링크 확인"
@@ -947,6 +1078,23 @@ def print_summary(ticker: str, bucket_results: dict,
 # ─────────────────────────────────────────────
 # 8-B. 레이어 콘솔 요약
 # ─────────────────────────────────────────────
+def _print_cross_summary(cross_results: dict):
+    print(f"\n{'='*62}")
+    print("  CMF 상태별 성과 (76-100 역전 검증)")
+    print(f"{'='*62}")
+    print(f"{'상태':<8} {'n':>5}  {'10d avg':>9}  {'WR':>7}  {'20d avg':>9}")
+    print("-" * 46)
+    for cs in cross_results["cmf_order"]:
+        d = cross_results["matrix"][cs]["_total"]
+        if not d["count"]: continue
+        a10 = f"{d['avg_10d']*100:+.2f}%" if d["avg_10d"] is not None else "  N/A "
+        a20 = f"{d['avg_20d']*100:+.2f}%" if d["avg_20d"] is not None else "  N/A "
+        wr  = f"{d['wr_10d']*100:.1f}%"   if d["wr_10d"]  is not None else "  N/A"
+        mark = " ⭐" if cs == "전환중" else ""
+        print(f"{cs:<8} {d['count']:>5}  {a10:>9}  {wr:>7}  {a20:>9}{mark}")
+    print("-" * 46)
+
+
 def print_layer_summary(layer_corr: dict, combo_results: list,
                         sub_results: dict = None):
     # Layer A 세부 먼저 출력
@@ -1045,10 +1193,12 @@ def main():
     layer_buckets = layer_bucket_analysis(scored)
     combo_results = layer_combo_analysis(scored)
     sub_results   = layer_A_subanalysis(scored)
+    cross_results = cmf_evsr_cross_analysis(scored)
 
     # ⑦ 콘솔 출력
     print_summary(ticker, bucket_results, sweet_spot, scored)
     print_layer_summary(layer_corr, combo_results, sub_results)
+    _print_cross_summary(cross_results)
 
     # ⑧ 차트 생성
     output_dir = Path(args.output)
@@ -1056,7 +1206,8 @@ def main():
     layer_chart_files = generate_layer_charts(scored, layer_corr, layer_buckets,
                                               combo_results, ticker, output_dir)
     sub_chart_files   = generate_subanalysis_chart(sub_results, ticker, output_dir)
-    all_files = chart_files + layer_chart_files + sub_chart_files
+    cross_chart_files = generate_cross_chart(cross_results, ticker, output_dir)
+    all_files = chart_files + layer_chart_files + sub_chart_files + cross_chart_files
     print(f"차트 저장 완료:")
     for f in all_files:
         print(f"  → {f}")
@@ -1064,7 +1215,7 @@ def main():
     # ⑨ Imgur 업로드 → Slack 전송
     if not args.no_slack:
         image_urls       = [upload_to_imgur(f) for f in chart_files]
-        layer_image_urls = [upload_to_imgur(f) for f in layer_chart_files + sub_chart_files]
+        layer_image_urls = [upload_to_imgur(f) for f in layer_chart_files + sub_chart_files + cross_chart_files]
         blocks = build_slack_text(
             ticker, bucket_results, sweet_spot, scored, args.years,
             image_urls=image_urls,
@@ -1072,6 +1223,7 @@ def main():
             combo_results=combo_results,
             layer_image_urls=layer_image_urls,
             sub_results=sub_results,
+            cross_results=cross_results,
         )
         send_slack(blocks)
 
