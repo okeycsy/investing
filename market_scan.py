@@ -89,16 +89,20 @@ NDX100 = {
 # ─────────────────────────────────────────────
 @dataclass
 class TickerScore:
-    ticker: str = ""
-    sector: str = ""
-    score: int = 0
-    raw: int = 0
-    grade: str = ""
-    grade_emoji: str = ""
-    rsi: float = 50.0
-    mfi: float = 50.0
-    layers: dict = field(default_factory=dict)
-    error: bool = False
+    ticker:      str   = ""
+    sector:      str   = ""
+    score:       int   = 0
+    raw:         int   = 0
+    grade:       str   = ""
+    grade_emoji: str   = ""
+    rsi:         float = 50.0
+    mfi:         float = 50.0
+    cmf:         float = 0.0    # Chaikin Money Flow
+    adx:         float = 0.0    # ADX 추세 강도
+    evsr:        float = 0.0    # Effort vs Result (흡수 비율)
+    squeeze:     bool  = False  # BB Squeeze 발동 여부
+    layers:      dict  = field(default_factory=dict)
+    error:       bool  = False
 
 
 # ─────────────────────────────────────────────
@@ -182,12 +186,22 @@ def batch_download(tickers: list, period: str = "6mo") -> dict:
 # 지표 계산 (순수 파이썬, 의존성 없음)
 # ─────────────────────────────────────────────
 def _rsi(closes: list, period: int = 14) -> float:
+    """RSI — Wilder smoothing (Wilder 원래 공식, 단순평균 버그 수정)"""
     if len(closes) < period + 1:
         return 50.0
-    diffs = [closes[i] - closes[i-1] for i in range(len(closes)-period, len(closes))]
-    g = sum(d for d in diffs if d > 0) / period
-    l = sum(-d for d in diffs if d < 0) / period
-    return round(100 - 100 / (1 + g / l), 2) if l else 100.0
+    diffs = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains  = [d if d > 0 else 0.0 for d in diffs]
+    losses = [-d if d < 0 else 0.0 for d in diffs]
+    # 씨드: 첫 period 봉 단순평균
+    avg_g = sum(gains[:period])  / period
+    avg_l = sum(losses[:period]) / period
+    # Wilder 지수평활
+    for i in range(period, len(gains)):
+        avg_g = (avg_g * (period - 1) + gains[i])  / period
+        avg_l = (avg_l * (period - 1) + losses[i]) / period
+    if avg_l == 0:
+        return 100.0
+    return round(100 - 100 / (1 + avg_g / avg_l), 2)
 
 
 def _macd_hist(closes: list) -> tuple:
@@ -229,13 +243,45 @@ def _ema(data: list, period: int) -> list:
     return r
 
 
-def _obv(closes: list, volumes: list) -> list:
-    obv = [0]
-    for i in range(1, min(len(closes), len(volumes))):
-        obv.append(obv[-1] + volumes[i] if closes[i] > closes[i-1]
-                   else obv[-1] - volumes[i] if closes[i] < closes[i-1]
-                   else obv[-1])
-    return obv
+def _cmf(highs, lows, closes, volumes, period: int = 21) -> float:
+    """
+    Chaikin Money Flow — OBV 대체.
+    종가가 당일 고저 중 어디에 위치하는지 반영 → 시가총액 편향 없음.
+    +0.05 이상 = 매수 압력, -0.05 이하 = 매도 압력
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n < period:
+        return 0.0
+    clv_vol = vol_sum = 0.0
+    for i in range(n - period, n):
+        hl = highs[i] - lows[i]
+        clv = ((closes[i] - lows[i]) - (highs[i] - closes[i])) / hl if hl else 0.0
+        clv_vol += clv * volumes[i]
+        vol_sum  += volumes[i]
+    return round(clv_vol / vol_sum, 4) if vol_sum else 0.0
+
+
+def _evsr_absorption(highs, lows, closes, volumes, period: int = 20) -> float:
+    """
+    Effort vs Result (EvsR) Absorption — Whale 감지 대체.
+    거래량 노력(Effort) 대비 가격 결과(Result)가 기대 이하 = 숨겨진 매집(Absorption).
+    반환값 > 1.5: 흡수 가능성, > 2.0: 강한 흡수 신호
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n < period + 1:
+        return 0.0
+    atr_v = _atr(highs, lows, closes, period)
+    if not atr_v or atr_v == 0:
+        return 0.0
+    avg_vol = sum(volumes[-period:]) / period
+    if avg_vol == 0:
+        return 0.0
+    vol_effort   = volumes[-1] / avg_vol                      # 상대 거래량
+    price_result = abs(closes[-1] - closes[-2]) / atr_v      # 상대 가격 변화
+    if price_result == 0:
+        return min(vol_effort * 2, 5.0)                       # 거래량 있는데 가격 불변 = 최대 흡수
+    return round(vol_effort / price_result, 2)
+
 
 
 def _mfi(highs, lows, closes, volumes, period=14) -> Optional[float]:
@@ -276,6 +322,88 @@ def _atr(highs, lows, closes, period=14) -> Optional[float]:
     return sum(trs[-period:]) / period if len(trs) >= period else None
 
 
+def _adx(highs, lows, closes, period: int = 14) -> tuple:
+    """
+    ADX(14) — 추세 강도.
+    반환: (adx, plus_di, minus_di)
+    ADX < 20: 횡보, ADX > 25: 추세 확립
+    매수 컨텍스트: ADX > 20 + -DI 하락 = 하락추세 바닥 후보
+    """
+    n = min(len(highs), len(lows), len(closes))
+    if n < period * 2 + 1:
+        return 0.0, 0.0, 0.0
+
+    trs, pdms, ndms = [], [], []
+    for i in range(1, n):
+        tr  = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+        up  = highs[i]   - highs[i-1]
+        dn  = lows[i-1]  - lows[i]
+        pdms.append(up if up > dn and up > 0 else 0.0)
+        ndms.append(dn if dn > up and dn > 0 else 0.0)
+        trs.append(tr)
+
+    def _wilder(data, p):
+        if len(data) < p:
+            return []
+        r = [sum(data[:p])]
+        for v in data[p:]:
+            r.append(r[-1] - r[-1] / p + v)
+        return r
+
+    atr_s = _wilder(trs,  period)
+    pdi_s = _wilder(pdms, period)
+    ndi_s = _wilder(ndms, period)
+    if not atr_s:
+        return 0.0, 0.0, 0.0
+
+    dx_series = []
+    for i in range(len(atr_s)):
+        if atr_s[i] == 0:
+            continue
+        pdi = 100 * pdi_s[i] / atr_s[i]
+        ndi = 100 * ndi_s[i] / atr_s[i]
+        di_sum = pdi + ndi
+        dx_series.append(100 * abs(pdi - ndi) / di_sum if di_sum else 0.0)
+
+    if len(dx_series) < period:
+        return 0.0, 0.0, 0.0
+    adx = sum(dx_series[-period:]) / period
+    pdi_last = 100 * pdi_s[-1] / atr_s[-1] if atr_s[-1] else 0.0
+    ndi_last = 100 * ndi_s[-1] / atr_s[-1] if atr_s[-1] else 0.0
+    return round(adx, 2), round(pdi_last, 2), round(ndi_last, 2)
+
+
+def _bb_squeeze(closes, highs, lows, period: int = 20,
+                bb_mult: float = 2.0, kc_mult: float = 1.5) -> dict:
+    """
+    Bollinger Band Squeeze (TTM Squeeze 원리).
+    BB폭 < Keltner Channel폭 → Squeeze 발동 = 폭발 직전 눌림.
+    반환: {"squeeze": bool, "bb_pos": float, "below_lower": bool}
+    bb_pos: -1(하단) ~ +1(상단) / below_lower: BB 하단 이탈 여부
+    """
+    n = min(len(closes), len(highs), len(lows))
+    if n < period:
+        return {"squeeze": False, "bb_pos": 0.0, "below_lower": False}
+
+    sma = sum(closes[-period:]) / period
+    std = (sum((x - sma) ** 2 for x in closes[-period:]) / period) ** 0.5
+    bb_upper = sma + bb_mult * std
+    bb_lower = sma - bb_mult * std
+    bb_width = bb_upper - bb_lower
+
+    atr_v = _atr(highs, lows, closes, period)
+    kc_width = 2 * kc_mult * atr_v if atr_v else bb_width + 1  # ATR 없으면 Squeeze 아님
+
+    squeeze      = bb_width < kc_width
+    below_lower  = closes[-1] < bb_lower
+    near_lower   = closes[-1] < bb_lower * 1.03
+    bb_pos       = (closes[-1] - bb_lower) / bb_width - 0.5 if bb_width else 0.0
+    bb_pos       = round(max(-0.5, min(0.5, bb_pos)) * 2, 2)  # -1 ~ +1
+
+    return {"squeeze": squeeze, "bb_pos": bb_pos,
+            "below_lower": below_lower, "near_lower": near_lower}
+
+
 def _rsi_divergence(closes: list, lookback: int = 20) -> bool:
     if len(closes) < lookback + 14:
         return False
@@ -289,7 +417,11 @@ def _rsi_divergence(closes: list, lookback: int = 20) -> bool:
 
 
 # ─────────────────────────────────────────────
-# 5-Layer 스코어 (80점 만점 → 100점 정규화)
+# 4-Layer 스코어 v2 (80점 만점 → 100점 정규화)
+# Layer A: CMF(10) + MFI(10) + EvsR(8)         ← OBV→CMF, VolContr→EvsR
+# Layer B: MACD(8) + EMA구조(7) + ADX(5)       ← ADX 신규
+# Layer C: RSI(8) + Stoch(7) + RSI Div(5)      ← RSI Wilder 수정
+# Layer D: BB Squeeze(7) + ATR 버그수정(5)     ← Squeeze 신규, ATR 방향 수정
 # ─────────────────────────────────────────────
 def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     ts = TickerScore(ticker=ticker, sector=sector)
@@ -301,76 +433,122 @@ def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     l = ohlcv["lows"];   v = ohlcv["volumes"]
     raw = 0; lays = {}
 
-    # ── A. Volume / Flow (28pts) ──────────────
+    # ── A. Volume / Flow (28pts) ─────────────────────────────────────────
+    # CMF(10) + MFI(10) + EvsR Absorption(8)
     a = 0
-    obv_s = _obv(c, v)
-    if len(obv_s) >= 6:
-        p5 = c[-1] - c[-6]; o5 = obv_s[-1] - obv_s[-6]
-        a += 10 if p5 < 0 and o5 > 0 else 0 if p5 < 0 else 5 if p5 > 0 and o5 > 0 else 2
 
+    # ① CMF — Chaikin Money Flow (OBV 대체, 시가총액 편향 없음)
+    cmf_v = _cmf(h, l, c, v, period=21)
+    ts.cmf = cmf_v
+    a += (10 if cmf_v >  0.15 else   # 강한 매수 압력
+           7 if cmf_v >  0.05 else   # 매수 압력
+           4 if cmf_v > -0.05 else   # 중립
+           0 if cmf_v < -0.15 else 1)  # 매도 압력
+
+    # ② MFI — Money Flow Index (과매도 여부)
     mfi_v = _mfi(h, l, c, v); ts.mfi = mfi_v if mfi_v else 50.0
     if mfi_v is not None:
-        a += 10 if mfi_v < 20 else 7 if mfi_v < 30 else 4 if mfi_v < 40 else 0 if mfi_v > 80 else 1
+        a += (10 if mfi_v < 20 else
+               7 if mfi_v < 30 else
+               4 if mfi_v < 40 else
+               0 if mfi_v > 80 else 1)
 
-    if len(v) >= 20:
-        v3  = sum(x for x in v[-3:]  if x > 0) / 3
-        v20 = sum(x for x in v[-20:] if x > 0) / 20
-        r   = v3 / v20 if v20 else 1.0
-        a += 8 if r < 0.70 else 5 if r < 0.85 else 2 if r < 1.00 else 0
+    # ③ EvsR Absorption — Whale 감지 (Volume Contraction 대체)
+    evsr_v = _evsr_absorption(h, l, c, v, period=20)
+    ts.evsr = evsr_v
+    a += (8 if evsr_v >= 2.0 else   # 강한 흡수: 거래량 있는데 가격 안 움직임
+           5 if evsr_v >= 1.5 else   # 흡수 신호
+           2 if evsr_v >= 1.0 else 0)
 
     lays["A"] = a; raw += a
 
-    # ── B. Trend (20pts) ─────────────────────
+    # ── B. Trend (20pts) ─────────────────────────────────────────────────
+    # MACD Histogram(8) + EMA 구조(7) + ADX(5)
     b = 0
+
+    # ① MACD Histogram 수렴
     mh, prev_mh = _macd_hist(c)
     if len(c) >= 35:
-        b += (10 if mh < 0 and mh > prev_mh else
-              7  if mh > 0 and mh > prev_mh else
-              5  if mh > 0 else 2)
+        b += (8 if mh < 0 and mh > prev_mh else   # 음수 구간 수렴 = 하락 모멘텀 약화
+               6 if mh > 0 and mh > prev_mh else   # 양수 확장
+               4 if mh > 0 else 1)
 
+    # ② EMA 구조 (20/50): 눌림 + 장기추세 건강
     e20 = _ema(c, 20); e50 = _ema(c, 50); cur = c[-1]
     if e20 and e50:
         v20e, v50e = e20[-1], e50[-1]
-        b += (10 if cur < v20e and v20e > v50e else
-              7  if cur < v50e else
-              5  if cur > v20e > v50e else
-              2  if v20e < v50e else 4)
+        b += (7 if cur < v20e and v20e > v50e else   # 눌림 + 골든 구조
+               5 if cur < v50e else                   # 장기선 아래
+               4 if cur > v20e > v50e else            # 완전 상승 구조
+               2 if v20e < v50e else 3)
+
+    # ③ ADX — 추세 강도 필터 (신규)
+    adx_v, pdi_v, ndi_v = _adx(h, l, c)
+    ts.adx = adx_v
+    # 하락추세 중 ADX 강하고 -DI > +DI → 진짜 눌림(반등 후보) 가중
+    if adx_v >= 25 and ndi_v > pdi_v:
+        b += 5   # 뚜렷한 하락추세 = 바닥 반등 후보
+    elif adx_v >= 20:
+        b += 3   # 추세 확립 (방향 불문)
+    elif adx_v < 15:
+        b += 0   # 횡보 — 기술지표 신뢰도 낮음
 
     lays["B"] = b; raw += b
 
-    # ── C. Momentum (20pts) ──────────────────
+    # ── C. Momentum (20pts) ──────────────────────────────────────────────
+    # RSI(8) + Stochastic(7) + RSI Bullish Divergence(5)
     cp = 0
-    rsi_v = _rsi(c); ts.rsi = rsi_v
-    cp += (8 if rsi_v <= 25 else 7 if rsi_v <= 30 else
-           5 if rsi_v <= 40 else 2 if rsi_v <= 50 else
-           0 if rsi_v >= 70 else 1)
 
+    # ① RSI (Wilder smoothing 적용)
+    rsi_v = _rsi(c); ts.rsi = rsi_v
+    cp += (8 if rsi_v <= 25 else
+            7 if rsi_v <= 30 else
+            5 if rsi_v <= 40 else
+            2 if rsi_v <= 50 else
+            0 if rsi_v >= 70 else 1)
+
+    # ② Stochastic 과매도 골든크로스
     sk_v, sd_v = _stoch(h, l, c)
     if sk_v is not None and sd_v is not None:
         cp += (7 if sk_v < 20 and sd_v < 20 and sk_v > sd_v else
-               4 if sk_v < 20 and sd_v < 20 else
-               2 if sk_v < 50 and sk_v > sd_v else
-               0 if sk_v > 80 else 1)
+                4 if sk_v < 20 and sd_v < 20 else
+                2 if sk_v < 50 and sk_v > sd_v else
+                0 if sk_v > 80 else 1)
 
+    # ③ RSI Bullish Divergence
     if _rsi_divergence(c):
         cp += 5
 
     lays["C"] = cp; raw += cp
 
-    # ── D. Volatility / Entry (12pts) ────────
+    # ── D. Volatility / Entry (12pts) ────────────────────────────────────
+    # BB Squeeze(7) + ATR 낙폭 버그 수정(5)
     d = 0
-    if len(c) >= 20:
-        sma   = sum(c[-20:]) / 20
-        std   = (sum((x-sma)**2 for x in c[-20:]) / 20) ** 0.5
-        lower = sma - 2 * std; upper = sma + 2 * std
-        d += (7 if cur < lower else
-              5 if cur < lower * 1.03 else
-              0 if cur > upper else 2)
 
+    # ① BB Squeeze (단순 BB 대체) — TTM Squeeze 원리
+    bb = _bb_squeeze(c, h, l)
+    ts.squeeze = bb["squeeze"]
+    if bb["below_lower"]:
+        d += 7   # BB 하단 이탈 = 극도의 눌림
+    elif bb["near_lower"]:
+        d += 5   # BB 하단 근접
+    elif bb["squeeze"] and bb["bb_pos"] < 0:
+        d += 4   # Squeeze 중 하단 반쪽 = 폭발 직전 매집
+    elif bb["squeeze"]:
+        d += 2   # Squeeze 발동만 (상단 반쪽)
+    else:
+        d += (0 if bb["bb_pos"] > 0.5 else 1)   # 상단 근접 = 과매수
+
+    # ② ATR 낙폭 스코어 (버그 수정: 낙폭 클수록 높은 점수)
     atr_v = _atr(h, l, c)
     if atr_v and atr_v > 0 and len(c) >= 20:
-        hi20 = max(c[-20:]); mult = abs(cur - hi20) / atr_v
-        d += 5 if mult < 1.5 else 2 if mult < 2.5 else 0
+        hi20 = max(c[-20:])
+        mult = abs(cur - hi20) / atr_v  # 20일 고점 대비 낙폭 / ATR
+        # 수정 전(버그): mult < 1.5 → 5pt (낙폭 작으면 높은 점수 — 반대)
+        # 수정 후: 낙폭이 클수록 반등 여지 = 높은 점수
+        d += (5 if mult >= 3.0 else   # 3ATR 이상 하락 = 깊은 눌림
+               3 if mult >= 2.0 else   # 2ATR 이상
+               1 if mult >= 1.0 else 0)
 
     lays["D"] = d; raw += d
 
@@ -385,6 +563,7 @@ def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     ts.score = score; ts.raw = raw; ts.grade = grade
     ts.grade_emoji = ge; ts.layers = lays
     return ts
+
 
 
 # ─────────────────────────────────────────────
@@ -490,7 +669,7 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed):
         "text": f"📡 NDX 100 기술지표 스캔 — {today}"}})
     blocks.append(_ctx(
         f"스캔 종목: *{ok_count}/{len(results)}* | "
-        f"소요: {elapsed:.0f}초 | 일봉 6개월 · 4-Layer 100점"
+        f"소요: {elapsed:.0f}초 | 일봉 6개월 · 4-Layer v2 (CMF·EvsR·ADX·BBSq)"
     ))
     blocks.append(_div())
 
@@ -512,9 +691,12 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed):
     for i, ts in enumerate(top15, 1):
         fill = int(ts.score / 100 * 6)
         bar  = "█" * fill + "░" * (6 - fill)
+        squeeze_tag = " 🔥SQ" if ts.squeeze else ""
         lines.append(
             f"{i:2d}. {ts.grade_emoji} *${ts.ticker}* `{bar}` {ts.score}점"
-            f"  RSI {ts.rsi:.0f}  MFI {ts.mfi:.0f}  _{ts.sector}_"
+            f"  RSI {ts.rsi:.0f}  MFI {ts.mfi:.0f}"
+            f"  CMF {ts.cmf:+.2f}  ADX {ts.adx:.0f}{squeeze_tag}"
+            f"  _{ts.sector}_"
         )
     blocks.append(_sec_block("\n".join(lines)))
     blocks.append(_div())
@@ -566,7 +748,7 @@ def send_slack(blocks: list):
 # 메인
 # ─────────────────────────────────────────────
 def main():
-    log.info(f"=== NDX 100 Market Scan v2.0 시작: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} ===")
+    log.info(f"=== NDX 100 Market Scan v2.1 시작: {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')} ===")
     start = time.time()
 
     tickers = list(NDX100.keys())
