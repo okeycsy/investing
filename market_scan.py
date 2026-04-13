@@ -315,12 +315,18 @@ def batch_download(tickers: list, period: str = "6mo") -> dict:
         if len(chunk) == 1:
             t = chunk[0]
             try:
+                # MultiIndex(Price, Ticker) → 첫 번째 레벨만 사용
                 if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                closes  = df["Close"].dropna().tolist()
-                highs   = df["High"].dropna().tolist()
-                lows    = df["Low"].dropna().tolist()
-                volumes = [int(v) for v in df["Volume"].dropna().tolist()]
+                    # (Price, Ticker) 구조면 Price 레벨 선택
+                    if t in df.columns.get_level_values(1):
+                        df = df.xs(t, axis=1, level=1)
+                    else:
+                        df.columns = df.columns.get_level_values(0)
+                df = df.dropna()
+                closes  = df["Close"].tolist()
+                highs   = df["High"].tolist()
+                lows    = df["Low"].tolist()
+                volumes = [int(v) for v in df["Volume"].tolist()]
                 n = min(len(closes), len(highs), len(lows), len(volumes))
                 if n >= 30:
                     result[t] = {
