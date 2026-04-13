@@ -912,85 +912,81 @@ def build_slack_blocks(ticker, bucket_results, sweet_spot, df, years,
 
     # 레이어 분석
     if layer_corr:
-        lines_lc = ["*🔬 레이어별 예측력 (Spearman ρ, 10d)*", "```",
-                    f"{'레이어':<14} {'ρ(10d)':>8}  {'엣지(10d)':>10}  {'엣지(30d)':>10}",
-                    "─" * 48]
+        lines_lc = ["*🔬 레이어 예측력 (Spearman ρ)*"]
         for lid, data in layer_corr.items():
             h10 = data["horizons"].get(10)
             h30 = data["horizons"].get(30)
-            sp  = f"{h10['spearman']:+.3f}" if h10 else " N/A "
+            sp  = f"{h10['spearman']:+.3f}" if h10 else "N/A"
             e10 = f"{h10['edge']*100:+.1f}%" if h10 else "N/A"
             e30 = f"{h30['edge']*100:+.1f}%" if h30 else "N/A"
             mark = " ✅" if (h10 and h10["spearman"] > 0.1) else (" ⚠️" if (h10 and h10["spearman"] < 0) else "")
-            lines_lc.append(f"{lid}:{data['name']:<12} {sp:>8}  {e10:>10}  {e30:>10}{mark}")
-        lines_lc.append("```")
+            lines_lc.append(f"• *{lid}:{data['name']}*{mark}  ρ=`{sp}`  엣지 10d=`{e10}` 30d=`{e30}`")
         blocks.append(_sec("\n".join(lines_lc)))
 
     if combo_results:
         top5 = [c for c in combo_results if c["ev_10d"] > 0][:5]
         if top5:
-            lines_cb = ["*🧩 레이어 조합 Top 5 (10d EV)*", "```",
-                        f"{'조합':<18} {'n':>5}  {'평균':>8}  {'승률':>6}  {'EV':>8}",
-                        "─" * 52]
-            for c in top5:
-                lines_cb.append(f"{c['combo']:<18} {c['count']:>5}  "
-                                 f"{c['avg_10d']*100:>+7.1f}%  {c['wr_10d']*100:>5.0f}%  "
-                                 f"{c['ev_10d']*100:>+7.2f}%")
-            lines_cb.append("```")
+            lines_cb = ["*🧩 레이어 조합 Top 5*"]
+            for i, c in enumerate(top5, 1):
+                lines_cb.append(
+                    f"{i}. *{c['combo']}*  n={c['count']}"
+                    f"  avg=`{c['avg_10d']*100:+.1f}%`"
+                    f"  WR=`{c['wr_10d']*100:.0f}%`"
+                    f"  EV=`{c['ev_10d']*100:+.2f}%`"
+                )
             blocks.append(_sec("\n".join(lines_cb)))
     blocks.append(_div())
 
     # Layer A 세부
     if sub_results:
-        lines_sub = ["*🔬 Layer A 세부 (10d)*", "```",
-                     f"{'지표':<8} {'ρ':>8}  {'엣지10d':>9}  최강구간",
-                     "─" * 50]
+        lines_sub = ["*🔬 Layer A 세부*"]
         for name, data in sub_results.items():
             h10  = data["horizons"].get(10)
-            sp   = f"{h10['spearman']:+.3f}" if h10 else " N/A "
+            sp   = f"{h10['spearman']:+.3f}" if h10 else "N/A"
             e10  = f"{h10['edge']*100:+.1f}%" if h10 else "N/A"
             best = max([(l,d) for l,d in data["buckets"].items() if d and d["count"]>=5],
                        key=lambda x: x[1]["ev"], default=(None,None))
-            bst  = f"{best[0]} WR{best[1]['winrate']*100:.0f}% n={best[1]['count']}" if best[0] else ""
+            bst  = f"{best[0]} WR{best[1]['winrate']*100:.0f}%" if best[0] else ""
             mark = " ✅" if (h10 and h10["spearman"] > 0.05) else (" ⚠️" if (h10 and h10["spearman"] < 0) else "")
-            lines_sub.append(f"{name:<8} {sp:>8}  {e10:>9}  {bst}{mark}")
-        lines_sub.append("```")
+            lines_sub.append(f"• *{name}*{mark}  ρ=`{sp}`  엣지=`{e10}`  최강: _{bst}_")
         blocks.append(_sec("\n".join(lines_sub)))
 
-    # CMF 상태
+    # CMF 상태 (모바일 친화적)
     if cross_results:
         matrix = cross_results["matrix"]
-        lines_cr = ["*🔬 CMF 상태별 성과*", "```",
-                    f"{'상태':<8} {'n':>5}  {'10d avg':>8}  {'WR':>6}  {'20d avg':>8}",
-                    "─" * 44]
+        state_emoji = {"양수유지":"🟢","전환중":"🟡","전환완료":"🟠","중립":"⚪","매도압력":"🔴"}
+        lines_cr = ["*🔬 CMF 상태별 성과 (10d)*"]
         for cs in cross_results["cmf_order"]:
             d = matrix[cs]["_total"]
             if not d["count"]: continue
             a10 = f"{d['avg_10d']*100:+.1f}%" if d["avg_10d"] is not None else "N/A"
             a20 = f"{d['avg_20d']*100:+.1f}%" if d["avg_20d"] is not None else "N/A"
             w_  = f"{d['wr_10d']*100:.0f}%"   if d["wr_10d"]  is not None else "N/A"
-            lines_cr.append(f"{cs:<8} {d['count']:>5}  {a10:>8}  {w_:>6}  {a20:>8}")
-        lines_cr.append("```")
+            em = state_emoji.get(cs, "•")
+            lines_cr.append(
+                f"{em} *{cs}* (n={d['count']})"
+                f"  10d `{a10}` WR `{w_}`  20d `{a20}`"
+            )
         blocks.append(_sec("\n".join(lines_cr)))
     blocks.append(_div())
 
-    # DCA 비교
+    # DCA 비교 (모바일 친화적)
     if dca_dynamic and dca_baseline:
         dyn = dca_dynamic; bas = dca_baseline
         ret_diff  = (dyn["total_return"] - bas["total_return"]) * 100
         mdd_diff  = (dyn["mdd"] - bas["mdd"]) * 100
         cost_diff = dyn["avg_cost"] - bas["avg_cost"]
+        ret_em  = "✅" if ret_diff  >= 0 else "❌"
+        mdd_em  = "✅" if mdd_diff  >= 0 else "⚠️"
+        cost_em = "✅" if cost_diff <= 0 else "❌"
         lines_dca = [
-            "*💰 Dynamic DCA vs Baseline DCA*", "```",
-            f"{'항목':<16} {'Baseline':>12}  {'Dynamic':>12}  {'개선':>9}",
-            "─" * 54,
-            f"{'총 수익률':<16} {bas['total_return']*100:>+11.1f}%  {dyn['total_return']*100:>+11.1f}%  {ret_diff:>+8.1f}%p",
-            f"{'MDD':<16} {bas['mdd']*100:>11.1f}%  {dyn['mdd']*100:>11.1f}%  {mdd_diff:>+8.1f}%p",
-            f"{'평균 단가($)':<16} ${bas['avg_cost']:>10.2f}  ${dyn['avg_cost']:>10.2f}  ${cost_diff:>+8.2f}",
-            f"{'최종 가치($)':<16} ${bas['final_value']:>10,.0f}  ${dyn['final_value']:>10,.0f}",
-            f"{'잔여 현금($)':<16} {'$0':>12}  ${dyn['cash_pool_remaining']:>10,.0f}",
-            "```",
-            "_Dynamic: 점수 기반 차등 매수 | Baseline: 매일 $100 무조건_"
+            "*💰 Dynamic DCA vs Baseline*",
+            f"📈 수익률  Base `{bas['total_return']*100:+.1f}%` → Dyn `{dyn['total_return']*100:+.1f}%`  {ret_em} `{ret_diff:+.1f}%p`",
+            f"📉 MDD     Base `{bas['mdd']*100:.1f}%` → Dyn `{dyn['mdd']*100:.1f}%`  {mdd_em} `{mdd_diff:+.1f}%p`",
+            f"💲 평균단가  Base `${bas['avg_cost']:.2f}` → Dyn `${dyn['avg_cost']:.2f}`  {cost_em} `${cost_diff:+.2f}`",
+            f"💼 최종가치  Base `${bas['final_value']:,.0f}` / Dyn `${dyn['final_value']:,.0f}`",
+            f"🏦 잔여현금  Dyn `${dyn['cash_pool_remaining']:,.0f}`",
+            "_점수 기반 차등 매수 vs 매일 $100 무조건_",
         ]
         blocks.append(_sec("\n".join(lines_dca)))
         blocks.append(_div())
