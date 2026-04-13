@@ -17,6 +17,10 @@
     47.38,
     47.38
   ],
-  "pcr_readings": [],
-  "short_readings": []
+  "pcr_readings": [
+    0.534
+  ],
+  "short_readings": [
+    40.7
+  ]
 }
