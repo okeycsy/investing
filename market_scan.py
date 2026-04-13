@@ -14,6 +14,7 @@ import json
 import logging
 import argparse
 import requests
+import pandas as pd
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass, field
@@ -314,6 +315,8 @@ def batch_download(tickers: list, period: str = "6mo") -> dict:
         if len(chunk) == 1:
             t = chunk[0]
             try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
                 closes  = df["Close"].dropna().tolist()
                 highs   = df["High"].dropna().tolist()
                 lows    = df["Low"].dropna().tolist()
