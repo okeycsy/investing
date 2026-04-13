@@ -107,8 +107,8 @@
   "price_alert_direction": "",
   "price_alert_date": "2026-04-11",
   "pending_morning_alert": null,
-  "dca_shares": 1900.0,
-  "dca_avg_price": 101.0637,
+  "dca_shares": 1969.0,
+  "dca_avg_price": 99.9012,
   "dca_history": [
     {
       "date": "2026-03-31",
@@ -120,6 +120,12 @@
       "date": "2026-04-06",
       "shares": 4.0,
       "price": 69.65,
+      "action": "🧊 물타기"
+    },
+    {
+      "date": "2026-04-13",
+      "shares": 69.0,
+      "price": 67.89,
       "action": "🧊 물타기"
     }
   ]
