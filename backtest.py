@@ -129,10 +129,14 @@ def compute_rolling_scores(raw_df: pd.DataFrame, ticker: str,
             vix_val   = float(macro_df.loc[d, "vix"])      if "vix" in macro_df.columns else 0.0
 
         sector = SP500.get(ticker, "Unknown")
-        ts = score_ticker(ticker, sector, ohlcv,
-                          btc_above_sma20=btc_above, vix=vix_val)
+        # score_ticker 호출 — btc/vix 파라미터 없는 구버전 호환
+        try:
+            ts = score_ticker(ticker, sector, ohlcv,
+                              btc_above_sma20=btc_above, vix=vix_val)
+        except TypeError:
+            ts = score_ticker(ticker, sector, ohlcv)
 
-        # Layer C 배수 결정 (VIX 우선)
+        # Layer C 배수 결정 (VIX 우선) — 외부에서 raw에 직접 적용
         if vix_val >= 25:
             mult = 0.8
             macro_state = f"VIX패닉({vix_val:.0f})"
@@ -142,6 +146,16 @@ def compute_rolling_scores(raw_df: pd.DataFrame, ticker: str,
         else:
             mult = 1.0
             macro_state = "평시"
+
+        # 배수 적용 (score_ticker가 내부에서 안 했을 경우 외부에서 보정)
+        if not ts.error and mult != 1.0:
+            new_score = min(100, round(ts.raw * mult / 80 * 100))
+            ts.score = new_score
+            if   new_score >= 80: ts.grade, ts.grade_emoji = "Strong Buy", "🟢🟢"
+            elif new_score >= 60: ts.grade, ts.grade_emoji = "Buy",        "🟢"
+            elif new_score >= 40: ts.grade, ts.grade_emoji = "Neutral",    "⚪"
+            elif new_score >= 20: ts.grade, ts.grade_emoji = "Caution",    "🟡"
+            else:                 ts.grade, ts.grade_emoji = "Avoid",      "🔴"
 
         records.append({
             "date":        d,
