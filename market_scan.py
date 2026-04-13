@@ -237,6 +237,9 @@ class TickerScore:
     evsr:        float = 0.0    # Effort vs Result (흡수 비율)
     upvol:       float = 1.0    # 상승일/하락일 거래량 비율
     squeeze:     bool  = False  # BB Squeeze 발동 여부
+    multiplier:  float = 1.0    # Layer C Macro 배수 (0.8/1.0/1.2)
+    btc_above:   bool  = False  # BTC > SMA20 여부
+    vix:         float = 0.0    # 당일 VIX
     layers:      dict  = field(default_factory=dict)
     error:       bool  = False
 
@@ -244,6 +247,43 @@ class TickerScore:
 # ─────────────────────────────────────────────
 # 배치 OHLCV 다운로드 (핵심: 전종목 한번에)
 # ─────────────────────────────────────────────
+def fetch_macro_context() -> dict:
+    """
+    BTC-USD, ^VIX 당일 데이터 fetch.
+    반환: {"btc_above_sma20": bool, "vix": float, "btc_price": float, "btc_sma20": float}
+    실패 시 기본값 반환 (graceful degradation).
+    """
+    result = {"btc_above_sma20": False, "vix": 0.0, "btc_price": 0.0, "btc_sma20": 0.0}
+    try:
+        btc = yf.download("BTC-USD", period="30d", interval="1d",
+                          auto_adjust=True, progress=False)
+        if isinstance(btc.columns, pd.MultiIndex):
+            btc.columns = btc.columns.get_level_values(0)
+        if not btc.empty and len(btc) >= 20:
+            closes = btc["Close"].dropna().tolist()
+            sma20  = sum(closes[-20:]) / 20
+            result["btc_price"]      = round(closes[-1], 2)
+            result["btc_sma20"]      = round(sma20, 2)
+            result["btc_above_sma20"] = closes[-1] > sma20
+    except Exception as e:
+        log.warning(f"BTC 데이터 실패: {e}")
+
+    try:
+        vix = yf.download("^VIX", period="5d", interval="1d",
+                          auto_adjust=True, progress=False)
+        if isinstance(vix.columns, pd.MultiIndex):
+            vix.columns = vix.columns.get_level_values(0)
+        if not vix.empty:
+            result["vix"] = round(float(vix["Close"].dropna().iloc[-1]), 2)
+    except Exception as e:
+        log.warning(f"VIX 데이터 실패: {e}")
+
+    log.info(f"Macro: BTC={result['btc_price']:.0f} (SMA20={result['btc_sma20']:.0f}, "
+             f"above={'✅' if result['btc_above_sma20'] else '❌'}) "
+             f"VIX={result['vix']:.1f} ({'⚠️ PANIC' if result['vix'] >= 25 else '정상'})")
+    return result
+
+
 def batch_download(tickers: list, period: str = "6mo") -> dict:
     """
     yfinance 배치 다운로드 — 전종목을 청크(30종목)로 나눠 요청.
@@ -636,7 +676,9 @@ def _ema20_reclaim(closes: list) -> dict:
 #   CMF(50pt) + EvsR(30pt) = 80pt → 100점 정규화
 #   모든 다른 지표/함수는 보존 — 향후 재검증 예정
 # ─────────────────────────────────────────────
-def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
+def score_ticker(ticker: str, sector: str, ohlcv: dict,
+                 btc_above_sma20: bool = False,
+                 vix: float = 0.0) -> TickerScore:
     ts = TickerScore(ticker=ticker, sector=sector)
     if not ohlcv or len(ohlcv.get("closes", [])) < 30:
         ts.error = True
@@ -687,8 +729,20 @@ def score_ticker(ticker: str, sector: str, ohlcv: dict) -> TickerScore:
     lays["C"] = 0
     lays["D"] = 0
 
-    # ── 정규화 80→100 ────────────────────────
-    score = round(raw / 80 * 100)
+    # ── Layer C: Macro & Crypto Proxy ────────
+    # VIX 패닉 우선 → BTC 순풍 → 평시
+    if vix >= 25:
+        mult = 0.8    # 시장 투매: 바닥 확인 지연 리스크
+    elif btc_above_sma20:
+        mult = 1.2    # 크립토 순풍: HOOD 업사이드 확대
+    else:
+        mult = 1.0
+    ts.multiplier = mult
+    ts.btc_above  = btc_above_sma20
+    ts.vix        = vix
+
+    # ── 정규화 80→100 (multiplier 적용 후) ───
+    score = round(raw * mult / 80 * 100)
     score = min(score, 100)
     if   score >= 80: grade, ge = "Strong Buy", "🟢🟢"
     elif score >= 60: grade, ge = "Buy",        "🟢"
@@ -796,13 +850,23 @@ def _ctx(text: str) -> dict:
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
-def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed):
+def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
+                 macro: dict = None):
     today    = datetime.now(KST).strftime("%m/%d")
     ok_count = sum(1 for r in results if not r.error)
     blocks   = []
 
     blocks.append({"type": "header", "text": {"type": "plain_text",
         "text": f"📡 S&P 500 기술지표 스캔 — {today}"}})
+    # Layer C Macro 상태 표시
+    if macro:
+        vix_tag = f"⚠️ VIX {macro['vix']:.0f} PANIC (×0.8)" if macro["vix"] >= 25 \
+                  else f"✅ BTC 순풍 SMA20↑ (×1.2)" if macro["btc_above_sma20"] \
+                  else f"🟰 평시 BTC SMA20↓ (×1.0)"
+        blocks.append(_ctx(
+            f"Layer C Macro: {vix_tag}  |  "
+            f"BTC ${macro.get('btc_price', 0):,.0f} (SMA20 ${macro.get('btc_sma20', 0):,.0f})"
+        ))
     blocks.append(_ctx(
         f"스캔 종목: *{ok_count}/{len(results)}* | "
         f"소요: {elapsed:.0f}초 | 일봉 6개월 · 4-Layer v2 (CMF·EvsR·ADX·BBSq)"
@@ -811,6 +875,54 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed):
 
     if claude_comment:
         blocks.append(_sec_block(claude_comment))
+        blocks.append(_div())
+
+    # ── HOOD DCA 오늘의 신호 ──────────────────────────────────────
+    hood_ts = next((r for r in results if r.ticker == "HOOD" and not r.error), None)
+    if hood_ts:
+        score = hood_ts.score
+        # 매수 금액 결정
+        if score >= 80:
+            action = "🟢🟢 *STRONG BUY* — 오늘 $200 매수 (Cash Pool 한도 내)"
+            action_short = "STRONG BUY / $200"
+        elif score >= 60:
+            action = "🟢 *BUY* — 오늘 $100 매수 (기본 DCA)"
+            action_short = "BUY / $100"
+        elif score >= 40:
+            action = "⚪ *NEUTRAL* — 오늘 $50 매수 (보수적)"
+            action_short = "NEUTRAL / $50"
+        else:
+            action = "🔴 *AVOID* — 오늘 매수 없음, $100 Cash Pool 누적"
+            action_short = "AVOID / $0"
+
+        # CMF 상태 레이블
+        a_pts = hood_ts.layers.get("A", 0)
+        cmf_state = ("양수유지" if (hood_ts.cmf > 0.02 and a_pts == 50) else
+                     "전환중"   if (hood_ts.cmf <= 0.02 and a_pts == 30) else
+                     "전환완료" if a_pts == 10 else
+                     "중립"     if a_pts == 5  else "매도압력")
+
+        # 매크로 상태
+        if macro:
+            if macro.get("vix", 0) >= 25:
+                macro_tag = f"🚨 VIX 패닉 ({macro['vix']:.0f}) × 0.8"
+            elif macro.get("btc_above_sma20"):
+                macro_tag = f"🟢 BTC 순풍 × 1.2"
+            else:
+                macro_tag = "⚪ 매크로 평시 × 1.0"
+        else:
+            macro_tag = "⚪ 매크로 평시"
+
+        fill = int(score / 100 * 10)
+        bar  = "█" * fill + "░" * (10 - fill)
+        hood_block = "\n".join([
+            "*💰 오늘의 $HOOD DCA 신호*",
+            action,
+            f"`{bar}` *{score}점* ({hood_ts.grade})",
+            f"CMF `{hood_ts.cmf:+.3f}` ({cmf_state})  EvsR `{hood_ts.evsr:.2f}`  RSI `{hood_ts.rsi:.0f}`",
+            macro_tag,
+        ])
+        blocks.append(_sec_block(hood_block))
         blocks.append(_div())
 
     # 섹터 히트맵
@@ -1004,8 +1116,10 @@ def main():
         start = time.time()
 
         sector = SP500.get(single_ticker, "Unknown")
+        macro  = fetch_macro_context()
         ohlcv_map = batch_download([single_ticker], period="6mo")
-        ts = score_ticker(single_ticker, sector, ohlcv_map.get(single_ticker, {}))
+        ts = score_ticker(single_ticker, sector, ohlcv_map.get(single_ticker, {}),
+                          btc_above_sma20=macro["btc_above_sma20"], vix=macro["vix"])
 
         elapsed = time.time() - start
         if ts.error:
@@ -1031,6 +1145,9 @@ def main():
     tickers = list(SP500.keys())
     log.info(f"대상: {len(tickers)}종목 — yfinance 배치 다운로드 (청크 25, 딜레이 3s)")
 
+    # Macro context (BTC/VIX) — 전 종목 공통 적용
+    macro = fetch_macro_context()
+
     # 전종목 배치 다운로드
     ohlcv_map = batch_download(tickers, period="6mo")
     log.info(f"다운로드 완료: {len(ohlcv_map)}/{len(tickers)}종목")
@@ -1038,7 +1155,8 @@ def main():
     # 스코어링 (로컬 계산)
     results = []
     for ticker, sector in SP500.items():
-        ts = score_ticker(ticker, sector, ohlcv_map.get(ticker, {}))
+        ts = score_ticker(ticker, sector, ohlcv_map.get(ticker, {}),
+                          btc_above_sma20=macro["btc_above_sma20"], vix=macro["vix"])
         if not ts.error:
             log.info(f"  {ticker}: {ts.score}점 ({ts.grade}) RSI={ts.rsi:.1f}")
         else:
@@ -1054,7 +1172,8 @@ def main():
     log.info(f"스캔 완료: {len(ok_results)}/{len(results)}종목, {elapsed:.1f}초")
 
     claude_comment = _claude_comment(sectors, top15, bottom10)
-    blocks = build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed)
+    blocks = build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
+                          macro=macro)
     send_slack(blocks, text="S&P 500 Market Scan")
     log.info("=== 완료 ===")
 
