@@ -3,7 +3,8 @@
   "alerts_fired": [],
   "insider_trades": [],
   "news_headlines": [
-    "Robinhood, 규제 예측시장 확대"
+    "Robinhood, 규제 예측시장 확대",
+    "Pinwheel이 Robinhood 뱅킹 입금 지원"
   ],
   "rsi_readings": [
     42.13,
@@ -20,7 +21,8 @@
     47.38,
     47.38,
     47.38,
-    47.38
+    47.38,
+    57.09
   ],
   "pcr_readings": [
     0.534,
