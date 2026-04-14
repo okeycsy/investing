@@ -103,10 +103,15 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 15.12,
-  "price_alert_direction": "up",
+  "price_alert_max_pct": 0,
+  "price_alert_direction": "",
   "price_alert_date": "2026-04-15",
-  "pending_morning_alert": null,
+  "pending_morning_alert": {
+    "change_pct": 10.3,
+    "abs_pct": 10.3,
+    "direction": "up",
+    "date": "2026-04-15"
+  },
   "dca_shares": 1969.0,
   "dca_avg_price": 99.9012,
   "dca_history": [
