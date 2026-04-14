@@ -243,54 +243,78 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
     """
     시장 상태별 정확한 현재가/전일종가 계산.
 
-    realtime=True  (run_normal): 프리/정규/애프터 실시간 가격
-    realtime=False (run_close):  확정 일봉만 사용 (오늘 정규장 종가 vs 어제 정규장 종가)
+    핵심 수정: REGULAR 중 Yahoo 일봉 API는 closes_daily[-1]에 오늘 인트라데이
+    바를 포함하기도 함 → prev_close = closes_daily[-1]이면 current ≈ prev_close
+    → 4%+ 급등도 -0.01%로 오인.
+
+    수정: 일봉 timestamps를 파싱해 오늘 날짜(UTC) 바를 제거,
+    가장 최근 확정 종가(전일)만 prev_close로 사용.
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=TICKER)
 
-    # ── 1. 확정 일봉 (prev_close 기준용) ─────────────────────────
+    # ── 1. 일봉 (timestamps 포함하여 오늘 바 필터링) ──────────────
     resp_1d = safe_get(url, params={"interval": "1d", "range": "10d"})
     if not resp_1d:
         return None
     try:
-        closes_daily = [
-            c for c in resp_1d.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-            if c is not None
-        ]
-        volumes_daily = [
-            v for v in resp_1d.json()["chart"]["result"][0]["indicators"]["quote"][0]["volume"]
-            if v is not None
-        ]
+        result_1d        = resp_1d.json()["chart"]["result"][0]
+        ts_daily_raw     = result_1d.get("timestamp", [])
+        q1d              = result_1d["indicators"]["quote"][0]
+        closes_raw       = q1d.get("close", [])
+        volumes_raw      = q1d.get("volume", [])
     except Exception as e:
         log.error(f"fetch_price 일봉 파싱 실패: {e}")
         return None
 
-    if len(closes_daily) < 2:
-        log.warning("fetch_price: 일봉 데이터 부족")
-        return None
-
-    # ── 2. 장 상태 판별 (UTC 시간 기준) ──────────────────────────
+    # ── 2. 장 상태 판별 ──────────────────────────────────────────
     now_utc = datetime.now(UTC)
-    hm      = now_utc.hour * 60 + now_utc.minute
-    dow     = now_utc.weekday()  # 0=Mon 6=Sun
+    today_utc = now_utc.date()
+    hm  = now_utc.hour * 60 + now_utc.minute
+    dow = now_utc.weekday()  # 0=Mon 6=Sun
 
-    if dow >= 5:                                    # 주말
+    if dow >= 5:
         market_state = "CLOSED"
-    elif hm < 8 * 60:                              # UTC 00:00~08:00
+    elif hm < 8 * 60:
         market_state = "CLOSED"
-    elif hm < 13 * 60 + 30:                        # UTC 08:00~13:30 → PRE
+    elif hm < 13 * 60 + 30:
         market_state = "PRE"
-    elif hm < 20 * 60:                             # UTC 13:30~20:00 → REGULAR
+    elif hm < 20 * 60:
         market_state = "REGULAR"
-    elif hm < 24 * 60:                             # UTC 20:00~24:00 → POST
+    elif hm < 24 * 60:
         market_state = "POST"
     else:
         market_state = "CLOSED"
 
-    # ── 3. 현재가 & 전일종가 ─────────────────────────────────────
+    # ── 3. 확정 일봉만 추출 (오늘 날짜 바 제거) ──────────────────
+    # Yahoo는 장 중에도 오늘 인트라데이 값을 일봉 시리즈 마지막에 넣을 수 있음.
+    # 이를 그대로 prev_close로 쓰면 current ≈ prev_close → 등락률 0%에 가까워짐.
+    confirmed_closes  = []
+    confirmed_volumes = []
+    for i, ts in enumerate(ts_daily_raw):
+        bar_date = datetime.fromtimestamp(ts, UTC).date()
+        if bar_date < today_utc:
+            c = closes_raw[i] if i < len(closes_raw) else None
+            v = volumes_raw[i] if i < len(volumes_raw) else None
+            if c is not None:
+                confirmed_closes.append(float(c))
+            if v is not None:
+                confirmed_volumes.append(int(v))
+
+    if len(confirmed_closes) < 2:
+        log.warning(f"fetch_price: 확정 일봉 부족 ({len(confirmed_closes)}개) — 전체 일봉 fallback")
+        # fallback: 오늘 바 포함하더라도 [-2]를 prev_close로
+        all_closes = [float(c) for c in closes_raw if c is not None]
+        if len(all_closes) < 2:
+            return None
+        confirmed_closes  = all_closes
+        confirmed_volumes = [int(v) for v in volumes_raw if v is not None]
+
+    # prev_close = 가장 최근 확정 종가 (= 전일 정규장 종가)
+    prev_close = round(confirmed_closes[-1], 2)
+
+    # ── 4. 현재가 ────────────────────────────────────────────────
     if realtime and market_state in ("PRE", "REGULAR", "POST"):
-        # 실시간: 1분봉 최신 바
         resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
         if not resp_1m:
             return None
@@ -298,46 +322,52 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
             result_1m  = resp_1m.json()["chart"]["result"][0]
             timestamps = result_1m.get("timestamp", [])
             closes_1m  = result_1m["indicators"]["quote"][0].get("close", [])
-            today      = now_utc.date()
+            volumes_1m = result_1m["indicators"]["quote"][0].get("volume", [])
             current    = None
+            today_vol  = 0
             for i in range(len(timestamps) - 1, -1, -1):
-                if i < len(closes_1m) and closes_1m[i] is not None:
-                    if datetime.fromtimestamp(timestamps[i], UTC).date() == today:
+                bar_date = datetime.fromtimestamp(timestamps[i], UTC).date()
+                if bar_date == today_utc:
+                    if current is None and i < len(closes_1m) and closes_1m[i] is not None:
                         current = round(float(closes_1m[i]), 2)
-                        break
+                    if i < len(volumes_1m) and volumes_1m[i]:
+                        today_vol += int(volumes_1m[i])
+                elif bar_date < today_utc and current is not None:
+                    break  # 오늘 바 모두 처리 완료
         except Exception as e:
             log.error(f"fetch_price 1분봉 파싱 실패: {e}")
             return None
 
         if current is None:
-            log.warning("fetch_price: 오늘 1분봉 바 없음")
-            return None
-
-        prev_close = round(float(closes_daily[-1]), 2)   # 전일 확정 종가
-        today_vol  = int(sum(
-            v for i, v in enumerate(result_1m["indicators"]["quote"][0].get("volume", []))
-            if v and i < len(timestamps)
-            and datetime.fromtimestamp(timestamps[i], UTC).date() == today
-        ))
+            log.warning("fetch_price: 오늘 1분봉 바 없음 — 전일 종가로 대체")
+            current   = prev_close
+            today_vol = 0
     else:
-        # CLOSED: 확정 일봉 사용
-        current    = round(float(closes_daily[-1]), 2)
-        prev_close = round(float(closes_daily[-2]), 2)
-        today_vol  = int(volumes_daily[-1]) if volumes_daily else 0
+        # CLOSED/realtime=False: 확정 일봉 사용
+        # 오늘 바가 이미 확정됐으면 confirmed_closes[-1]이 오늘 종가일 수 있으므로
+        # realtime=False(run_close)는 [-1] vs [-2] 사용
+        if not realtime:
+            # run_close 전용: 오늘 확정 종가(방금 마감) vs 전일 종가
+            all_c = [float(c) for c in closes_raw if c is not None]
+            current    = round(all_c[-1], 2)
+            prev_close = round(all_c[-2], 2)
+        else:
+            current = prev_close  # CLOSED + realtime=True: 변동 없음
+        today_vol = int(confirmed_volumes[-1]) if confirmed_volumes else 0
 
     change_pct = round((current - prev_close) / prev_close * 100, 2) if prev_close else 0
 
-    # 5일 평균 거래량
-    past_vols  = volumes_daily[:-1] if len(volumes_daily) > 1 else []
+    past_vols  = confirmed_volumes[:-1] if len(confirmed_volumes) > 1 else confirmed_volumes
     vol_avg_5d = int(sum(past_vols[-5:]) / len(past_vols[-5:])) if past_vols else 0
 
     log.info(
         f"fetch_price: state={market_state} "
-        f"current={current:.2f} prev={prev_close:.2f} chg={change_pct:+.2f}%"
+        f"current={current:.2f} prev={prev_close:.2f} chg={change_pct:+.2f}% "
+        f"confirmed_bars={len(confirmed_closes)}"
     )
 
     try:
-        meta = resp_1d.json()["chart"]["result"][0]["meta"]
+        meta = result_1d["meta"]
     except Exception:
         meta = {}
 
@@ -556,42 +586,48 @@ def format_beta_block(bd: dict) -> list:
 def _fetch_ticker_change(ticker: str) -> Optional[float]:
     """
     전일 정규장 종가 대비 현재가 변동률.
-
-    PRE/REGULAR: 1m 실시간 바 vs closes_daily[-1] (전일 확정 종가)
-    POST/CLOSED:  closes_daily[-1] vs closes_daily[-2] (오늘/어제 확정 종가)
-                  → 정규장이 끝난 후엔 당일 정규장 등락을 확정값으로 반환
+    fetch_price와 동일한 원칙: timestamps로 오늘 인트라데이 바를 필터링해
+    확정된 전일 종가만 prev로 사용.
     """
     _yahoo_throttle()
     url = YAHOO_QUOTE_URL.format(ticker=ticker)
 
-    # 확정 일봉
     resp_1d = safe_get(url, params={"interval": "1d", "range": "10d"})
     if not resp_1d:
         return None
     try:
-        closes_daily = [c for c in resp_1d.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c is not None]
+        result_1d   = resp_1d.json()["chart"]["result"][0]
+        ts_daily    = result_1d.get("timestamp", [])
+        closes_raw  = result_1d["indicators"]["quote"][0].get("close", [])
     except Exception:
         return None
-    if len(closes_daily) < 2:
-        return None
 
-    # 장 상태 판별
-    now_utc = datetime.now(UTC)
+    now_utc   = datetime.now(UTC)
+    today_utc = now_utc.date()
     hm  = now_utc.hour * 60 + now_utc.minute
     dow = now_utc.weekday()
-    if dow >= 5:
-        market_state = "CLOSED"
-    elif hm < 8 * 60:
-        market_state = "CLOSED"
-    elif hm < 13 * 60 + 30:
-        market_state = "PRE"
-    elif hm < 20 * 60:
-        market_state = "REGULAR"
-    else:
-        market_state = "POST"  # 20:00+ UTC = 정규장 종료 후
+
+    if dow >= 5:                  market_state = "CLOSED"
+    elif hm < 8 * 60:             market_state = "CLOSED"
+    elif hm < 13 * 60 + 30:      market_state = "PRE"
+    elif hm < 20 * 60:           market_state = "REGULAR"
+    else:                         market_state = "POST"
+
+    # 오늘 날짜 바 제거 → 확정 종가만 추출
+    confirmed = [float(closes_raw[i]) for i, ts in enumerate(ts_daily)
+                 if i < len(closes_raw) and closes_raw[i] is not None
+                 and datetime.fromtimestamp(ts, UTC).date() < today_utc]
+
+    if len(confirmed) < 1:
+        # fallback: 전체 [-2] 사용
+        all_c = [float(c) for c in closes_raw if c is not None]
+        confirmed = all_c[:-1] if len(all_c) >= 2 else []
+    if not confirmed:
+        return None
+
+    prev = confirmed[-1]  # 전일 확정 종가
 
     if market_state in ("PRE", "REGULAR"):
-        # 정규장 진행 중: 실시간 1m 바 사용
         resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
         if not resp_1m:
             return None
@@ -599,21 +635,19 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
             result_1m  = resp_1m.json()["chart"]["result"][0]
             timestamps = result_1m.get("timestamp", [])
             closes_1m  = result_1m["indicators"]["quote"][0].get("close", [])
-            today      = now_utc.date()
             current    = None
             for i in range(len(timestamps) - 1, -1, -1):
                 if i < len(closes_1m) and closes_1m[i] is not None:
-                    if datetime.fromtimestamp(timestamps[i], UTC).date() == today:
+                    if datetime.fromtimestamp(timestamps[i], UTC).date() == today_utc:
                         current = float(closes_1m[i])
                         break
         except Exception as e:
             log.debug(f"_fetch_ticker_change({ticker}) 1m 오류: {e}")
             return None
-        prev = float(closes_daily[-1])
     else:
-        # POST/CLOSED: 정규장 종료 → 확정 일봉으로 계산
-        current = float(closes_daily[-1])
-        prev    = float(closes_daily[-2])
+        # POST/CLOSED: 오늘 확정 종가 vs 전일
+        all_c   = [float(c) for c in closes_raw if c is not None]
+        current = all_c[-1] if all_c else None
 
     if not current or not prev:
         return None
