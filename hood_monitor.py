@@ -117,14 +117,6 @@ class Filing13F:
 
 
 @dataclass
-class DCASignal:
-    score: int = 50
-    summary: str = ""
-    verdict: str = ""       # 명확한 결론 한 줄
-    factors: list = field(default_factory=list)
-
-
-@dataclass
 class DCAScoreItem:
     label: str = ""
     score: int = 0
@@ -2381,214 +2373,6 @@ def _extract_hood_from_infotable(xml_text: str) -> tuple:
 # ─────────────────────────────────────────────
 # 8. DCA 시그널 (BUG 4 FIX: 결론 명확화, 가격 숫자 제거)
 # ─────────────────────────────────────────────
-def calculate_dca_signal(price, technicals, options, short_interest, insider_trades, news, sm=None) -> DCASignal:
-    score, factors = _rule_based_dca_score(price, technicals, options, short_interest, insider_trades, sm=sm)
-    log.info(f"DCA 규칙기반 점수: {score}/100")
-
-    if ANTHROPIC_API_KEY:
-        log.info("Claude API 호출: DCA 분석")
-        try:
-            ai = _claude_dca_analysis(technicals, options, short_interest, insider_trades, news, score, factors)
-            if ai:
-                log.info(f"DCA AI 분석 완료: {ai.score}/100 — {ai.verdict}")
-                return ai
-        except Exception as e:
-            log.warning(f"Claude DCA fallback: {e}")
-    else:
-        log.info("ANTHROPIC_API_KEY 없음 — 규칙기반 DCA 사용")
-
-    return DCASignal(
-        score=score,
-        verdict=_score_to_verdict(score),
-        summary=_score_to_summary(score),
-        factors=factors,
-    )
-
-
-def _rule_based_dca_score(price, technicals, options, short_interest, insider_trades, sm=None):
-    score = 50
-    factors = []
-
-    # ── RSI ──────────────────────────────────────
-    if technicals.rsi_14 <= 30:
-        bonus = min(20, int((30 - technicals.rsi_14) * 1.5))
-        score += bonus
-        factors.append(f"🟢 RSI {technicals.rsi_14} 과매도 구간 (+{bonus})")
-    elif technicals.rsi_14 <= 40:
-        score += 8
-        factors.append(f"🟡 RSI {technicals.rsi_14} 매수 관심 구간 (+8)")
-    elif technicals.rsi_14 >= 70:
-        penalty = min(15, int((technicals.rsi_14 - 70) * 1.0))
-        score -= penalty
-        factors.append(f"🔴 RSI {technicals.rsi_14} 과매수 구간 (-{penalty})")
-
-    # ── MACD ─────────────────────────────────────
-    if technicals.macd_alert == "bullish_cross":
-        score += 10
-        factors.append("🟢 MACD 골든크로스 (+10)")
-    elif technicals.macd_alert == "bearish_cross":
-        score -= 10
-        factors.append("🔴 MACD 데드크로스 (-10)")
-
-    # ── 옵션 PCR ─────────────────────────────────
-    if options:
-        if options.pcr > 1.2:
-            score += 8
-            factors.append(f"🟢 PCR {options.pcr:.2f} 풋 헤징 집중 → 역발상 매수 (+8)")
-        elif options.pcr < 0.5:
-            score -= 5
-            factors.append(f"🔴 PCR {options.pcr:.2f} 과도한 낙관 (-5)")
-
-    # ── 공매도 ───────────────────────────────────
-    if short_interest:
-        if short_interest.short_pct > 60:
-            score += 8
-            factors.append(f"🟢 공매도 {short_interest.short_pct:.1f}% 숏스퀴즈 가능 (+8)")
-        elif short_interest.short_pct > 50:
-            score += 3
-            factors.append(f"🟡 공매도 {short_interest.short_pct:.1f}% 높은 편 (+3)")
-
-    # ── 내부자 ───────────────────────────────────
-    recent_buys = [t for t in insider_trades if t.trade_type == "Purchase" and _is_recent(t.date, 30)]
-    recent_sells = [t for t in insider_trades if t.trade_type == "Sale" and _is_recent(t.date, 30)]
-    buy_val = sum(t.total_value for t in recent_buys)
-    sell_val = sum(t.total_value for t in recent_sells)
-    if recent_buys and buy_val > 100_000:
-        score += 10
-        factors.append(f"🟢 내부자 매수 {len(recent_buys)}건 (대규모) (+10)")
-    elif len(recent_sells) > 2 and sell_val > 1_000_000:
-        score -= 8
-        factors.append(f"🔴 내부자 대량 매도 {len(recent_sells)}건 (-8)")
-
-    # ── 가격 변동 ────────────────────────────────
-    if price and price.change_pct <= -5:
-        score += 5
-        factors.append(f"🟢 큰 폭 하락 → 매수 기회 (+5)")
-    elif price and price.change_pct >= 5:
-        score -= 3
-        factors.append(f"🟡 큰 폭 상승 → 추격 주의 (-3)")
-
-    # ── Safety Margin 3요소 (SM 있을 때만) ────────
-    if sm is not None:
-        # 1) 볼린저 밴드 이탈
-        if sm.bb_signal == "extreme_oversold":
-            score += 12
-            factors.append(f"🟢 BB 하단 이탈 (Extreme Oversold, 하단 대비 {sm.pct_from_lower:+.1f}%) (+12)")
-        elif sm.bb_signal == "oversold":
-            score += 6
-            factors.append(f"🟡 BB 하단 근접 ({sm.pct_from_lower:+.1f}%) (+6)")
-        elif sm.bb_signal == "overbought":
-            score -= 8
-            factors.append(f"🔴 BB 상단 돌파 — 과열 (-8)")
-
-        # 2) 베타 대비 초과 이탈
-        if sm.beta_excess_pct <= -5:
-            score += 12
-            factors.append(f"🟢 β 대비 과도 하락 ({sm.beta_excess_pct:+.1f}%p) — 통계적 반등 가능 (+12)")
-        elif sm.beta_excess_pct <= -2:
-            score += 6
-            factors.append(f"🟡 β 대비 소폭 초과 하락 ({sm.beta_excess_pct:+.1f}%p) (+6)")
-        elif sm.beta_excess_pct >= 5:
-            score -= 5
-            factors.append(f"🔴 β 대비 과도 상승 ({sm.beta_excess_pct:+.1f}%p) (-5)")
-
-        # 3) 피어 분기 / 모멘텀 (리스크 요소)
-        if sm.divergence_warning:
-            score -= 8
-            factors.append(f"🔴 Divergence Warning — 피어 반등 중 HOOD 하락 가속 (-8)")
-        elif sm.momentum_signal == "accelerating":
-            score -= 4
-            factors.append(f"🟠 하락 가속 중 — 추가 하락 리스크 (-4)")
-        elif sm.momentum_signal == "decelerating":
-            score += 4
-            factors.append(f"🟢 하락 둔화 — 저점 탐색 신호 (+4)")
-
-    return max(0, min(100, score)), factors
-
-
-def _claude_dca_analysis(technicals, options, short_interest, insider_trades, news, rule_score, rule_factors):
-    """BUG 4 FIX: 가격 숫자 제거, 결론(verdict) 명확화"""
-    context = f"""당신은 $HOOD(Robinhood Markets) DCA 장기 투자자를 위한 시그널 분석가입니다.
-주가 숫자는 알려주지 않습니다 (투자자 요청). 기술적/시장 지표만으로 분석해주세요.
-
-현재 지표:
-- RSI(14): {technicals.rsi_14} ({'과매도' if technicals.rsi_14 <= 30 else '과매수' if technicals.rsi_14 >= 70 else '중립'})
-- MACD 히스토그램: {technicals.macd_histogram:.4f} (양수=상승모멘텀)
-- MACD 시그널: {technicals.macd_alert or "없음"}
-- 옵션 PCR: {f"{options.pcr:.3f} ({options.pcr_signal})" if options else "N/A"}
-- 공매도 비율: {f"{short_interest.short_pct:.1f}%" if short_interest else "N/A"}
-- 내부자 매수: {sum(1 for t in insider_trades if t.trade_type == "Purchase")}건 / 매도: {sum(1 for t in insider_trades if t.trade_type == "Sale")}건
-- 규칙기반 DCA 점수: {rule_score}/100
-
-규칙기반 분석:
-{chr(10).join(rule_factors)}
-
-최근 뉴스 (한국어):
-{chr(10).join(f"- {n.get('summary', n['title'])}" for n in news if not n.get('skip') and n.get('summary'))[:5]}
-
-다음 JSON으로만 응답:
-{{"score": 0-100, "verdict": "지금 DCA 추가매수를 고려할 만한가에 대한 한 줄 결론 (예: '추가매수 우호적 — 과매도 구간, 내부자 매수 감지')", "summary": "2문장 한국어 설명", "factors": ["핵심요인1", "핵심요인2", "핵심요인3"]}}"""
-
-    resp = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
-        },
-        json={
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 500,
-            "messages": [{"role": "user", "content": context}],
-        },
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        log.error(f"Claude API 오류 (DCA 분석): HTTP {resp.status_code} — {resp.text[:200]}")
-        return None
-
-    text = ""
-    for block in resp.json().get("content", []):
-        if block.get("type") == "text":
-            text += block["text"]
-    text = text.strip().replace("```json", "").replace("```", "").strip()
-    result = json.loads(text)
-
-    return DCASignal(
-        score=max(0, min(100, int(result.get("score", rule_score)))),
-        verdict=result.get("verdict", _score_to_verdict(rule_score)),
-        summary=result.get("summary", _score_to_summary(rule_score)),
-        factors=result.get("factors", rule_factors),
-    )
-
-
-def _score_to_verdict(score: int) -> str:
-    """BUG 4 FIX: DCA 투자자에게 명확한 결론 한 줄"""
-    if score >= 75:
-        return "✅ 추가매수 적극 고려 — 다수 지표가 매수 우호적"
-    elif score >= 60:
-        return "🟡 추가매수 고려 가능 — 일부 긍정 시그널"
-    elif score >= 45:
-        return "⚪ 정기 DCA 유지 — 특별한 추가매수 이유 없음"
-    elif score >= 30:
-        return "🟠 관망 권장 — 부정적 시그널 우세"
-    else:
-        return "🔴 추가매수 자제 — 다수 부정 시그널"
-
-
-def _score_to_summary(score: int) -> str:
-    if score >= 75:
-        return "기술적/시장 지표 다수가 매수 우호적 환경을 가리킵니다. DCA 추가매수를 적극 검토할 시점입니다."
-    elif score >= 60:
-        return "일부 긍정적 시그널이 감지됩니다. 정기 DCA에 소량 추가를 고려할 수 있습니다."
-    elif score >= 45:
-        return "특별한 방향성 없음. 정기 DCA 일정을 그대로 유지하세요."
-    elif score >= 30:
-        return "부정적 시그널이 다소 우세합니다. 추가매수보다 관망을 권장합니다."
-    else:
-        return "여러 지표가 부정적. 추가매수를 서두르지 마세요."
-
-
 def _is_recent(date_str: str, days: int) -> bool:
     try:
         return (datetime.now() - datetime.strptime(date_str, "%Y-%m-%d")).days <= days
@@ -2794,54 +2578,6 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
     return blocks
 
 
-def format_dca_attraction_block(sm: Optional[SafetyMargin]) -> list:
-    """
-    DCA 매력도 점수 1~10을 메시지 최상단용 요약 블록으로 출력.
-    SM 없으면 스킵.
-    """
-    if sm is None:
-        return []
-    score = sm.dca_attraction
-    filled = score
-    empty = 10 - filled
-    if score >= 8:
-        emoji, verdict = "🟢", "DCA 추가매수 매우 우호적"
-    elif score >= 6:
-        emoji, verdict = "🟡", "DCA 추가매수 고려 가능"
-    elif score >= 4:
-        emoji, verdict = "⚪", "정기 DCA 유지 권장"
-    else:
-        emoji, verdict = "🔴", "추가매수 자제 — 리스크 높음"
-
-    bar = "🟦" * filled + "⬜" * empty
-    detail_parts = []
-    if sm.bb_signal in ("extreme_oversold", "oversold"):
-        detail_parts.append(f"BB 이탈({sm.pct_from_lower:+.1f}%)")
-    if sm.beta_excess_pct <= -1:
-        detail_parts.append(f"β 초과({sm.beta_excess_pct:+.1f}%p)")
-    if sm.divergence_warning:
-        detail_parts.append("피어분기 경고")
-
-    detail = "  |  ".join(detail_parts) if detail_parts else "복합 지표 기반"
-
-    return [
-        _sec(f"*💎 DCA 매력도: {score}/10*  {emoji} {verdict}\n{bar}"),
-        _ctx(detail),
-        {"type": "divider"},
-    ]
-
-
-def format_dca_block(signal: DCASignal) -> list:
-    bar_filled = signal.score // 5
-    bar = ("🟩" if signal.score >= 60 else "🟨" if signal.score >= 40 else "🟥") * bar_filled + "⬜" * (20 - bar_filled)
-    factors_text = "\n".join(f"• {f}" for f in signal.factors[:3]) if signal.factors else ""
-    blocks = [
-        _sec(f"*🎯 DCA 시그널: {signal.score}/100*\n{bar}\n*{signal.verdict}*\n{signal.summary}"),
-    ]
-    if factors_text:
-        blocks.append(_ctx(factors_text))
-    return blocks
-
 
 # ─────────────────────────────────────────────
 # Slack 전송
@@ -3033,17 +2769,20 @@ def run_close():
 
     # OHLCV fetch (closes + highs/lows/volumes, 210일 — EMA200 + DCA 기술지표용)
     ohlcv = fetch_ohlcv(days=210)
-    closes = ohlcv.get("closes", fetch_price_history(60))  # fallback
+    closes = ohlcv.get("closes") or fetch_price_history(60)  # 빈 리스트도 fallback
     weekly_ohlcv = fetch_weekly_ohlcv(weeks=40)
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
 
-    # 베타 분석 (캐시 우선, 4%+ 급변동 시에만 이격도 의미 있음)
+    # 베타 분석 (QQQ fetch 실패 시 전체 skip — 0 fallback 시 아웃퍼폼 오판 방지)
     beta = get_beta()
     if beta and price and price.prev_close > 0:
-        qqq_pct = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
-        bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
-        blocks.extend(format_beta_block(bd))
+        qqq_pct = _fetch_ticker_change(BETA_BENCHMARK)
+        if qqq_pct is not None:
+            bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
+            blocks.extend(format_beta_block(bd))
+        else:
+            log.warning("QQQ fetch 실패 — 베타 블록 스킵 (아웃퍼폼 오판 방지)")
 
     # Safety Margin: close 모드에서 항상 실행 (4% 조건 제거)
     sm = None
@@ -3116,9 +2855,6 @@ def run_close():
     dca_tech = calculate_dca_technical_score(ohlcv, weekly_ohlcv, sm=sm)
     if dca_tech:
         blocks.extend(format_dca_technical_block(dca_tech))
-
-    dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news, sm=sm)
-    blocks.extend(format_dca_block(dca))
 
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
         "text": f"🔔 $HOOD 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
@@ -3212,7 +2948,6 @@ def run_weekly():
     if price:
         weekly_change_str = f"이번 주 마감 기준 {price.change_pct:+.1f}% ({('상승' if price.change_pct >= 0 else '하락')})"
 
-    dca = calculate_dca_signal(price or PriceData(), technicals, options, short, insider_trades, news)
     alerts = ws.get("alerts_fired", [])
     insider_summary = ws.get("insider_trades", [])
     news_summary = ws.get("news_headlines", [])
@@ -3255,7 +2990,13 @@ def run_weekly():
             "*📰 주간 주요 뉴스*\n" + "\n".join(f"• {h}" for h in news_summary[-5:])}})
 
     blocks.append({"type": "divider"})
-    blocks.extend(format_dca_block(dca))
+    # 주간 기술지표 스코어
+    weekly_ohlcv_w = fetch_weekly_ohlcv(weeks=40)
+    ohlcv_w = fetch_ohlcv(days=210)
+    if ohlcv_w:
+        dca_tech_w = calculate_dca_technical_score(ohlcv_w, weekly_ohlcv_w, sm=None)
+        if dca_tech_w:
+            blocks.extend(format_dca_technical_block(dca_tech_w))
     blocks.extend(_footer())
 
     send_slack(blocks)
