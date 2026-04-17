@@ -2,7 +2,7 @@
   "last_price": 65.16,
   "last_news_hashes": [
     "29f6b1cf43b8",
-    "5823d072d236",
+    "2b44663d47dd",
     "fb346ab2e552",
     "68fa1997f5fe",
     "e4154a293d01",
@@ -95,7 +95,7 @@
     79.09,
     87.32,
     86.85,
-    91.19
+    92.43
   ],
   "weekly_data": {
     "prices": [],
@@ -103,7 +103,7 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 5.04,
+  "price_alert_max_pct": 6.46,
   "price_alert_direction": "up",
   "price_alert_date": "2026-04-17",
   "pending_morning_alert": {
