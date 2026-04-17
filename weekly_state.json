@@ -15,7 +15,14 @@
     "주가 +6.5%",
     "주가 +6.6%"
   ],
-  "insider_trades": [],
+  "insider_trades": [
+    "Sale: Quirk Steven M. 8,540주 중규모",
+    "Sale: Verma Shiv 600주 소규모",
+    "Sale: Verma Shiv 700주 소규모",
+    "Sale: Verma Shiv 1,571주 중규모",
+    "Sale: Verma Shiv 2,100주 중규모",
+    "Sale: Verma Shiv 465주 소규모"
+  ],
   "news_headlines": [
     "Robinhood, 규제 예측시장 확대",
     "Pinwheel이 Robinhood 뱅킹 입금 지원",
@@ -115,6 +122,7 @@
     70.83,
     69.6,
     69.45,
+    69.39,
     69.39
   ],
   "pcr_readings": [
