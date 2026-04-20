@@ -113,12 +113,7 @@
   "price_alert_max_pct": 0,
   "price_alert_direction": "",
   "price_alert_date": "2026-04-21",
-  "pending_morning_alert": {
-    "change_pct": 4.5,
-    "abs_pct": 4.5,
-    "direction": "up",
-    "date": "2026-04-18"
-  },
+  "pending_morning_alert": null,
   "dca_shares": 1969.0,
   "dca_avg_price": 99.9012,
   "dca_history": [
