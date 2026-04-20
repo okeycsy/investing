@@ -2,8 +2,13 @@
   "week_start": "2026-04-20",
   "alerts_fired": [],
   "insider_trades": [],
-  "news_headlines": [],
-  "rsi_readings": [],
+  "news_headlines": [
+    "Mizuho, HOOD 목표가 $115로 상향",
+    "Schwab 암호화폐 출시로 HOOD 밸류에이션 위협"
+  ],
+  "rsi_readings": [
+    69.63
+  ],
   "pcr_readings": [],
   "short_readings": []
 }
