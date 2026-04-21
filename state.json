@@ -102,7 +102,7 @@
     86.85,
     90.75,
     91.28,
-    88.07
+    87.16
   ],
   "weekly_data": {
     "prices": [],
@@ -110,8 +110,8 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 0,
-  "price_alert_direction": "",
+  "price_alert_max_pct": 4.51,
+  "price_alert_direction": "down",
   "price_alert_date": "2026-04-22",
   "pending_morning_alert": null,
   "dca_shares": 1969.0,

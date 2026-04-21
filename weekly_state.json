@@ -1,6 +1,8 @@
 {
   "week_start": "2026-04-20",
-  "alerts_fired": [],
+  "alerts_fired": [
+    "주가 -4.5%"
+  ],
   "insider_trades": [
     "Sale: Bhatt Baiju 6,400주 중규모",
     "Sale: Bhatt Baiju 11,400주 중규모",
@@ -27,7 +29,8 @@
     69.63,
     66.47,
     63.81,
-    63.53
+    63.53,
+    62.04
   ],
   "pcr_readings": [
     0.653
