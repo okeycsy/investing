@@ -3,7 +3,9 @@
   "alerts_fired": [],
   "insider_trades": [],
   "news_headlines": [],
-  "rsi_readings": [],
+  "rsi_readings": [
+    55.47
+  ],
   "pcr_readings": [],
   "short_readings": []
 }
