@@ -43,7 +43,10 @@
     "$80 이하, HOOD 기회인가 함정인가",
     "HOOD 주가 6.9% 하락, 비용 18% 증가",
     "HOOD 실적 부진으로 주가 하락, 신규시장 호조",
-    "HOOD Q1 EPS·매출 목표 미달"
+    "HOOD Q1 EPS·매출 목표 미달",
+    "Robinhood 주가 급락",
+    "Robinhood 실적 부진, 암호화폐 약세 영향",
+    "Robinhood 주가 변동성"
   ],
   "rsi_readings": [
     55.47,
@@ -66,7 +69,8 @@
     53.02,
     53.02,
     39.7,
-    39.3
+    39.3,
+    40.03
   ],
   "pcr_readings": [],
   "short_readings": []
