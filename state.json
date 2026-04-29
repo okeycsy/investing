@@ -1,23 +1,26 @@
 {
   "last_price": 65.16,
   "last_news_hashes": [
-    "f9dcd43e3ddd",
+    "ab9d1f6e6d45",
+    "10c616fe5276",
+    "8141fba69003",
+    "5a343c41c2a7",
+    "9e2def5c6884",
     "16d875a47a39",
+    "d2b868d836d2",
+    "39981d9eca91",
+    "bee71d82b752",
+    "5b6a52fa0538",
+    "3d1bd0ffbe07",
     "6c14c256d7cf",
     "1a25d8e47490",
     "d54b86acff70",
-    "a6e0909e6359",
-    "64b0b549049f",
-    "177dc95a44b4",
-    "fc1df6120529",
-    "4be33f71da49",
-    "accd033fd105",
-    "66225d2ebe88",
-    "444497a9d5bb",
-    "50a85c9b957a",
-    "52f3c1fcb5b3"
+    "a6e0909e6359"
   ],
   "last_insider_hashes": [
+    "0ee0d719d4a9",
+    "5577fdab2564",
+    "f3dccecdb7f5",
     "49f700915cd4",
     "1e295c8f4368",
     "ac70d0a7d44d",
@@ -38,8 +41,7 @@
     "e90ca05176be",
     "4b33973a7559",
     "24e9fa3f874b",
-    "8f82c10937df",
-    "d95f84514427"
+    "8f82c10937df"
   ],
   "last_13f_hashes": [],
   "price_history": [
@@ -102,7 +104,7 @@
     84.71,
     83.95,
     82.07,
-    71.0
+    71.2
   ],
   "weekly_data": {
     "prices": [],

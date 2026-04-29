@@ -6,7 +6,11 @@
     "주가 -11.5%",
     "주가 -13.9%"
   ],
-  "insider_trades": [],
+  "insider_trades": [
+    "Sale: Pinner Jeffrey Tsvi 4,435주 중규모",
+    "Sale: Pinner Jeffrey Tsvi 1,200주 중규모",
+    "Sale: Pinner Jeffrey Tsvi 200주 소규모"
+  ],
   "news_headlines": [
     "HOOD 실적 후 주가 변동성 기대",
     "Robinhood 분기 실적 발표 예정",
@@ -46,7 +50,13 @@
     "HOOD Q1 EPS·매출 목표 미달",
     "Robinhood 주가 급락",
     "Robinhood 실적 부진, 암호화폐 약세 영향",
-    "Robinhood 주가 변동성"
+    "Robinhood 주가 변동성",
+    "싱가포르 시장 진출",
+    "실적 부진, 매출 성장 둔화",
+    "경영진 의견, 실적 부진 비판",
+    "실적 부진으로 주가 하락, 신규시장 성장",
+    "주가 급락 원인 분석",
+    "AI 금융자문 개발 중, CEO 의견"
   ],
   "rsi_readings": [
     55.47,
@@ -70,7 +80,8 @@
     53.02,
     39.7,
     39.3,
-    40.03
+    40.03,
+    40.21
   ],
   "pcr_readings": [],
   "short_readings": []
