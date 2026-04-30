@@ -63,7 +63,8 @@
     "HOOD 주가 10% 급락, 실적 부진",
     "ARK Invest, $39M 규모 HOOD 매수",
     "캐시 우드, HOOD 주가 하락 중 매수",
-    "HOOD Q1 실적 후 주가 급락"
+    "HOOD Q1 실적 후 주가 급락",
+    "Barclays, Robinhood 목표주가 재설정"
   ],
   "rsi_readings": [
     55.47,
@@ -96,7 +97,8 @@
     40.21,
     40.21,
     40.21,
-    43.6
+    43.6,
+    41.95
   ],
   "pcr_readings": [],
   "short_readings": []
