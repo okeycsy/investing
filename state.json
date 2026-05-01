@@ -104,7 +104,7 @@
     82.07,
     71.2,
     72.89,
-    74.32
+    74.92
   ],
   "weekly_data": {
     "prices": [],
@@ -114,7 +114,7 @@
   },
   "price_alert_max_pct": 0,
   "price_alert_direction": "",
-  "price_alert_date": "2026-05-01",
+  "price_alert_date": "2026-05-02",
   "pending_morning_alert": null,
   "dca_shares": 1969.0,
   "dca_avg_price": 99.9012,
