@@ -1,6 +1,8 @@
 {
   "week_start": "2026-05-04",
-  "alerts_fired": [],
+  "alerts_fired": [
+    "주가 +4.2%"
+  ],
   "insider_trades": [],
   "news_headlines": [
     "로빈후드 암호화폐 수익 47% 감소",
@@ -12,6 +14,7 @@
     "로빈후드 암호화폐 수익 하락, 장기 전략 유지인가"
   ],
   "rsi_readings": [
+    47.68,
     47.68
   ],
   "pcr_readings": [],
