@@ -2,8 +2,18 @@
   "week_start": "2026-05-04",
   "alerts_fired": [],
   "insider_trades": [],
-  "news_headlines": [],
-  "rsi_readings": [],
+  "news_headlines": [
+    "로빈후드 암호화폐 수익 47% 감소",
+    "짐 크래머, HOOD 논의",
+    "로빈후드 사업의 암호화폐 의존도 분석",
+    "로빈후드 어려운 분기, 예측시장이 촉매제인가",
+    "HOOD 매수 타당성 평가",
+    "로빈후드 트럼프 계좌, 성장·규제·암호화폐 재평가",
+    "로빈후드 암호화폐 수익 하락, 장기 전략 유지인가"
+  ],
+  "rsi_readings": [
+    47.68
+  ],
   "pcr_readings": [],
   "short_readings": []
 }
