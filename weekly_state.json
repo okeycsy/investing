@@ -3,7 +3,12 @@
   "alerts_fired": [
     "주가 +4.2%"
   ],
-  "insider_trades": [],
+  "insider_trades": [
+    "Sale: Gallagher Daniel Martin Jr 200주 @ $75.27",
+    "Sale: Gallagher Daniel Martin Jr 6,000주 @ $76.63",
+    "Sale: Gallagher Daniel Martin Jr 3,700주 @ $77.37",
+    "Sale: Gallagher Daniel Martin Jr 100주 @ $78.05"
+  ],
   "news_headlines": [
     "로빈후드 암호화폐 수익 47% 감소",
     "짐 크래머, HOOD 논의",
@@ -48,9 +53,11 @@
     51.37
   ],
   "pcr_readings": [
-    0.58
+    0.58,
+    0.567
   ],
   "short_readings": [
-    45.5
+    45.5,
+    51.0
   ]
 }
