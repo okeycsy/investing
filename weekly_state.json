@@ -1,7 +1,8 @@
 {
   "week_start": "2026-05-04",
   "alerts_fired": [
-    "주가 +4.2%"
+    "주가 +4.2%",
+    "주가 -4.1%"
   ],
   "insider_trades": [
     "Sale: Gallagher Daniel Martin Jr 200주 @ $75.27",
@@ -59,7 +60,8 @@
     50.96,
     50.96,
     50.96,
-    48.49
+    48.49,
+    46.85
   ],
   "pcr_readings": [
     0.58,
