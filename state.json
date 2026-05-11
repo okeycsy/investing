@@ -115,8 +115,8 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 0,
-  "price_alert_direction": "",
+  "price_alert_max_pct": 4.76,
+  "price_alert_direction": "up",
   "price_alert_date": "2026-05-12",
   "pending_morning_alert": {
     "change_pct": 4.9,

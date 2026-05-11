@@ -1,7 +1,8 @@
 {
   "week_start": "2026-05-11",
   "alerts_fired": [
-    "주가 +4.6%"
+    "주가 +4.6%",
+    "주가 +4.8%"
   ],
   "insider_trades": [],
   "news_headlines": [
@@ -13,6 +14,7 @@
     "HOOD 32% 하락, 바닥 근처 여부 점검"
   ],
   "rsi_readings": [
+    54.03,
     54.03,
     54.03,
     54.03
