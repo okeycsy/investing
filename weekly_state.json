@@ -1,9 +1,20 @@
 {
   "week_start": "2026-05-11",
-  "alerts_fired": [],
+  "alerts_fired": [
+    "주가 +4.6%"
+  ],
   "insider_trades": [],
-  "news_headlines": [],
-  "rsi_readings": [],
+  "news_headlines": [
+    "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
+    "로빈후드 15만 투자자 IPO 전 상품 수요",
+    "월스트릿 애널리스트 HOOD 긍정 평가",
+    "HOOD 자산 307B, 트레이딩앱 기원 벗음",
+    "HOOD 2026년 추천 매수 종목",
+    "HOOD 32% 하락, 바닥 근처 여부 점검"
+  ],
+  "rsi_readings": [
+    54.03
+  ],
   "pcr_readings": [],
   "short_readings": []
 }
