@@ -2,7 +2,8 @@
   "week_start": "2026-05-11",
   "alerts_fired": [
     "주가 +4.6%",
-    "주가 +4.8%"
+    "주가 +4.8%",
+    "주가 -4.1%"
   ],
   "insider_trades": [],
   "news_headlines": [
@@ -12,7 +13,8 @@
     "HOOD 자산 307B, 트레이딩앱 기원 벗음",
     "HOOD 2026년 추천 매수 종목",
     "HOOD 32% 하락, 바닥 근처 여부 점검",
-    "Robinhood, AI 랠리 타고 두번째 소매 벤처 IPO 준비"
+    "Robinhood, AI 랠리 타고 두번째 소매 벤처 IPO 준비",
+    "Robinhood 2차 벤처펀드 출범"
   ],
   "rsi_readings": [
     54.03,
@@ -21,7 +23,8 @@
     54.03,
     54.03,
     54.03,
-    54.03
+    54.03,
+    49.24
   ],
   "pcr_readings": [
     0.715
