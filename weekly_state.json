@@ -8,7 +8,10 @@
     "주가 -4.7%",
     "주가 -4.2%"
   ],
-  "insider_trades": [],
+  "insider_trades": [
+    "Sale: Verma Shiv 3,686주 중규모",
+    "Sale: Verma Shiv 1,750주 중규모"
+  ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
     "로빈후드 15만 투자자 IPO 전 상품 수요",
@@ -97,7 +100,8 @@
     48.9,
     48.9,
     44.39,
-    45.76
+    45.76,
+    44.72
   ],
   "pcr_readings": [
     0.715,
