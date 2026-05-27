@@ -13,7 +13,10 @@
     "Sale: Verma Shiv 1,750주 중규모",
     "Sale: Bhatt Baiju 13,200주 중규모",
     "Sale: Bhatt Baiju 42,955주 대규모",
-    "Sale: Bhatt Baiju 11,267주 중규모"
+    "Sale: Bhatt Baiju 11,267주 중규모",
+    "Sale: Malka Meyer 30,000주 소규모",
+    "Purchase: Malka Meyer 30,000주 소규모",
+    "Sale: Malka Meyer 30,000주 소규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -60,7 +63,8 @@
     "로빈후드, AI 주식 매매·구매 기능 도입",
     "Robinhood 펀딩 계좌 27.6백만 개",
     "Robinhood AI 에이전트 트레이딩 출시",
-    "Robinhood AI 에이전트 트레이딩 론칭"
+    "Robinhood AI 에이전트 트레이딩 론칭",
+    "로빈후드, AI 에이전트 거래·신용카드 구매 허용"
   ],
   "rsi_readings": [
     54.03,
@@ -182,6 +186,7 @@
     44.71,
     46.64,
     48.81,
+    48.73,
     48.73
   ],
   "pcr_readings": [
