@@ -12,7 +12,8 @@
     "주가 +8.5%",
     "주가 +11.1%",
     "주가 -4.5%",
-    "주가 -5.1%"
+    "주가 -5.1%",
+    "주가 -7.4%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -23,7 +24,28 @@
     "Sale: Malka Meyer 30,000주 소규모",
     "Purchase: Malka Meyer 30,000주 소규모",
     "Sale: Malka Meyer 30,000주 소규모",
-    "Purchase: Malka Meyer 249,000주 대규모"
+    "Purchase: Malka Meyer 249,000주 대규모",
+    "Award: Hegeman John William 3,289주 소규모",
+    "Award: Payne Christopher D 3,289주 소규모",
+    "Award: SEGAL SUSAN 3,289주 소규모",
+    "Sale: Zoellick Robert B. 801주 소규모",
+    "Award: Zoellick Robert B. 3,289주 소규모",
+    "Sale: Treseder Oluwadara Johnson 801주 소규모",
+    "Award: Treseder Oluwadara Johnson 3,289주 소규모",
+    "Sale: RUBINSTEIN JONATHAN 801주 소규모",
+    "Award: RUBINSTEIN JONATHAN 3,289주 소규모",
+    "Sale: Loop Paula 801주 소규모",
+    "Award: Loop Paula 3,289주 소규모",
+    "Sale: Bhatt Baiju 801주 소규모",
+    "Award: Bhatt Baiju 3,289주 소규모",
+    "Sale: Quirk Steven M. 31,533주 대규모",
+    "Sale: Quirk Steven M. 27,996주 소규모",
+    "Sale: Quirk Steven M. 16,837주 소규모",
+    "Sale: Quirk Steven M. 16,497주 소규모",
+    "Sale: Quirk Steven M. 9,846주 소규모",
+    "Sale: Verma Shiv 16,955주 대규모",
+    "Sale: Verma Shiv 9,692주 소규모",
+    "Sale: Verma Shiv 23,630주 소규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -119,7 +141,8 @@
     "Robinhood CEO, AI 트레이딩 기능 출시",
     "Robinhood, TradePMR와 RIA 소개 프로그램 출범",
     "HOOD vs SOFI vs BULL 증권사 비교 분석",
-    "Robinhood, 어드바이저 대상 신사업 추진"
+    "Robinhood, 어드바이저 대상 신사업 추진",
+    "Robinhood TradePMR, 7월 마진·담보대출 금리 인하"
   ],
   "rsi_readings": [
     54.03,
@@ -279,7 +302,8 @@
     59.72,
     59.72,
     59.72,
-    53.77
+    53.77,
+    52.75
   ],
   "pcr_readings": [
     0.715,
