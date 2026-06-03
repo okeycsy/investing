@@ -45,7 +45,10 @@
     "Sale: Quirk Steven M. 9,846주 소규모",
     "Sale: Verma Shiv 16,955주 대규모",
     "Sale: Verma Shiv 9,692주 소규모",
-    "Sale: Verma Shiv 23,630주 소규모"
+    "Sale: Verma Shiv 23,630주 소규모",
+    "Purchase: Malka Meyer 181,000주 대규모",
+    "Sale: Malka Meyer 801주 소규모",
+    "Award: Malka Meyer 3,289주 소규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -303,6 +306,7 @@
     59.72,
     59.72,
     53.77,
+    52.75,
     52.75,
     52.75
   ],
