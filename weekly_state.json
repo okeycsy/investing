@@ -63,7 +63,8 @@
     "Sale: Robinhood Markets, Inc. 6,642주 중규모",
     "Sale: Robinhood Markets, Inc. 10,756주 중규모",
     "Sale: Robinhood Markets, Inc. 53,407주 대규모",
-    "Sale: Robinhood Markets, Inc. 16,200주 중규모"
+    "Sale: Robinhood Markets, Inc. 16,200주 중규모",
+    "Purchase: Malka Meyer 250,000주 대규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -374,7 +375,8 @@
     54.03,
     54.03,
     53.27,
-    50.48
+    50.48,
+    52.49
   ],
   "pcr_readings": [
     0.715,
