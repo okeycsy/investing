@@ -64,7 +64,12 @@
     "Sale: Robinhood Markets, Inc. 10,756주 중규모",
     "Sale: Robinhood Markets, Inc. 53,407주 대규모",
     "Sale: Robinhood Markets, Inc. 16,200주 중규모",
-    "Purchase: Malka Meyer 250,000주 대규모"
+    "Purchase: Malka Meyer 250,000주 대규모",
+    "Sale: Robinhood Markets, Inc. 17,050주 중규모",
+    "Sale: Robinhood Markets, Inc. 25,856주 중규모",
+    "Sale: Robinhood Markets, Inc. 990주 소규모",
+    "Sale: Robinhood Markets, Inc. 2,000주 소규모",
+    "Sale: Robinhood Markets, Inc. 2,500주 중규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -179,7 +184,8 @@
     "HOOD, Zacks Bear of the Day 선정",
     "예측 시장 사업 확대 통해 새로운 수익 기회 창출",
     "캔터, 예측시장 벤처 평가로 HOOD 목표가 상향",
-    "로빈후드, IPO 인수 허가 획득"
+    "로빈후드, IPO 인수 허가 획득",
+    "초기 투자자의 대규모 베팅, CEO의 IPO 혁신 공약"
   ],
   "rsi_readings": [
     54.03,
@@ -381,7 +387,8 @@
     52.49,
     52.49,
     52.49,
-    52.49
+    52.49,
+    53.94
   ],
   "pcr_readings": [
     0.715,
