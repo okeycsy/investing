@@ -1,6 +1,11 @@
 {
   "last_price": 65.16,
   "last_news_hashes": [
+    "c230d351a599",
+    "140de3ab2df8",
+    "b3ae111b1fac",
+    "52271d3a2ff6",
+    "c80dabafb29e",
     "41c0ff4a7842",
     "789dac848ec5",
     "2e5f7d988c3c",
@@ -10,12 +15,7 @@
     "2664515b53a5",
     "b0aa562afba8",
     "ca42d6191bac",
-    "689fc61ab7c0",
-    "2ce7e3b3ac95",
-    "815ca435d33f",
-    "1601101ae432",
-    "e720cb899a0e",
-    "2c064baa56e6"
+    "689fc61ab7c0"
   ],
   "last_insider_hashes": [
     "5bf3d217776f",
@@ -47,7 +47,6 @@
   ],
   "last_13f_hashes": [],
   "price_history": [
-    77.35,
     74.9,
     74.16,
     70.89,
@@ -106,7 +105,8 @@
     82.47,
     85.04,
     83.77,
-    86.36
+    86.36,
+    88.88
   ],
   "weekly_data": {
     "prices": [],
@@ -114,9 +114,9 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 6.31,
-  "price_alert_direction": "up",
-  "price_alert_date": "2026-06-11",
+  "price_alert_max_pct": 0,
+  "price_alert_direction": "",
+  "price_alert_date": "2026-06-12",
   "pending_morning_alert": null,
   "dca_shares": 1969.0,
   "dca_avg_price": 99.9012,
