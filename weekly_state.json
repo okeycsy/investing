@@ -207,7 +207,11 @@
     "소매 투자자, SpaceX 배분 관련 반응",
     "SpaceX IPO 거래 급증으로 서비스 장애 발생",
     "SpaceX 상장 후 기록적 트래픽 달성",
-    "SpaceX 거래 초기 단계에서 고객 장애 경험"
+    "SpaceX 거래 초기 단계에서 고객 장애 경험",
+    "Robinhood 주가 큰 변동성",
+    "SpaceX IPO로 Robinhood 주가 상승",
+    "SpaceX IPO로 Robinhood 거래 장애 발생",
+    "소매 증권사들 SpaceX IPO 무난히 처리"
   ],
   "rsi_readings": [
     54.03,
@@ -427,7 +431,8 @@
     60.52,
     60.52,
     62.86,
-    60.97
+    60.97,
+    61.34
   ],
   "pcr_readings": [
     0.715,
