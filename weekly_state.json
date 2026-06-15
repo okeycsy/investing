@@ -20,7 +20,8 @@
     "주가 +4.1%",
     "주가 +6.3%",
     "주가 +8.0%",
-    "주가 +6.8%"
+    "주가 +6.8%",
+    "주가 +5.1%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -73,7 +74,16 @@
     "Sale: Robinhood Markets, Inc. 25,856주 중규모",
     "Sale: Robinhood Markets, Inc. 990주 소규모",
     "Sale: Robinhood Markets, Inc. 2,000주 소규모",
-    "Sale: Robinhood Markets, Inc. 2,500주 중규모"
+    "Sale: Robinhood Markets, Inc. 2,500주 중규모",
+    "Sale: Verma Shiv 3,984주 중규모",
+    "Sale: Bhatt Baiju 5,000주 중규모",
+    "Sale: Bhatt Baiju 12,280주 대규모",
+    "Sale: Bhatt Baiju 8,013주 중규모",
+    "Sale: Bhatt Baiju 9,951주 중규모",
+    "Sale: Bhatt Baiju 3,400주 중규모",
+    "Sale: Bhatt Baiju 6,448주 중규모",
+    "Sale: Bhatt Baiju 10,392주 중규모",
+    "Sale: Bhatt Baiju 2,414주 중규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -215,7 +225,9 @@
     "소매 증권사들 SpaceX IPO 무난히 처리",
     "로빈후드 인사자 3,500만 달러 주식 매수",
     "SpaceX 상장 거래 중 5,000건 장애 발생",
-    "IPO 인수업 규제 승인 획득"
+    "IPO 인수업 규제 승인 획득",
+    "애널리스트, HOOD 목표주가 상향",
+    "예측시장 수익, 2026년 대폭 증가 전망"
   ],
   "rsi_readings": [
     54.03,
@@ -447,7 +459,8 @@
     61.34,
     61.34,
     61.34,
-    66.3
+    66.3,
+    65.44
   ],
   "pcr_readings": [
     0.715,

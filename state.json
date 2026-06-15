@@ -1,23 +1,32 @@
 {
   "last_price": 65.16,
   "last_news_hashes": [
+    "75aea4729355",
+    "54ddb110eefc",
+    "b03ab5b9d7ef",
+    "8030641fddac",
+    "c8d06c402a57",
+    "df16dee11215",
+    "74e4ae8a3e09",
     "fcc711aa9480",
     "6f2d330c372a",
-    "c8d06c402a57",
     "db83eac24f88",
     "2ce7e3b3ac95",
     "cd9e2f934025",
     "0744aca5ed1f",
     "6af0639ca7bc",
-    "2c0fdd586bdb",
-    "b14d3e0014f0",
-    "a069f2f47364",
-    "3f96c31cd85a",
-    "eba1b5b97216",
-    "cd5419d33fa8",
-    "ebec043bf8a9"
+    "2c0fdd586bdb"
   ],
   "last_insider_hashes": [
+    "e0b847b94709",
+    "9bbe5ffc1798",
+    "e0ae12d98e30",
+    "682538b0279e",
+    "2830cb48620d",
+    "1b3c352f00e7",
+    "614df8769114",
+    "47b08cf19ba9",
+    "ddf5d09e5729",
     "5bf3d217776f",
     "b89a072716a7",
     "f2ddf3f464c4",
@@ -38,12 +47,7 @@
     "3121891159a8",
     "0c076b4a1c0f",
     "e18fd3cbeacf",
-    "0c4be651f5aa",
-    "1b44c020d863",
-    "73cd9dd702e9",
-    "221cfc27368b",
-    "f5b4b7d83b5a",
-    "4d3b99c66ecc"
+    "0c4be651f5aa"
   ],
   "last_13f_hashes": [],
   "price_history": [
@@ -106,7 +110,7 @@
     86.36,
     92.23,
     93.19,
-    99.34
+    98.12
   ],
   "weekly_data": {
     "prices": [],
@@ -114,9 +118,9 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 6.85,
+  "price_alert_max_pct": 5.06,
   "price_alert_direction": "up",
-  "price_alert_date": "2026-06-15",
+  "price_alert_date": "2026-06-16",
   "pending_morning_alert": null,
   "dca_shares": 1969.0,
   "dca_avg_price": 99.9012,
