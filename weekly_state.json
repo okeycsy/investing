@@ -91,6 +91,8 @@
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
+    "Award: Payne Christopher D 3,289주 소규모",
+    "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모"
   ],
   "news_headlines": [
@@ -241,7 +243,13 @@
     "Robinhood, 직원 10% 감원 발표",
     "Robinhood 주가 상승, 감원 발표",
     "Robinhood(HOOD) 주가 급등",
-    "HOOD, AI 거래 출시 후 주가 조정"
+    "HOOD, AI 거래 출시 후 주가 조정",
+    "로빈후드 10% 인력감축",
+    "암호화폐 수익 감소로 10% 인력감축",
+    "로빈후드 직원 10% 감축",
+    "AI 탓 핑계 안 되는 10% 인력감축",
+    "로빈후드 10% 감원",
+    "HOOD vs IBKR 비교분석"
   ],
   "rsi_readings": [
     54.03,
@@ -478,7 +486,8 @@
     65.44,
     65.44,
     65.44,
-    65.44
+    65.44,
+    63.64
   ],
   "pcr_readings": [
     0.715,
