@@ -21,7 +21,8 @@
     "주가 +6.3%",
     "주가 +8.0%",
     "주가 +6.8%",
-    "주가 +5.1%"
+    "주가 +5.1%",
+    "주가 +11.1%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -84,6 +85,8 @@
     "Sale: Bhatt Baiju 6,448주 중규모",
     "Sale: Bhatt Baiju 10,392주 중규모",
     "Sale: Bhatt Baiju 2,414주 중규모",
+    "Award: Hegeman John William 3,289주 소규모",
+    "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
@@ -268,7 +271,9 @@
     "로빈후드, 직원 10% 감원",
     "CEO 테네프, '모두에게 주인의식' 비전 제시",
     "로빈후드 10% 감원, 신규 채용 지속",
-    "HOOD 감원 뉴스: 직원 10% 감축"
+    "HOOD 감원 뉴스: 직원 10% 감축",
+    "HOOD 목표가 $105로 상향",
+    "HOOD 기록적 거래량 속 인력 조정"
   ],
   "rsi_readings": [
     54.03,
@@ -512,7 +517,8 @@
     63.36,
     63.36,
     63.36,
-    65.36
+    65.36,
+    70.83
   ],
   "pcr_readings": [
     0.715,
