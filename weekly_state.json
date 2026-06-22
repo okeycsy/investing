@@ -164,6 +164,8 @@
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
+    "Award: Payne Christopher D 3,289주 소규모",
+    "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모"
   ],
   "news_headlines": [
@@ -343,7 +345,13 @@
     "AI 트레이딩 기능 50,000명 사용자 돌파",
     "Schwab, 예측 시장 진출로 HOOD와 경쟁 심화",
     "Robinhood, 시장 규칙 폐지 추진 지지",
-    "Robinhood의 풀서비스 금융 플랫폼 전환 평가"
+    "Robinhood의 풀서비스 금융 플랫폼 전환 평가",
+    "Robinhood 수십억 달러 규모 조치로 주가 하락",
+    "Robinhood 20억 달러 전환사채 발행 추진",
+    "Robinhood 20억 달러 전환사채 발행, 3억 달러 자사주 매입",
+    "Robinhood 20억 달러 전환사채 발행 공시 후 주가 하락",
+    "Robinhood 인원감축 발표, 월스트릿 초점은 다른 곳",
+    "Robinhood 주가 20억 달러 채무 공시 후 4% 하락"
   ],
   "rsi_readings": [
     54.03,
@@ -616,7 +624,8 @@
     71.27,
     71.27,
     71.27,
-    71.27
+    71.27,
+    67.85
   ],
   "pcr_readings": [
     0.715,
