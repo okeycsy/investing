@@ -22,7 +22,8 @@
     "주가 +8.0%",
     "주가 +6.8%",
     "주가 +5.1%",
-    "주가 +11.1%"
+    "주가 +11.1%",
+    "주가 -4.8%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -85,6 +86,8 @@
     "Sale: Bhatt Baiju 6,448주 중규모",
     "Sale: Bhatt Baiju 10,392주 중규모",
     "Sale: Bhatt Baiju 2,414주 중규모",
+    "Award: Hegeman John William 3,289주 소규모",
+    "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
@@ -357,7 +360,10 @@
     "Robinhood 20억 달러 전환사채 발행, 3억 달러 자사주 매입",
     "Robinhood 20억 달러 전환사채 발행 공시 후 주가 하락",
     "Robinhood 인원감축 발표, 월스트릿 초점은 다른 곳",
-    "Robinhood 주가 20억 달러 채무 공시 후 4% 하락"
+    "Robinhood 주가 20억 달러 채무 공시 후 4% 하락",
+    "로빈후드, 20억 달러 무이자 전환사채 발행",
+    "로빈후드 구조조정, AI 도입으로 인한 인력 감축",
+    "로빈후드 주가 하락, 20억 달러 자본조달 영향"
   ],
   "rsi_readings": [
     54.03,
@@ -631,6 +637,7 @@
     71.27,
     71.27,
     71.27,
+    67.85,
     67.85,
     67.85,
     67.85,
