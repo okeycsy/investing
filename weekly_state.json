@@ -23,7 +23,8 @@
     "주가 +6.8%",
     "주가 +5.1%",
     "주가 +11.1%",
-    "주가 -4.8%"
+    "주가 -4.8%",
+    "주가 -6.3%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -86,6 +87,8 @@
     "Sale: Bhatt Baiju 6,448주 중규모",
     "Sale: Bhatt Baiju 10,392주 중규모",
     "Sale: Bhatt Baiju 2,414주 중규모",
+    "Award: Hegeman John William 3,289주 소규모",
+    "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
@@ -681,7 +684,8 @@
     64.61,
     64.61,
     64.61,
-    59.63
+    59.63,
+    56.6
   ],
   "pcr_readings": [
     0.715,
