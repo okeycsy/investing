@@ -1,6 +1,9 @@
 {
   "last_price": 65.16,
   "last_news_hashes": [
+    "8b47bcf73577",
+    "16bd68b8edb8",
+    "1d74cc3c726d",
     "40c3c40f6ccc",
     "43be48985561",
     "e97a34f8ab1a",
@@ -12,10 +15,7 @@
     "49bc225d98e6",
     "d79ade930ebb",
     "c78c932cbdb7",
-    "ddc7a87c5253",
-    "b796c13ac309",
-    "e32ca6d0006a",
-    "9d77b6165978"
+    "ddc7a87c5253"
   ],
   "last_insider_hashes": [
     "e0b847b94709",
