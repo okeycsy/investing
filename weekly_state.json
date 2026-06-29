@@ -265,6 +265,8 @@
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
+    "Award: Payne Christopher D 3,289주 소규모",
+    "Award: Hegeman John William 3,289주 소규모",
     "Award: Payne Christopher D 3,289주 소규모"
   ],
   "news_headlines": [
@@ -466,7 +468,12 @@
     "SCHW vs HOOD 밸류에이션 비교",
     "애널리스트, 로빈후드 30% 상승 전망",
     "SpaceX IPO로 Robinhood 수혜 가능성",
-    "Robinhood 신규 '매수' 등급 획득"
+    "Robinhood 신규 '매수' 등급 획득",
+    "Robinhood, 예측시장 M&A 대상 가능성",
+    "Robinhood CFO, 정책대응담당자 역할 해제",
+    "Robinhood 6월 실적 우호적, 애널리스트 강세 평가",
+    "Robinhood 6월 거래량 사상 최고, 주가 상승",
+    "HOOD, 9월 이후 최고 분기 예상, 애널리스트 27% 추가 상승 전망"
   ],
   "rsi_readings": [
     54.03,
@@ -787,7 +794,8 @@
     52.75,
     57.45,
     57.45,
-    57.45
+    57.45,
+    60.1
   ],
   "pcr_readings": [
     0.715,
