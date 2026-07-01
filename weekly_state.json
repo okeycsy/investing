@@ -29,7 +29,8 @@
     "주가 +4.0%",
     "주가 +5.1%",
     "주가 +4.4%",
-    "주가 +7.5%"
+    "주가 +7.5%",
+    "주가 +8.6%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -305,7 +306,13 @@
     "Award: Malka Meyer 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Malka Meyer 3,289주 소규모",
-    "Award: Hegeman John William 3,289주 소규모"
+    "Award: Hegeman John William 3,289주 소규모",
+    "Sale: Robinhood Markets, Inc. 3,171주 중규모",
+    "Sale: Robinhood Markets, Inc. 4,558주 중규모",
+    "Sale: Robinhood Markets, Inc. 638주 소규모",
+    "Sale: Robinhood Markets, Inc. 12,637주 중규모",
+    "Sale: Robinhood Markets, Inc. 9,463주 중규모",
+    "Award: Malka Meyer 3,289주 소규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -860,6 +867,7 @@
     58.22,
     61.9,
     64.08,
+    64.63,
     64.63,
     64.63
   ],

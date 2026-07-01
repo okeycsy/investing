@@ -18,6 +18,11 @@
     "fac65b837c7d"
   ],
   "last_insider_hashes": [
+    "1e927de70fc9",
+    "5e80a8ede70e",
+    "1152ebdc813b",
+    "af242c71c8b8",
+    "d2bd013e2a93",
     "a6426b95f373",
     "e0b847b94709",
     "9bbe5ffc1798",
@@ -42,12 +47,7 @@
     "29f68b5c4dcf",
     "2374208767d2",
     "53cdb333292a",
-    "03feb0615b91",
-    "a43c6f80ece7",
-    "62f9f77f6a15",
-    "3121891159a8",
-    "0c076b4a1c0f",
-    "e18fd3cbeacf"
+    "03feb0615b91"
   ],
   "last_13f_hashes": [],
   "price_history": [
@@ -118,7 +118,7 @@
     "insider_trades": [],
     "news_headlines": []
   },
-  "price_alert_max_pct": 7.54,
+  "price_alert_max_pct": 8.55,
   "price_alert_direction": "up",
   "price_alert_date": "2026-07-02",
   "pending_morning_alert": null,
