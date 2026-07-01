@@ -27,7 +27,8 @@
     "주가 -6.3%",
     "주가 -4.2%",
     "주가 +4.0%",
-    "주가 +5.1%"
+    "주가 +5.1%",
+    "주가 +4.4%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -295,6 +296,8 @@
     "Award: Malka Meyer 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모",
     "Award: Malka Meyer 3,289주 소규모",
+    "Award: Hegeman John William 3,289주 소규모",
+    "Award: Malka Meyer 3,289주 소규모",
     "Award: Hegeman John William 3,289주 소규모"
   ],
   "news_headlines": [
@@ -505,7 +508,8 @@
     "Robinhood 슈퍼앱 비전 평가",
     "로빈후드 주가 상승 4가지 이유 월가 분석",
     "BTIG, Robinhood 매수 추천",
-    "Robinhood vs Coinbase 투자 가치 비교"
+    "Robinhood vs Coinbase 투자 가치 비교",
+    "HOOD 약한 실적으로 주가 하락"
   ],
   "rsi_readings": [
     54.03,
@@ -841,7 +845,8 @@
     58.22,
     58.22,
     58.22,
-    58.22
+    58.22,
+    61.9
   ],
   "pcr_readings": [
     0.715,
