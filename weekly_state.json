@@ -349,6 +349,12 @@
     "Sale: Quirk Steven M. 2,297주 중규모",
     "Purchase: Malka Meyer 181,000주 대규모",
     "Sale: Malka Meyer 801주 소규모",
+    "Award: Malka Meyer 3,289주 소규모",
+    "Sale: Gallagher Daniel Martin Jr 200주 소규모",
+    "Sale: Quirk Steven M. 8,540주 중규모",
+    "Sale: Quirk Steven M. 2,297주 중규모",
+    "Purchase: Malka Meyer 181,000주 대규모",
+    "Sale: Malka Meyer 801주 소규모",
     "Award: Malka Meyer 3,289주 소규모"
   ],
   "news_headlines": [
@@ -578,7 +584,11 @@
     "1inch, Robinhood Chain 통합 2,700만 사용자 접근",
     "AI 에이전트 인간 수준 거래 능력 곧 달성",
     "강기 애널리스트 평가로 6% 상승",
-    "로빈후드 체인 공개 블록체인 출시"
+    "로빈후드 체인 공개 블록체인 출시",
+    "1inch, Robinhood Chain 통합 토큰화 주식 거래",
+    "Robinhood 주가, 새로운 블록체인 네트워크 출시로 상승",
+    "Robinhood, 유럽에서 무기한 선물거래·AI 플랫폼 출시",
+    "Robinhood 주가 급등, 글로벌 확장·AI·24/7 거래"
   ],
   "rsi_readings": [
     54.03,
@@ -925,7 +935,8 @@
     64.63,
     64.63,
     64.63,
-    67.7
+    67.7,
+    66.3
   ],
   "pcr_readings": [
     0.715,
