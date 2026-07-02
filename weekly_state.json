@@ -324,6 +324,12 @@
     "Sale: Quirk Steven M. 2,297주 중규모",
     "Purchase: Malka Meyer 181,000주 대규모",
     "Sale: Malka Meyer 801주 소규모",
+    "Award: Malka Meyer 3,289주 소규모",
+    "Sale: Gallagher Daniel Martin Jr 200주 소규모",
+    "Sale: Quirk Steven M. 8,540주 중규모",
+    "Sale: Quirk Steven M. 2,297주 중규모",
+    "Purchase: Malka Meyer 181,000주 대규모",
+    "Sale: Malka Meyer 801주 소규모",
     "Award: Malka Meyer 3,289주 소규모"
   ],
   "news_headlines": [
@@ -540,7 +546,9 @@
     "유럽·캐나다·싱가포르 국제 확장 가속화",
     "트럼프 계좌 앱 출시, 7월 4일 정식 론칭",
     "Robinhood, AI 기반 L2 네트워크 공개 mainnet 출시",
-    "Robinhood, Morpho 프로토콜 운영 개시"
+    "Robinhood, Morpho 프로토콜 운영 개시",
+    "유럽 파생상품 진출, 영국 암호화폐 시장 진출",
+    "기네스 세계기록 달성"
   ],
   "rsi_readings": [
     54.03,
@@ -879,6 +887,7 @@
     58.22,
     61.9,
     64.08,
+    64.63,
     64.63,
     64.63,
     64.63,
