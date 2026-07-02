@@ -30,7 +30,8 @@
     "주가 +5.1%",
     "주가 +4.4%",
     "주가 +7.5%",
-    "주가 +8.6%"
+    "주가 +8.6%",
+    "주가 +4.5%"
   ],
   "insider_trades": [
     "Sale: Verma Shiv 3,686주 중규모",
@@ -342,6 +343,12 @@
     "Sale: Quirk Steven M. 2,297주 중규모",
     "Purchase: Malka Meyer 181,000주 대규모",
     "Sale: Malka Meyer 801주 소규모",
+    "Award: Malka Meyer 3,289주 소규모",
+    "Sale: Gallagher Daniel Martin Jr 200주 소규모",
+    "Sale: Quirk Steven M. 8,540주 중규모",
+    "Sale: Quirk Steven M. 2,297주 중규모",
+    "Purchase: Malka Meyer 181,000주 대규모",
+    "Sale: Malka Meyer 801주 소규모",
     "Award: Malka Meyer 3,289주 소규모"
   ],
   "news_headlines": [
@@ -569,7 +576,9 @@
     "CEO, 소매 투자자 프로급 거래 제공 목표 언급",
     "CEO, AI 거래 인간 수준 달성 가능 언급",
     "1inch, Robinhood Chain 통합 2,700만 사용자 접근",
-    "AI 에이전트 인간 수준 거래 능력 곧 달성"
+    "AI 에이전트 인간 수준 거래 능력 곧 달성",
+    "강기 애널리스트 평가로 6% 상승",
+    "로빈후드 체인 공개 블록체인 출시"
   ],
   "rsi_readings": [
     54.03,
@@ -915,7 +924,8 @@
     64.63,
     64.63,
     64.63,
-    64.63
+    64.63,
+    67.7
   ],
   "pcr_readings": [
     0.715,
