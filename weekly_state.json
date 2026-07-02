@@ -336,6 +336,12 @@
     "Sale: Quirk Steven M. 2,297주 중규모",
     "Purchase: Malka Meyer 181,000주 대규모",
     "Sale: Malka Meyer 801주 소규모",
+    "Award: Malka Meyer 3,289주 소규모",
+    "Sale: Gallagher Daniel Martin Jr 200주 소규모",
+    "Sale: Quirk Steven M. 8,540주 중규모",
+    "Sale: Quirk Steven M. 2,297주 중규모",
+    "Purchase: Malka Meyer 181,000주 대규모",
+    "Sale: Malka Meyer 801주 소규모",
     "Award: Malka Meyer 3,289주 소규모"
   ],
   "news_headlines": [
@@ -555,7 +561,15 @@
     "Robinhood, Morpho 프로토콜 운영 개시",
     "유럽 파생상품 진출, 영국 암호화폐 시장 진출",
     "기네스 세계기록 달성",
-    "로빈후드 AI 기네스 신기록 달성, 사전장에서 주가 하락"
+    "로빈후드 AI 기네스 신기록 달성, 사전장에서 주가 하락",
+    "CEO, AI 에이전트 인간 수준 거래 가능성 언급",
+    "기관 투자사 'Top Picks' 리스트에 추가",
+    "Robinhood Chain 출시, 주가 8% 상승",
+    "Chain 출시·AI 기록으로 주가 8% 상승",
+    "CEO, 소매 투자자 프로급 거래 제공 목표 언급",
+    "CEO, AI 거래 인간 수준 달성 가능 언급",
+    "1inch, Robinhood Chain 통합 2,700만 사용자 접근",
+    "AI 에이전트 인간 수준 거래 능력 곧 달성"
   ],
   "rsi_readings": [
     54.03,
@@ -894,6 +908,7 @@
     58.22,
     61.9,
     64.08,
+    64.63,
     64.63,
     64.63,
     64.63,
