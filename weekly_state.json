@@ -361,6 +361,12 @@
     "Sale: Quirk Steven M. 2,297주 중규모",
     "Purchase: Malka Meyer 181,000주 대규모",
     "Sale: Malka Meyer 801주 소규모",
+    "Award: Malka Meyer 3,289주 소규모",
+    "Sale: Gallagher Daniel Martin Jr 200주 소규모",
+    "Sale: Quirk Steven M. 8,540주 중규모",
+    "Sale: Quirk Steven M. 2,297주 중규모",
+    "Purchase: Malka Meyer 181,000주 대규모",
+    "Sale: Malka Meyer 801주 소규모",
     "Award: Malka Meyer 3,289주 소규모"
   ],
   "news_headlines": [
@@ -944,7 +950,8 @@
     64.63,
     67.7,
     66.3,
-    66.68
+    66.68,
+    67.21
   ],
   "pcr_readings": [
     0.715,
