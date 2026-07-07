@@ -379,7 +379,11 @@
     "Award: Payne Christopher D 236주 소규모",
     "Award: SEGAL SUSAN 243주 소규모",
     "Award: RUBINSTEIN JONATHAN 373주 소규모",
-    "Award: Bhatt Baiju 124주 소규모"
+    "Award: Bhatt Baiju 124주 소규모",
+    "Sale: Quirk Steven M. 19,377주 대규모",
+    "Sale: Treseder Oluwadara Johnson 1,875주 중규모",
+    "Sale: Treseder Oluwadara Johnson 1,875주 중규모",
+    "Sale: Loop Paula 8,336주 대규모"
   ],
   "news_headlines": [
     "HOOD Q1 실적, 자사주 매입, 암호화폐 부진",
@@ -629,7 +633,8 @@
     "Robinhood 비즈니스 모멘텀, 어닝 추정치 초과",
     "Robinhood, DeFi·토큰화·AI 중심 글로벌 확장",
     "Robinhood, USDG 7% 수익률 제공, 2,770만 고객 대상",
-    "Gemini 0% 수수료 주식거래 출시, 경쟁 심화"
+    "Gemini 0% 수수료 주식거래 출시, 경쟁 심화",
+    "Gemini, 주식거래 수수료 제로 정책 시작"
   ],
   "rsi_readings": [
     54.03,
@@ -1011,7 +1016,8 @@
     70.11,
     70.11,
     68.01,
-    65.18
+    65.18,
+    64.35
   ],
   "pcr_readings": [
     0.715,
