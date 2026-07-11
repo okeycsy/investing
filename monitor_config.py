@@ -20,7 +20,7 @@ class MonitorConfig:
     benchmark: str = "QQQ"
     peer_tickers: tuple[str, ...] = ("COIN", "MSTR")
     app_store_id: str = "938003185"
-    state_dir: str = "."
+    state_dir: str = "state"
     market_scan_focus: str = ""
     sec_contact: str = "contact@example.com"
 
@@ -141,6 +141,7 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
     raw = _read_markdown_config(config_file)
     selected_profile = normalize_ticker(
         os.environ.get("MONITOR_PROFILE", "")
+        or os.environ.get("MONITOR_TICKER", "")
         or raw.get("profile", "")
         or raw.get("ticker", "")
     )
@@ -159,7 +160,7 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
         benchmark=normalize_ticker(_env_or_default("MONITOR_BENCHMARK", values.get("benchmark", "QQQ"))) or "QQQ",
         peer_tickers=_parse_list(peer_source),
         app_store_id=_env_or_default("MONITOR_APP_STORE_ID", values.get("app_store_id", "")).strip(),
-        state_dir=_env_or_default("MONITOR_STATE_DIR", values.get("state_dir", ".")).strip() or ".",
+        state_dir=_env_or_default("MONITOR_STATE_DIR", values.get("state_dir", "state")).strip() or "state",
         market_scan_focus=normalize_ticker(_env_or_default("MARKET_SCAN_FOCUS_TICKER", values.get("market_scan_focus", ""))),
         sec_contact=_env_or_default("SEC_CONTACT", values.get("sec_contact", "contact@example.com")).strip(),
     )
@@ -170,23 +171,9 @@ def resolve_runtime_file(config: MonitorConfig, legacy_name: str, env_var: str) 
     if override:
         return Path(override)
 
-    legacy_path = ROOT / legacy_name
-    if config.ticker == "HOOD" and legacy_path.exists():
-        return legacy_path
-
     state_dir = Path(config.state_dir)
     if not state_dir.is_absolute():
         state_dir = ROOT / state_dir
 
-    if legacy_name == "state.json":
-        filename = f"{config.ticker.lower()}_state.json"
-    elif legacy_name == "weekly_state.json":
-        filename = f"{config.ticker.lower()}_weekly_state.json"
-    elif legacy_name == "beta_cache.json":
-        filename = f"{config.ticker.lower()}_beta_cache.json"
-    elif legacy_name == "app_rank_cache.json":
-        filename = f"{config.ticker.lower()}_app_rank_cache.json"
-    else:
-        filename = f"{config.ticker.lower()}_{legacy_name}"
-
-    return state_dir / filename
+    ticker_dir = normalize_ticker(config.ticker) or "UNKNOWN"
+    return state_dir / ticker_dir / legacy_name

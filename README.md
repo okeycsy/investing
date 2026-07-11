@@ -10,6 +10,7 @@ GitHub Actions 기반 미국 주식 모니터링 봇입니다. 기본값은 `$HO
 - `gitignore`를 `.gitignore`로 바로잡았습니다.
 - GitHub Actions 설치 명령을 `pip install -r requirements.txt`로 통일했습니다.
 - `Live Smoke Test`는 `main` push 때도 Yahoo/SEC/Slack 실전 연결을 확인합니다.
+- 상태와 캐시는 `state/{TICKER}/` 아래에 종목별로 저장합니다.
 
 ## 종목 변경
 
@@ -32,6 +33,19 @@ market_scan_focus: $VRT
 ```
 
 `cik`는 SEC Form 4 내부자 거래 조회에 필요합니다. 해당 종목에 앱스토어 순위 추적이 없으면 `app_store_id`는 비워두면 됩니다. `MONITOR_PROFILE` 또는 `MONITOR_TICKER` 환경 변수로도 실행 시점에 종목을 바꿀 수 있습니다.
+
+## 상태 파일
+
+런타임 상태와 캐시는 종목별 디렉터리에 저장됩니다.
+
+```text
+state/HOOD/state.json
+state/HOOD/weekly_state.json
+state/HOOD/beta_cache.json
+state/HOOD/app_rank_cache.json
+```
+
+`ticker: $VRT`로 바꾸면 같은 이름의 파일들이 `state/VRT/` 아래에 새로 생성됩니다.
 
 ## GitHub Secrets
 

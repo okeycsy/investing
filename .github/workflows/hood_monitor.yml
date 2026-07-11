@@ -99,6 +99,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f state.json weekly_state.json beta_cache.json app_rank_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json 2>/dev/null || true
+          git add -f state/*/*.json state.json weekly_state.json beta_cache.json app_rank_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json 2>/dev/null || true
           git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
           git push || true
