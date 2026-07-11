@@ -1,6 +1,6 @@
 # Ticker Monitor
 
-GitHub Actions 기반 미국 주식 모니터링 봇입니다. 기본값은 `$HOOD`지만, `monitor_config.md`에서 종목을 바꾸면 같은 기능을 다른 티커에 적용할 수 있도록 재개발 중입니다.
+GitHub Actions 기반 미국 주식 모니터링 봇입니다. 현재 기본 모니터링 종목은 `$VRT`이며, `monitor_config.md`에서 종목을 바꾸면 같은 기능을 다른 티커에 적용할 수 있습니다.
 
 ## 1차 정리 범위
 
@@ -39,13 +39,13 @@ market_scan_focus: $VRT
 런타임 상태와 캐시는 종목별 디렉터리에 저장됩니다.
 
 ```text
-state/HOOD/state.json
-state/HOOD/weekly_state.json
-state/HOOD/beta_cache.json
-state/HOOD/app_rank_cache.json
+state/VRT/state.json
+state/VRT/weekly_state.json
+state/VRT/beta_cache.json
+state/VRT/app_rank_cache.json
 ```
 
-`ticker: $VRT`로 바꾸면 같은 이름의 파일들이 `state/VRT/` 아래에 새로 생성됩니다.
+현재 기본값인 `ticker: $VRT`는 같은 이름의 파일들을 `state/VRT/` 아래에 생성합니다. 기존 HOOD 기록은 `state/HOOD/`에 남아 있습니다.
 
 ## GitHub Secrets
 
@@ -75,7 +75,6 @@ python hood_monitor.py morning
 python hood_monitor.py weekly
 python hood_monitor.py 13f
 
-python market_scan.py
 python market_scan.py --ticker VRT
 
 python backtest.py --ticker VRT --years 2 --no-slack

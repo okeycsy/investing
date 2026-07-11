@@ -1,4 +1,4 @@
-name: Ticker Monitor
+name: VRT Monitor
 
 on:
   schedule:
