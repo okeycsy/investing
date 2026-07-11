@@ -277,6 +277,24 @@ BETA_CACHE_FILE = resolve_runtime_file(CONFIG, "beta_cache.json", "MONITOR_BETA_
 BETA_BENCHMARK = CONFIG.benchmark
 
 
+def _direction_label(change_pct: float) -> str:
+    return "양전" if change_pct >= 0 else "음전"
+
+
+def _relative_label(actual_pct: float, benchmark_pct: Optional[float]) -> str:
+    if benchmark_pct is None:
+        return f"{BETA_BENCHMARK} 데이터 없음"
+    if actual_pct > benchmark_pct:
+        return f"{BETA_BENCHMARK} 대비 아웃퍼폼"
+    return f"{BETA_BENCHMARK} 대비 아웃퍼폼 아님"
+
+
+def _relative_reason(price: Optional[PriceData], benchmark_pct: Optional[float]) -> list:
+    if not price or price.prev_close <= 0:
+        return []
+    return [("info", _relative_label(price.change_pct, benchmark_pct))]
+
+
 def _fetch_yearly_closes(ticker: str) -> list:
     """1년치 일간 종가 반환"""
     _yahoo_throttle()
@@ -391,67 +409,19 @@ def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> d
 
 
 def format_beta_block(bd: dict) -> list:
-    """상대 강도 통합 블록 — 지수 대비(β 기반) + 피어 대비"""
-    div      = bd["divergence"]
-    beta     = bd["beta"]
-    expected = bd["expected_pct"]
-    actual   = bd["actual_pct"]
-    qqq_pct  = bd["qqq_pct"]
-    peer_diff = bd["peer_diff"]
-    peer_avg  = bd["peer_avg"]
-    peer_changes = bd.get("peer_changes", {})
-    peer_label = "/".join(peer_changes.keys()) if peer_changes else "피어"
-
-    # ── 지수 대비 (β 기반) ──
-    if div >= 3:
-        vs_index = "🟢 *아웃퍼폼*"
-        vs_index_desc = f"β 기대치보다 {div:+.1f}%p 초과 상승"
-    elif div >= 1:
-        vs_index = "🟡 *소폭 아웃퍼폼*"
-        vs_index_desc = f"기대 범위 상단 ({div:+.1f}%p)"
-    elif div <= -3:
-        vs_index = "🔴 *언더퍼폼*"
-        vs_index_desc = f"β 기대치보다 {div:+.1f}%p 초과 하락"
-    elif div <= -1:
-        vs_index = "🟠 *소폭 언더퍼폼*"
-        vs_index_desc = f"기대 범위 하단 ({div:+.1f}%p)"
-    else:
-        vs_index = "⚪ *기대 범위 내*"
-        vs_index_desc = f"시장 움직임과 부합 ({div:+.1f}%p)"
-
-    # ── 피어 대비 ──
-    if peer_diff >= 2:
-        vs_peer = "🟢 *피어 아웃퍼폼*"
-        vs_peer_desc = f"{peer_label} 평균보다 {peer_diff:+.1f}%p 강세"
-    elif peer_diff >= 0.5:
-        vs_peer = "🟡 *피어 소폭 강세*"
-        vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
-    elif peer_diff <= -2:
-        vs_peer = "🔴 *피어 언더퍼폼*"
-        vs_peer_desc = f"{peer_label} 평균보다 {peer_diff:+.1f}%p 약세"
-    elif peer_diff <= -0.5:
-        vs_peer = "🟠 *피어 소폭 약세*"
-        vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
-    else:
-        vs_peer = "⚪ *피어 동조*"
-        vs_peer_desc = f"피어 평균과 유사 ({peer_diff:+.1f}%p)"
-
+    """가격·등락률 숫자 없이 방향과 SOXX 상대 성과만 표시."""
+    actual = bd["actual_pct"]
+    benchmark_pct = bd["qqq_pct"]
+    direction = _direction_label(actual)
+    relative = _relative_label(actual, benchmark_pct)
+    icon = "🟢" if benchmark_pct is not None and actual > benchmark_pct else "⚪"
     return [
         _sec(
-            f"*📐 상대 강도*  β = *{beta:.2f}*\n"
-            f"지수 대비: {vs_index} — {vs_index_desc}\n"
-            f"피어 대비: {vs_peer} — {vs_peer_desc}"
+            f"*📐 방향 / {BETA_BENCHMARK} 상대 성과*\n"
+            f"{DISPLAY_TICKER}: *{direction}*\n"
+            f"{icon} *{relative}*"
         ),
-        _ctx(
-            f"*기대수익률 ({TICKER}) {expected:+.2f}%* (β×{BETA_BENCHMARK})  |  "
-            f"*실제수익률 ({TICKER}) {actual:+.2f}%*  |  "
-            f"*{BETA_BENCHMARK} {qqq_pct:+.2f}%*"
-        ),
-        _ctx(
-            "피어: "
-            + ("  |  ".join(f"*{p} {v:+.2f}%*" for p, v in peer_changes.items()) if peer_changes else "미설정")
-            + f"  |  평균 {peer_avg:+.2f}%"
-        ),
+        _ctx("가격과 전일 등락률 숫자는 표시하지 않습니다."),
     ]
 
 
@@ -599,7 +569,8 @@ def format_btc_correlation_block(bd: dict) -> list:
     else:
         interp = ""
 
-    ctx = f"30일 기준 | *BTC 당일 {btc:+.2f}%*"
+    btc_direction = "상승" if btc >= 0 else "하락"
+    ctx = f"30일 기준 | *BTC 당일 방향: {btc_direction}*"
     if interp:
         ctx += f"  |  {interp}"
 
@@ -710,7 +681,7 @@ def format_appstore_rank_block(prev: Optional[dict], curr: dict) -> list:
 
     return [
         _sec(f"*📱 App Store 순위 (미국)*\n" + "  |  ".join(lines) + fomo_warn),
-        _ctx("Apple RSS 기준 | 전일 대비 ▲상승 ▼하락"),
+        _ctx("Apple RSS 기준 | 이전 캐시 대비 ▲상승 ▼하락"),
     ]
 def _fetch_1m_bars(ticker: str, range_str: str = "1d") -> list:
     """1분봉 데이터 반환 — [{time, open, high, low, close, volume}, ...]"""
@@ -1843,12 +1814,9 @@ def format_insider_block(trades: list) -> list:
         else:
             scale = "대규모" if t.shares >= 50_000 else "중규모" if t.shares >= 5_000 else "소규모"
 
-        # 가격: RSU 귀속은 가격 없음이 정상이므로 표시 생략
-        price_str = f" @ ${t.price:.2f}" if t.price > 0 and t.trade_type != "Award" else ""
-
         lines.append(
             f"{emoji} *{t.filer}*{title_str}\n"
-            f"   {type_label}  {t.shares:,}주{price_str}  {scale}  _{t.date}_"
+            f"   {type_label}  {t.shares:,}주  {scale}  _{t.date}_"
         )
 
     return [
@@ -1874,36 +1842,15 @@ def format_13f_block(filings: list) -> list:
 
 def format_news_block(news: list) -> list:
     relevant = news_relevant_items(news)
-    candidates = news_candidate_items(news)
-    if not relevant and not candidates:
+    if not relevant:
         return []
 
     blocks = []
-    if relevant:
-        for n in relevant[:5]:
-            tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
-            blocks.append(_sec(f"*📰 {tag} {n['summary']}*"))
-            if n.get("translation"):
-                blocks.append(_ctx(n["translation"]))
-
-    if candidates:
-        lines = []
-        for n in candidates[:5]:
-            title = _shorten(n.get("candidate_summary") or n.get("title", ""), 105)
-            priority_matches = n.get("priority_matches", [])
-            risk_matches = n.get("risk_matches", [])
-            matches = priority_matches or risk_matches or n.get("keyword_matches", [])
-            labels = []
-            if priority_matches:
-                labels.append("우선")
-            if risk_matches:
-                labels.append("리스크")
-            label = " / ".join(labels) or "후보"
-            icon = "🟡" if n.get("candidate_level") == "watch" else "⚪"
-            suffix = f" _({label}: {', '.join(matches[:3])})_" if matches else ""
-            lines.append(f"• {icon} {title}{suffix}")
-        blocks.append(_sec(f"*📰 {DISPLAY_TICKER} 확인 후보 뉴스*\n" + "\n".join(lines)))
-        blocks.append(_ctx(f"AI 직접 영향 필터를 통과하지 않았거나 번역 API를 쓰지 못했지만, {DISPLAY_TICKER} 감시 키워드가 잡힌 기사입니다."))
+    for n in relevant[:5]:
+        tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
+        blocks.append(_sec(f"*📰 {tag} {n['summary']}*"))
+        if n.get("translation"):
+            blocks.append(_ctx(n["translation"]))
     return blocks
 
 
@@ -1914,7 +1861,7 @@ def format_volume_profile_block(vp: VolumeProfile) -> list:
     poc_desc = "매물대 상단 (저항)" if vp.poc_signal == "resistance" else "지지선 확보"
     whale = "  🐋 *Whale Activity Detected*" if vp.whale_detected else ""
     return [
-        _sec(f"*📊 수급 구조 (30분 POC)*  {poc_emoji} *${vp.poc_price:.2f}* — {poc_desc}{whale}"),
+        _sec(f"*📊 수급 구조 (30분 POC)*  {poc_emoji} *{poc_desc}*{whale}"),
         _ctx(f"30분 거래량 {vp.vol_30m:,} | 동시간대 5일평균 {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"),
     ]
 
@@ -1938,21 +1885,20 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
         f"*🛡 안전 마진*  {bb_map.get(sm.bb_signal, '')}  |  {mom_map.get(sm.momentum_signal, '')}"
     ))
     blocks.append(_ctx(
-        f"BB 하단 ${sm.bb_lower:.2f} | SMA20 ${sm.sma20:.2f} | BB 상단 ${sm.bb_upper:.2f}  |  "
-        f"하단 대비 *{sm.pct_from_lower:+.2f}%*  |  모멘텀 {sm.mom_30m_prev:+.2f}% → {sm.mom_30m_curr:+.2f}%"
+        "가격 레벨과 전일 등락률 숫자는 표시하지 않습니다."
     ))
 
     # ── 베타 초과 이탈 ──
     if sm.beta_excess_pct != 0:
         if sm.beta_excess_pct <= -3:
-            beta_line = f"🟢 *β 초과 이탈 {sm.beta_excess_pct:+.2f}%p* — 기대보다 과도한 하락, 통계적 반등 가능"
+            beta_line = "🟢 *β 기준 과도한 하락* — 통계적 반등 가능"
         elif sm.beta_excess_pct <= -1:
-            beta_line = f"🟡 *β 소폭 초과 이탈 {sm.beta_excess_pct:+.2f}%p*"
+            beta_line = "🟡 *β 기준 소폭 약세*"
         elif sm.beta_excess_pct >= 3:
-            beta_line = f"🔴 *β 초과 상승 {sm.beta_excess_pct:+.2f}%p* — 기대보다 강한 상승"
+            beta_line = "🔴 *β 기준 강한 상승*"
         else:
-            beta_line = f"⚪ *β 범위 내 {sm.beta_excess_pct:+.2f}%p*"
-        blocks.append(_ctx(f"기대수익률 {sm.beta_expected_pct:+.2f}% (β×{BETA_BENCHMARK})  |  {beta_line}"))
+            beta_line = "⚪ *β 범위 내*"
+        blocks.append(_ctx(f"{BETA_BENCHMARK} 기준 상대 흐름: {beta_line}"))
 
     # ── 피어 분기 경고 (Divergence Warning만 유지, 일반 피어 수치는 상대강도 블록에서 표시) ──
     if sm.divergence_warning:
@@ -1960,13 +1906,7 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
             f"⚠️ *Divergence Warning*\n"
             f"{TICKER} 하락 가속 중인데 피어 그룹 반등 중 — 개별 악재 가능성"
         ))
-        peer_text = " / ".join(
-            f"{p} {v:+.2f}%"
-            for p, v in sm.peer_changes.items()
-        ) or "피어 데이터 없음"
-        blocks.append(_ctx(
-            f"{peer_text} 반등  vs  {TICKER} 하락 가속"
-        ))
+        blocks.append(_ctx(f"피어 그룹은 반등 중인데 {TICKER}만 약한 흐름입니다."))
 
     return blocks
 
@@ -2008,6 +1948,7 @@ def run_normal():
     price = None
     new_news = []
     new_insiders = []
+    benchmark_pct = None
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     if state.get("price_alert_date") != today:
@@ -2037,15 +1978,16 @@ def run_normal():
             )
             if should_alert:
                 emoji = "🚀" if direction == "up" else "💥"
-                label = "상승" if direction == "up" else "하락"
+                label = _direction_label(price.change_pct)
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                    f"{emoji} *{DISPLAY_TICKER} {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
+                    f"{emoji} *{DISPLAY_TICKER} 방향 변화 감지*\n오늘 흐름: *{label}*"}})
 
                 # 상대 강도 (β 기반)
                 _beta = get_beta()
                 if _beta:
-                    _qqq = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
-                    blocks.extend(format_beta_block(calc_beta_divergence(_beta, _qqq, price.change_pct)))
+                    benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
+                    if benchmark_pct is not None:
+                        blocks.extend(format_beta_block(calc_beta_divergence(_beta, benchmark_pct, price.change_pct)))
 
                 # Volume Profile
                 vp = analyze_volume_profile(price.current)
@@ -2054,7 +1996,7 @@ def run_normal():
 
                 state["price_alert_max_pct"] = abs_pct if direction != prev_dir else max(prev_max, abs_pct)
                 state["price_alert_direction"] = direction
-                ws.setdefault("alerts_fired", []).append(f"주가 {price.change_pct:+.1f}%")
+                ws.setdefault("alerts_fired", []).append(f"방향 변화: {_direction_label(price.change_pct)}")
 
     closes = fetch_price_history(60)
     technicals = TechnicalSignals()
@@ -2101,6 +2043,7 @@ def run_normal():
             technicals=technicals,
             insiders=new_insiders,
             news=new_news,
+            extra_reasons=_relative_reason(price, benchmark_pct),
         )
         blocks.extend(_footer())
         send_slack(blocks)
@@ -2125,6 +2068,7 @@ def run_close():
     options = None
     short = None
     dca_tech = None
+    benchmark_pct = None
 
     price = fetch_price(realtime=False)
     if price and price.prev_close > 0:
@@ -2137,16 +2081,14 @@ def run_close():
         # state 저장 (4%+ 시 morning 알림 예약)
         if abs_pct >= 4:
             state["pending_morning_alert"] = {
-                "change_pct": round(price.change_pct, 1),
-                "abs_pct": round(abs_pct, 1),
                 "direction": direction,
                 "date": datetime.now(KST).strftime("%Y-%m-%d"),
             }
             log.info(f"Morning alert queued: {price.change_pct:+.1f}%")
             emoji_big = "🚀" if direction == "up" else "💥"
-            label = "상승" if direction == "up" else "하락"
+            label = _direction_label(price.change_pct)
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"{emoji_big} *{DISPLAY_TICKER} 종가 {abs_pct:.1f}% {label}* — 마감 +90분 재확인 예정"}})
+                f"{emoji_big} *{DISPLAY_TICKER} 마감 방향: {label}* — 마감 +90분 재확인 예정"}})
 
             # 상대 강도 (β 기반) — 장 마감 후 run_close의 별도 beta 블록과 통합
 
@@ -2155,7 +2097,7 @@ def run_close():
         else:
             state["pending_morning_alert"] = None
             emoji_dir = "🌤" if direction == "up" else "🌧"
-            mood = "양전 마감" if direction == "up" else "음전 마감"
+            mood = f"{_direction_label(price.change_pct)} 마감"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
                 f"{emoji_dir} 오늘 종가 {mood}"}})
 
@@ -2181,9 +2123,9 @@ def run_close():
     # 베타 분석 (벤치마크 fetch 실패 시 전체 skip — 0 fallback 시 아웃퍼폼 오판 방지)
     beta = get_beta()
     if beta and price and price.prev_close > 0:
-        qqq_pct = _fetch_ticker_change(BETA_BENCHMARK)
-        if qqq_pct is not None:
-            bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
+        benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
+        if benchmark_pct is not None:
+            bd = calc_beta_divergence(beta, benchmark_pct, price.change_pct)
             blocks.extend(format_beta_block(bd))
         else:
             log.warning(f"{BETA_BENCHMARK} fetch 실패 — 베타 블록 스킵 (아웃퍼폼 오판 방지)")
@@ -2272,6 +2214,7 @@ def run_close():
         insiders=new_insiders,
         news=news,
         dca_tech=dca_tech,
+        extra_reasons=_relative_reason(price, benchmark_pct),
     )
     blocks.extend(_footer())
     send_slack(blocks)
@@ -2294,22 +2237,21 @@ def run_morning():
         log.info("No pending morning alert — silent")
         return
 
-    abs_pct = alert["abs_pct"]
     direction = alert["direction"]
     emoji = "🚀" if direction == "up" else "💥"
-    label = "상승" if direction == "up" else "하락"
+    label = "양전" if direction == "up" else "음전"
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text",
             "text": f"☀️ {DISPLAY_TICKER} 아침 브리핑 — {datetime.now(KST).strftime('%m/%d')}"}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text":
-            f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {label}*"}},
+            f"{emoji} *어제 마감 방향: {label}*"}},
     ]
     insert_alert_quality_summary(
         blocks,
         "morning",
-        extra_reasons=[("urgent" if abs_pct >= 4 else "watch", f"어제 종가 기준 {alert['change_pct']:+.1f}% {label}: 재확인 필요")],
+        extra_reasons=[("watch", f"어제 마감 방향 {label}: 재확인 필요")],
     )
     blocks.extend(_footer())
     send_slack(blocks)
@@ -2317,7 +2259,7 @@ def run_morning():
     # 발송 후 초기화
     state["pending_morning_alert"] = None
     save_state(state)
-    log.info(f"Morning alert sent: {alert['change_pct']:+.1f}%")
+    log.info(f"Morning alert sent: {label}")
 
 
 def run_13f():
@@ -2367,11 +2309,13 @@ def run_weekly():
     news = fetch_news()
     news = translate_news(news)
 
-    # 주간 변동률 (가격 숫자 없이 %)
+    # 가격/등락률 숫자 없이 방향만 표시
     price = fetch_price()
     weekly_change_str = ""
+    benchmark_pct = None
     if price:
-        weekly_change_str = f"이번 주 마감 기준 {price.change_pct:+.1f}% ({('상승' if price.change_pct >= 0 else '하락')})"
+        weekly_change_str = f"이번 주 마감 방향: {_direction_label(price.change_pct)}"
+        benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
 
     alerts = ws.get("alerts_fired", [])
     insider_summary = ws.get("insider_trades", [])
@@ -2386,9 +2330,9 @@ def run_weekly():
         {"type": "divider"},
     ]
 
-    # 주간 변동 요약 (% 만, 가격 숫자 없음)
+    # 주간 방향 요약 (가격/등락률 숫자 없음)
     if weekly_change_str:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 등락*\n{weekly_change_str}"}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 방향*\n{weekly_change_str}"}})
 
     blocks.extend(format_technicals_block(technicals))
 
@@ -2430,6 +2374,7 @@ def run_weekly():
         weekly_reasons.append(("watch", f"주간 내부자 거래 요약 {len(insider_summary)}건"))
     if news_summary:
         weekly_reasons.append(("info", f"주간 주요 뉴스 {len(news_summary)}건"))
+    weekly_reasons.extend(_relative_reason(price, benchmark_pct))
     insert_alert_quality_summary(
         blocks,
         "weekly",
@@ -2475,13 +2420,13 @@ def run_dca_status():
     lines = [
         f"*💼 {DISPLAY_TICKER} DCA 포지션 현황*",
         f"보유 수량: *{shares:,.1f}주*",
-        f"평균 매수가: *${avg_price:.2f}*",
+        "평균 매수가는 저장되어 있지만 알림에는 표시하지 않습니다.",
     ]
 
     if history:
         lines.append(f"\n*📋 매수 이력 (최근 5건)*")
         for h in history[-5:]:
-            lines.append(f"• {h['date']} — {h['shares']:.1f}주 @ ${h['price']:.2f}")
+            lines.append(f"• {h['date']} — {h['shares']:.1f}주")
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": f"💼 {DISPLAY_TICKER} DCA 현황"}},
@@ -2492,7 +2437,7 @@ def run_dca_status():
     insert_alert_quality_summary(
         blocks,
         "dca_status",
-        extra_reasons=[("info", f"DCA 포지션 {shares:,.1f}주, 평단 ${avg_price:.2f}")],
+        extra_reasons=[("info", f"DCA 포지션 {shares:,.1f}주")],
     )
     send_slack(blocks)
     log.info(f"DCA status sent: {shares:.1f}주 @ ${avg_price:.2f}")
@@ -2567,16 +2512,12 @@ def run_dca_update():
     lines = [
         f"*{action}* 등록 완료!",
         f"",
-        f"이번 매수: {new_shares:.1f}주 @ ${new_price:.2f}",
+        f"이번 매수: {new_shares:.1f}주",
         f"",
         f"*업데이트된 포지션*",
         f"총 보유: *{total_shares:.1f}주*",
-        f"새 평단가: *${new_avg:.2f}*",
+        "평균 매수가는 재계산했지만 알림에는 표시하지 않습니다.",
     ]
-
-    if not is_first:
-        avg_change = new_avg - prev_avg
-        lines.append(f"평단 변화: ${prev_avg:.2f} → ${new_avg:.2f} ({avg_change:+.2f})")
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": "✅ DCA 포지션 업데이트"}},
@@ -2587,7 +2528,7 @@ def run_dca_update():
     insert_alert_quality_summary(
         blocks,
         "dca_update",
-        extra_reasons=[("info", f"{action} {new_shares:.1f}주 @ ${new_price:.2f} 반영")],
+        extra_reasons=[("info", f"{action} {new_shares:.1f}주 반영")],
     )
     send_slack(blocks)
     log.info(f"DCA updated: {total_shares:.1f}주 @ ${new_avg:.2f} ({action})")

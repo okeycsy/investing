@@ -9,7 +9,7 @@ currency: USD
 sector: Industrials
 industry: Critical Digital Infrastructure, Power & Thermal Management
 cik: 0001674101
-benchmark: $QQQ
+benchmark: $SOXX
 peer_tickers: $ETN, $NVT, $PWR, $SMCI
 end_markets: data centers, communication networks, commercial and industrial environments, colocation and cloud, AI and high performance computing
 core_products: critical power, AC power, DC power, UPS systems, power distribution, switchgear, busway, thermal management, liquid cooling, high density cooling, racks and enclosures, monitoring and management, services

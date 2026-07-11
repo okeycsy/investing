@@ -50,14 +50,8 @@ def summarize_price_reason(price: Optional[PriceData], reasons: list) -> None:
     if not price or price.prev_close <= 0:
         return
 
-    abs_pct = abs(price.change_pct)
-    direction = "상승" if price.change_pct >= 0 else "하락"
-    if abs_pct >= 4:
-        add_reason(reasons, "urgent", f"주가 전일 대비 {price.change_pct:+.1f}% {direction}: 급변동 기준 충족")
-    elif abs_pct >= 2:
-        add_reason(reasons, "watch", f"주가 전일 대비 {price.change_pct:+.1f}% {direction}: 변동성 확대")
-    else:
-        add_reason(reasons, "info", f"주가 전일 대비 {price.change_pct:+.1f}%: 급변동은 아님")
+    direction = "양전" if price.change_pct >= 0 else "음전"
+    add_reason(reasons, "watch", f"오늘 방향: {direction}")
 
     if price.volume > 0 and price.vol_avg_5d > 0:
         vol_ratio = price.volume / price.vol_avg_5d
@@ -105,11 +99,11 @@ def summarize_insider_reason(insiders: list, reasons: list) -> None:
 
     if sale_count:
         level = "urgent" if sale_value >= 5_000_000 else "watch"
-        value = f"${sale_value/1_000_000:.1f}M" if sale_value >= 1_000_000 else f"${sale_value:,.0f}"
-        add_reason(reasons, level, f"신규 내부자 매도 {sale_count}건, 추정 {value}")
+        scale = "대규모" if sale_value >= 1_000_000 else "중규모" if sale_value >= 100_000 else "소규모"
+        add_reason(reasons, level, f"신규 내부자 매도 {sale_count}건, {scale}")
     if purchase_count:
-        value = f"${purchase_value/1_000_000:.1f}M" if purchase_value >= 1_000_000 else f"${purchase_value:,.0f}"
-        add_reason(reasons, "info", f"신규 내부자 매수 {purchase_count}건, 추정 {value}")
+        scale = "대규모" if purchase_value >= 1_000_000 else "중규모" if purchase_value >= 100_000 else "소규모"
+        add_reason(reasons, "info", f"신규 내부자 매수 {purchase_count}건, {scale}")
 
 
 def summarize_news_reason(news: list, reasons: list) -> None:

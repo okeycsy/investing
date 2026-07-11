@@ -55,7 +55,7 @@ def build_smoke_messages(config) -> list[tuple[str, list]]:
                 f"{ticker} 장마감 알림 점검",
                 (
                     f"*🔴 긴급 | {ticker} 장마감 핵심 요약 샘플*\n"
-                    "• 🔴 종가 급등락 기준 충족 시 최상단에 표시\n"
+                    "• 🔴 마감 방향과 SOXX 상대성과만 최상단에 표시\n"
                     "• 🟡 옵션 PCR, 공매도, BTC 상관계수, 앱 순위 확인\n"
                     "• ⚪ DCA 기술지표 점수와 안전마진을 함께 표시"
                 ),
@@ -68,7 +68,7 @@ def build_smoke_messages(config) -> list[tuple[str, list]]:
                 f"{ticker} 아침 브리핑 점검",
                 (
                     f"*🟡 주의 | {ticker} 아침 재확인 샘플*\n"
-                    "• 🟡 전일 종가 급변동이 있었을 때 재알림\n"
+                    "• 🟡 전일 마감 방향 재확인\n"
                     "• ⚪ 장 시작 전 확인할 핵심 이유를 짧게 재정리"
                 ),
                 ctx,

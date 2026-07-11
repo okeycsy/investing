@@ -28,12 +28,16 @@ def _divider() -> dict:
 def _format_price(price) -> tuple[str, str]:
     if not price or price.prev_close <= 0:
         return "가격 데이터 없음", "info"
-    direction = "상승" if price.change_pct >= 0 else "하락"
-    level = "watch" if abs(price.change_pct) >= 2 else "info"
-    line = (
-        f"현재가 ${price.current:.2f}, 전일 대비 {price.change_pct:+.2f}% {direction} "
-        f"({price.market_state or 'UNKNOWN'})"
-    )
+    direction = "양전" if price.change_pct >= 0 else "음전"
+    benchmark_pct = hm._fetch_ticker_change(hm.BETA_BENCHMARK)
+    if benchmark_pct is None:
+        relative = f"{hm.BETA_BENCHMARK} 데이터 없음"
+        level = "info"
+    else:
+        outperformed = price.change_pct > benchmark_pct
+        relative = f"{hm.BETA_BENCHMARK} 대비 {'아웃퍼폼' if outperformed else '아웃퍼폼 아님'}"
+        level = "info" if outperformed else "watch"
+    line = f"오늘 방향 {direction}, {relative} ({price.market_state or 'UNKNOWN'})"
     if price.volume > 0:
         line += f", 거래량 {price.volume:,}"
     return line, level
@@ -60,23 +64,12 @@ def _format_technicals(technicals) -> tuple[str, str]:
 
 
 def _format_news(news: list) -> tuple[str, str]:
-    config = load_monitor_config()
-    display = config.display_ticker
     relevant = hm.news_relevant_items(news)
-    candidates = hm.news_candidate_items(news)
-    if not relevant and candidates:
-        titles = "; ".join((n.get("candidate_summary") or n.get("title", ""))[:45] for n in candidates[:3])
-        level = "watch" if any(n.get("candidate_level") == "watch" for n in candidates) else "info"
-        return f"관련 확정 0건, {display} 확인 후보 {len(candidates)}건: {titles}", level
     if not relevant:
-        return f"뉴스 후보 {len(news)}건, {display} 키워드 후보 0건", "info"
+        return f"AI 확정 관련 뉴스 0건 (후보 뉴스는 표시하지 않음)", "info"
     negative = sum(1 for n in relevant if n.get("sentiment") == "negative")
     level = "watch" if negative else "info"
     headlines = "; ".join(n.get("summary", "") for n in relevant[:3])
-    if candidates:
-        if any(n.get("candidate_level") == "watch" for n in candidates):
-            level = "watch"
-        return f"관련 뉴스 {len(relevant)}건: {headlines} | 확인 후보 {len(candidates)}건", level
     return f"관련 뉴스 {len(relevant)}건: {headlines}", level
 
 

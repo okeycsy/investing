@@ -32,7 +32,7 @@ currency: USD
 sector: Industrials
 industry: Critical Digital Infrastructure, Power & Thermal Management
 cik: 0001674101
-benchmark: $QQQ
+benchmark: $SOXX
 peer_tickers: $ETN, $NVT, $PWR, $SMCI
 end_markets: data centers, communication networks, commercial and industrial environments
 core_products: critical power, UPS systems, power distribution, thermal management, liquid cooling
@@ -158,7 +158,7 @@ python -m unittest discover tests
 
 모니터 알림 상단에는 `긴급/주의/참고` 요약이 먼저 표시됩니다. 요약은 주가 급변, 기술지표, 옵션/공매도, SEC 내부자 거래, 뉴스, DCA 점수를 기준으로 핵심 이유를 최대 4개까지 보여줍니다.
 
-뉴스는 `관련 확정 뉴스`와 `{티커} 확인 후보 뉴스`를 구분합니다. Claude가 직접 영향 뉴스로 판단한 기사는 요약/번역이 표시되고, 직접 영향 필터를 통과하지 않았더라도 설정 종목 감시 키워드가 잡힌 기사는 후보로 따로 표시합니다. `priority_keywords` 또는 `risk_keywords`가 잡힌 후보는 `우선/리스크` 라벨과 함께 표시됩니다.
+뉴스는 AI가 직접 영향이 있다고 판단한 `관련 확정 뉴스`만 표시합니다. 키워드 후보는 내부 분류에는 쓰지만 Slack에는 보내지 않습니다. 가격 숫자와 전일 등락률 숫자는 숨기고, 방향은 `양전/음전`, 상대성과는 `SOXX 대비 아웃퍼폼 여부`만 표시합니다.
 
 ## 다음 재개발 후보
 
