@@ -70,16 +70,16 @@ state/VRT/app_rank_cache.json
 
 ## 알림 종류와 스케줄
 
-시간은 GitHub Actions cron 기준 UTC와 한국/일본 시간(UTC+9)을 함께 표기합니다.
+시장 관련 알림은 GitHub Actions가 넓은 시간대에 주기적으로 깨어난 뒤, `market_calendar.py`가 NYSE 달력 기준으로 실제 실행 여부를 결정합니다. 서머타임/겨울시간, 휴장일, 조기마감일은 `pandas_market_calendars`의 NYSE 캘린더를 사용합니다.
 
 | 알림 | workflow | 실행 시간 |
 | --- | --- | --- |
-| VRT 장중 모니터 | `VRT Monitor` / `normal` | UTC 월-금 08:00-20:00, 22:00-23:00 매시 정각 |
-| VRT 장마감 브리핑 | `VRT Monitor` / `close` | UTC 월-금 21:00 = KST/JST 화-토 06:00 |
-| VRT 아침 재확인 | `VRT Monitor` / `morning` | UTC 월-금 21:30 = KST/JST 화-토 06:30 |
+| VRT 장중 모니터 | `VRT Monitor` / `normal` | NYSE pre/regular/post-market 중 매시 1회 |
+| VRT 장마감 브리핑 | `VRT Monitor` / `close` | NYSE 공식 마감 + 60분 |
+| VRT 아침 재확인 | `VRT Monitor` / `morning` | NYSE 공식 마감 + 90분 |
 | VRT 주간 브리핑 | `VRT Monitor` / `weekly` | UTC 일 23:00 = KST/JST 월 08:00 |
 | VRT 13F 기관 포지션 | `VRT Monitor` / `13f` | UTC 토 10:00 = KST/JST 토 19:00 |
-| VRT 단일 종목 스캔 | `VRT Market Scan` | UTC 월-금 22:00 = KST/JST 화-토 07:00 |
+| VRT 단일 종목 스캔 | `VRT Market Scan` | NYSE 공식 마감 + 120분 |
 | VRT 수동 실행 컨트롤 | `VRT Alert Control` | 수동 실행 |
 | VRT 라이브 연결 점검 | `Live Smoke Test` | `main` push 또는 수동 실행 |
 | VRT 실제 시작 점검 | `VRT Startup Digest` | 수동 실행, 관련 파일 변경 push |
@@ -105,6 +105,8 @@ python startup_digest.py --no-slack
 ```
 
 GitHub에서는 Actions 탭의 `VRT Alert Control`을 누르면 실제 시작 점검, 실제 장중/마감/주간/13F 알림, 실제 단일 종목 스캔, 라이브 연결 점검, 샘플 알림 점검을 한 화면에서 선택할 수 있습니다. 이름이 `actual_`로 시작하는 항목은 Yahoo/SEC/뉴스/Market Scan을 실제 조회해서 Slack으로 보냅니다. `sample_delivery_smoke`는 발송 형식만 확인하는 샘플입니다.
+
+예약 실행은 `schedule_state.json`에 dispatch key를 남깁니다. GitHub Actions 지연이나 재시도로 같은 `close:{거래일}` 또는 `market_scan:{거래일}` 키가 다시 들어오면 중복 Slack 발송을 건너뜁니다.
 
 ## 라이브 점검
 
@@ -133,5 +135,4 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 - `hood_monitor.py`를 데이터 수집, 점수 계산, Slack 출력, 상태 관리 모듈로 분리
 - 상태 파일을 개인 포지션 정보와 알림 중복 방지 정보로 분리
 - SEC/Yahoo/FINRA 파서 단위 테스트 추가
-- 여름/겨울 미국장 시간대를 명시적으로 처리
 - S&P 500 종목 목록을 코드가 아니라 데이터 파일로 분리

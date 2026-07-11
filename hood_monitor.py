@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 import requests
 
 from monitor_config import load_monitor_config, resolve_runtime_file
+from market_calendar import get_market_state, trading_date_for_utc
+import schedule_state
 
 # ─────────────────────────────────────────────
 # 설정
@@ -45,6 +47,7 @@ SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 STATE_FILE = resolve_runtime_file(CONFIG, "state.json", "MONITOR_STATE_FILE")
 WEEKLY_STATE_FILE = resolve_runtime_file(CONFIG, "weekly_state.json", "MONITOR_WEEKLY_STATE_FILE")
+SCHEDULE_STATE_FILE = resolve_runtime_file(CONFIG, "schedule_state.json", "MONITOR_SCHEDULE_STATE_FILE")
 
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 YAHOO_QUOTE_URLS = [
@@ -382,22 +385,8 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
 
     # ── 2. 장 상태 판별 ──────────────────────────────────────────
     now_utc = datetime.now(UTC)
-    today_utc = now_utc.date()
-    hm  = now_utc.hour * 60 + now_utc.minute
-    dow = now_utc.weekday()  # 0=Mon 6=Sun
-
-    if dow >= 5:
-        market_state = "CLOSED"
-    elif hm < 8 * 60:
-        market_state = "CLOSED"
-    elif hm < 13 * 60 + 30:
-        market_state = "PRE"
-    elif hm < 20 * 60:
-        market_state = "REGULAR"
-    elif hm < 24 * 60:
-        market_state = "POST"
-    else:
-        market_state = "CLOSED"
+    session_date = trading_date_for_utc(now_utc)
+    market_state = get_market_state(now_utc)
 
     # ── 3. 확정 일봉만 추출 (오늘 날짜 바 제거) ──────────────────
     # Yahoo는 장 중에도 오늘 인트라데이 값을 일봉 시리즈 마지막에 넣을 수 있음.
@@ -405,8 +394,8 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
     confirmed_closes  = []
     confirmed_volumes = []
     for i, ts in enumerate(ts_daily_raw):
-        bar_date = datetime.fromtimestamp(ts, UTC).date()
-        if bar_date < today_utc:
+        bar_date = trading_date_for_utc(datetime.fromtimestamp(ts, UTC))
+        if bar_date < session_date:
             c = closes_raw[i] if i < len(closes_raw) else None
             v = volumes_raw[i] if i < len(volumes_raw) else None
             if c is not None:
@@ -439,13 +428,13 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
             current    = None
             today_vol  = 0
             for i in range(len(timestamps) - 1, -1, -1):
-                bar_date = datetime.fromtimestamp(timestamps[i], UTC).date()
-                if bar_date == today_utc:
+                bar_date = trading_date_for_utc(datetime.fromtimestamp(timestamps[i], UTC))
+                if bar_date == session_date:
                     if current is None and i < len(closes_1m) and closes_1m[i] is not None:
                         current = round(float(closes_1m[i]), 2)
                     if i < len(volumes_1m) and volumes_1m[i]:
                         today_vol += int(volumes_1m[i])
-                elif bar_date < today_utc and current is not None:
+                elif bar_date < session_date and current is not None:
                     break  # 오늘 바 모두 처리 완료
         except Exception as e:
             log.error(f"fetch_price 1분봉 파싱 실패: {e}")
@@ -718,21 +707,14 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
     except Exception:
         return None
 
-    now_utc   = datetime.now(UTC)
-    today_utc = now_utc.date()
-    hm  = now_utc.hour * 60 + now_utc.minute
-    dow = now_utc.weekday()
-
-    if dow >= 5:                  market_state = "CLOSED"
-    elif hm < 8 * 60:             market_state = "CLOSED"
-    elif hm < 13 * 60 + 30:      market_state = "PRE"
-    elif hm < 20 * 60:           market_state = "REGULAR"
-    else:                         market_state = "POST"
+    now_utc = datetime.now(UTC)
+    session_date = trading_date_for_utc(now_utc)
+    market_state = get_market_state(now_utc)
 
     # 오늘 날짜 바 제거 → 확정 종가만 추출
     confirmed = [float(closes_raw[i]) for i, ts in enumerate(ts_daily)
                  if i < len(closes_raw) and closes_raw[i] is not None
-                 and datetime.fromtimestamp(ts, UTC).date() < today_utc]
+                 and trading_date_for_utc(datetime.fromtimestamp(ts, UTC)) < session_date]
 
     if len(confirmed) < 1:
         # fallback: 전체 [-2] 사용
@@ -743,7 +725,7 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
 
     prev = confirmed[-1]  # 전일 확정 종가
 
-    if market_state in ("PRE", "REGULAR"):
+    if market_state in ("PRE", "REGULAR", "POST"):
         resp_1m = fetch_yahoo_chart(ticker, {"interval": "1m", "range": "2d", "includePrePost": "true"})
         if not resp_1m:
             return None
@@ -754,7 +736,7 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
             current    = None
             for i in range(len(timestamps) - 1, -1, -1):
                 if i < len(closes_1m) and closes_1m[i] is not None:
-                    if datetime.fromtimestamp(timestamps[i], UTC).date() == today_utc:
+                    if trading_date_for_utc(datetime.fromtimestamp(timestamps[i], UTC)) == session_date:
                         current = float(closes_1m[i])
                         break
         except Exception as e:
@@ -3275,7 +3257,7 @@ def run_close():
             emoji_big = "🚀" if direction == "up" else "💥"
             label = "상승" if direction == "up" else "하락"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"{emoji_big} *{DISPLAY_TICKER} 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
+                f"{emoji_big} *{DISPLAY_TICKER} 종가 {abs_pct:.1f}% {label}* — 마감 +90분 재확인 예정"}})
 
             # 상대 강도 (β 기반) — 장 마감 후 run_close의 별도 beta 블록과 통합
 
@@ -3412,7 +3394,7 @@ def run_close():
 
 def run_morning():
     """
-    08:00 KST 아침 알림
+    마감 후 재확인 알림
     BUG 1 FIX: fetch_price() 직접 호출 대신 state의 pending_morning_alert 읽음
     """
     log.info("=== MORNING ===")
@@ -3728,7 +3710,10 @@ def run_dca_update():
 def main():
     mode = os.environ.get("RUN_MODE", sys.argv[1] if len(sys.argv) > 1 else "normal").lower()
     log.info(f"{TICKER} Monitor v3.2 — mode: {mode} | {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}")
-    {
+    if schedule_state.should_skip(SCHEDULE_STATE_FILE, log):
+        return
+
+    runner = {
         "normal": run_normal,
         "close": run_close,
         "morning": run_morning,
@@ -3736,7 +3721,13 @@ def main():
         "weekly": run_weekly,
         "dca_status": run_dca_status,
         "dca_update": run_dca_update,
-    }.get(mode, lambda: log.error(f"Unknown mode: {mode}"))()
+    }.get(mode)
+    if not runner:
+        log.error(f"Unknown mode: {mode}")
+        return
+
+    runner()
+    schedule_state.mark_completed(SCHEDULE_STATE_FILE, log)
 
 
 if __name__ == "__main__":

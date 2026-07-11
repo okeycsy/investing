@@ -2,26 +2,13 @@ name: VRT Monitor
 
 on:
   schedule:
-    # ── 장중 normal (프리+정규+애프터) ──────────────────────
-    # UTC 08~19 = KST 17~04 중 NYSE 관련 시간대
-    # PRE:     UTC 08:00~13:30 (KST 17:00~22:30)
-    # REGULAR: UTC 13:30~20:00 (KST 22:30~05:00)
-    # POST:    UTC 20:00~24:00 (KST 05:00~09:00)
-    - cron: '0 8-20,22-23 * * 1-5'    # UTC 월~금 관련 거래 시간대 (21:00 close 중복 제외)
+    # NYSE calendar router decides actual normal/close/morning runs.
+    - cron: '0,30 8-23 * * 1-5'
+    - cron: '0,30 0-1 * * 2-6'
 
-    # ── close: KST 06:00 = UTC 21:00 ────────────────────────
-    # NYSE 마감(UTC 20:00) 1시간 후, 확정 종가 기준
-    # 겨울(EST): NYSE 마감 UTC 21:00 → close는 UTC 22:00으로 수동 조정 필요
-    - cron: '0 21 * * 1-5'      # UTC 21:00 = KST 06:00
-
-    # ── morning: KST 06:30 = UTC 21:30 ──────────────────────
-    - cron: '30 21 * * 1-5'     # UTC 21:30 = KST 06:30
-
-    # ── weekly: 월요일 KST 08:00 = UTC 23:00 (일요일) ────────
-    - cron: '0 23 * * 0'        # UTC 일요일 23:00 = KST 월요일 08:00
-
-    # ── 13F: 토요일 KST 19:00 = UTC 10:00 ───────────────────
-    - cron: '0 10 * * 6'        # UTC 토요일 10:00 = KST 19:00
+    # Asia fixed-time jobs. Router keeps one run via dispatch keys.
+    - cron: '0,30 23 * * 0'     # weekly: Monday 08:00 KST/JST
+    - cron: '0,30 10 * * 6'     # 13F: Saturday 19:00 KST/JST
 
   workflow_dispatch:
     inputs:
@@ -52,37 +39,29 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install scheduler dependency
+        if: github.event_name != 'workflow_dispatch'
+        run: pip install 'pandas_market_calendars>=5.4.0,<6.0'
 
       - name: Determine RUN_MODE
         id: mode
         run: |
-          # workflow_dispatch이면 입력값 우선
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "dispatch_key=" >> $GITHUB_OUTPUT
+            echo "reason=manual dispatch" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # schedule이면 UTC 시간 기준으로 자동 판별
-          HOUR=$(date -u +%H)
-          MINUTE=$(date -u +%M)
-          DOW=$(date -u +%u)   # 1=월 ... 7=일
-          HM=$((HOUR * 60 + MINUTE))
+          python market_calendar.py monitor --github-output "$GITHUB_OUTPUT"
 
-          if [ "$HOUR" = "21" ] && [ "$MINUTE" = "00" ]; then
-            echo "mode=close" >> $GITHUB_OUTPUT
-          elif [ "$HOUR" = "21" ] && [ "$MINUTE" = "30" ]; then
-            echo "mode=morning" >> $GITHUB_OUTPUT
-          elif [ "$DOW" = "7" ] && [ "$HOUR" = "23" ]; then
-            echo "mode=weekly" >> $GITHUB_OUTPUT
-          elif [ "$DOW" = "6" ] && [ "$HOUR" = "10" ]; then
-            echo "mode=13f" >> $GITHUB_OUTPUT
-          else
-            echo "mode=normal" >> $GITHUB_OUTPUT
-          fi
+      - name: Install dependencies
+        if: steps.mode.outputs.should_run == 'true'
+        run: pip install -r requirements.txt
 
       - name: Run Ticker Monitor
+        if: steps.mode.outputs.should_run == 'true'
         env:
           SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
@@ -90,6 +69,8 @@ jobs:
           SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
           RUN_MODE:           ${{ steps.mode.outputs.mode }}
+          SCHEDULED_RUN:      ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+          SCHEDULE_DISPATCH_KEY: ${{ steps.mode.outputs.dispatch_key }}
           DCA_SHARES:         ${{ github.event.inputs.dca_shares }}
           DCA_PRICE:          ${{ github.event.inputs.dca_price }}
         run: python hood_monitor.py

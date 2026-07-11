@@ -19,7 +19,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass, field
 
-from monitor_config import load_monitor_config
+from monitor_config import load_monitor_config, resolve_runtime_file
+import schedule_state
 
 try:
     import yfinance as yf
@@ -35,6 +36,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CONFIG = load_monitor_config()
 FOCUS_TICKER = CONFIG.effective_market_scan_focus
 DISPLAY_FOCUS_TICKER = f"${FOCUS_TICKER}"
+SCHEDULE_STATE_FILE = resolve_runtime_file(CONFIG, "schedule_state.json", "MONITOR_SCHEDULE_STATE_FILE")
 
 KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
@@ -994,7 +996,7 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
         )
         lines.append(f"• {lname}: *{best[0]}* ({best[1]:.0f}점)")
     blocks.append(_ctx("\n".join(lines)))
-    blocks.append(_ctx("기술지표 기반 참고용. 투자 결정은 본인 판단하에. 다음 스캔: 내일 KST 07:00"))
+    blocks.append(_ctx("기술지표 기반 참고용. 투자 결정은 본인 판단하에. 다음 스캔: 다음 NYSE 거래일 마감 + 120분"))
     return blocks
 
 
@@ -1128,6 +1130,9 @@ def main():
 
     single_ticker = args.ticker.strip().upper()
 
+    if schedule_state.should_skip(SCHEDULE_STATE_FILE, log):
+        return
+
     # ══════════════════════════════════════════
     # 모드 A: 단일 종목 스캔
     # ══════════════════════════════════════════
@@ -1153,6 +1158,7 @@ def main():
         )
         blocks = build_single_blocks(ts, elapsed)
         send_slack(blocks, text=f"${single_ticker} 단일 종목 스캔")
+        schedule_state.mark_completed(SCHEDULE_STATE_FILE, log)
         log.info("=== 완료 ===")
         return
 
@@ -1195,6 +1201,7 @@ def main():
     blocks = build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
                           macro=macro)
     send_slack(blocks, text="S&P 500 Market Scan")
+    schedule_state.mark_completed(SCHEDULE_STATE_FILE, log)
     log.info("=== 완료 ===")
 
 

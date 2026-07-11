@@ -2,8 +2,8 @@ name: VRT Market Scan
 
 on:
   schedule:
-    # KST 07:00 = UTC 22:00 (전날) — 장 마감 후 VRT 확정 데이터 기준
-    - cron: '0 22 * * 1-5'
+    # Router sends once at NYSE official close + 120 minutes.
+    - cron: '0,30 17-23 * * 1-5'
   workflow_dispatch:
     inputs:
       ticker:
@@ -25,14 +25,34 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install scheduler dependency
+        if: github.event_name != 'workflow_dispatch'
+        run: pip install 'pandas_market_calendars>=5.4.0,<6.0'
+
+      - name: Determine scan timing
+        id: timing
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "dispatch_key=" >> $GITHUB_OUTPUT
+            echo "reason=manual dispatch" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          python market_calendar.py market_scan --github-output "$GITHUB_OUTPUT"
+
       - name: Install dependencies
+        if: steps.timing.outputs.should_run == 'true'
         run: pip install -r requirements.txt
 
       - name: Run market scan
+        if: steps.timing.outputs.should_run == 'true'
         env:
           MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
           SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          SCHEDULED_RUN:       ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+          SCHEDULE_DISPATCH_KEY: ${{ steps.timing.outputs.dispatch_key }}
         run: |
           TICKER="${{ github.event.inputs.ticker }}"
           if [ -z "$TICKER" ]; then
