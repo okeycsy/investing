@@ -63,13 +63,16 @@ def _format_news(news: list) -> tuple[str, str]:
     candidates = hm.news_candidate_items(news)
     if not relevant and candidates:
         titles = "; ".join((n.get("candidate_summary") or n.get("title", ""))[:45] for n in candidates[:3])
-        return f"관련 확정 0건, VRT 확인 후보 {len(candidates)}건: {titles}", "info"
+        level = "watch" if any(n.get("candidate_level") == "watch" for n in candidates) else "info"
+        return f"관련 확정 0건, VRT 확인 후보 {len(candidates)}건: {titles}", level
     if not relevant:
         return f"뉴스 후보 {len(news)}건, VRT 키워드 후보 0건", "info"
     negative = sum(1 for n in relevant if n.get("sentiment") == "negative")
     level = "watch" if negative else "info"
     headlines = "; ".join(n.get("summary", "") for n in relevant[:3])
     if candidates:
+        if any(n.get("candidate_level") == "watch" for n in candidates):
+            level = "watch"
         return f"관련 뉴스 {len(relevant)}건: {headlines} | 확인 후보 {len(candidates)}건", level
     return f"관련 뉴스 {len(relevant)}건: {headlines}", level
 
@@ -150,7 +153,7 @@ def build_digest() -> tuple[str, list]:
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": f"{display} 실제 데이터 시작 점검"}},
         _sec(f"*{emoji} {label} | {display} 현재 실제 데이터 요약*\n" + "\n".join(lines)),
-        _ctx(f"{config.company_name or ticker} | 샘플 아님: Yahoo/SEC/뉴스/Market Scan 실제 조회 | {now}"),
+        _ctx(f"{config.company_name or ticker} | {config.profile_context or 'profile context unavailable'} | 샘플 아님: Yahoo/SEC/뉴스/Market Scan 실제 조회 | {now}"),
         _divider(),
     ]
     news_blocks = hm.format_news_block(news)

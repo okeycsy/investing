@@ -42,6 +42,8 @@ CIK_PADDED = CIK.zfill(10) if CIK else ""  # 10자리 (선행 0 포함)
 CIK_SHORT = CIK.lstrip("0")                # 선행 0 제거
 PEER_TICKERS = CONFIG.peer_tickers
 NEWS_MATCH_TERMS = CONFIG.news_terms
+NEWS_PRIORITY_TERMS = CONFIG.priority_keywords
+NEWS_RISK_TERMS = CONFIG.risk_keywords
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1336,10 +1338,24 @@ def _match_news_terms(news_item: dict) -> list[str]:
     return list(dict.fromkeys(matches))
 
 
+def _match_specific_terms(news_item: dict, terms: tuple[str, ...]) -> list[str]:
+    text = _news_text(news_item)
+    matches = []
+    for term in terms:
+        if _term_matches_text(term, text):
+            matches.append(term)
+    return list(dict.fromkeys(matches))
+
+
 def annotate_news_candidates(news: list) -> list:
     for item in news:
         matches = _match_news_terms(item)
+        priority_matches = _match_specific_terms(item, NEWS_PRIORITY_TERMS)
+        risk_matches = _match_specific_terms(item, NEWS_RISK_TERMS)
         item["keyword_matches"] = matches
+        item["priority_matches"] = priority_matches
+        item["risk_matches"] = risk_matches
+        item["candidate_level"] = "watch" if priority_matches or risk_matches else "info"
         if matches:
             item.setdefault("candidate_summary", _shorten(item.get("title", ""), 80))
     return news
@@ -1390,6 +1406,9 @@ def translate_news(news: list) -> list:
 
 감시 키워드:
 {", ".join(NEWS_MATCH_TERMS[:25])}
+
+우선 확인 키워드:
+{", ".join((NEWS_PRIORITY_TERMS + NEWS_RISK_TERMS)[:25])}
 
 규칙:
 1. {COMPANY_NAME or TICKER} / {DISPLAY_TICKER} 주가에 직접 영향을 주는 뉴스만 포함
@@ -3002,9 +3021,18 @@ def format_news_block(news: list) -> list:
         lines = []
         for n in candidates[:5]:
             title = _shorten(n.get("candidate_summary") or n.get("title", ""), 105)
-            matches = ", ".join(n.get("keyword_matches", [])[:3])
-            suffix = f" _(키워드: {matches})_" if matches else ""
-            lines.append(f"• {title}{suffix}")
+            priority_matches = n.get("priority_matches", [])
+            risk_matches = n.get("risk_matches", [])
+            matches = priority_matches or risk_matches or n.get("keyword_matches", [])
+            labels = []
+            if priority_matches:
+                labels.append("우선")
+            if risk_matches:
+                labels.append("리스크")
+            label = " / ".join(labels) or "후보"
+            icon = "🟡" if n.get("candidate_level") == "watch" else "⚪"
+            suffix = f" _({label}: {', '.join(matches[:3])})_" if matches else ""
+            lines.append(f"• {icon} {title}{suffix}")
         blocks.append(_sec("*📰 VRT 확인 후보 뉴스*\n" + "\n".join(lines)))
         blocks.append(_ctx("AI 직접 영향 필터를 통과하지 않았거나 번역 API를 쓰지 못했지만, VRT 감시 키워드가 잡힌 기사입니다."))
     return blocks

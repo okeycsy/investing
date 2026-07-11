@@ -1028,6 +1028,7 @@ def _pct(val: float) -> str:
 def build_single_blocks(ts: TickerScore, elapsed: float) -> list:
     today  = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     sector = ts.sector or "Unknown"
+    industry = CONFIG.industry or "Unknown industry"
     blocks = []
 
     # ── 헤더 ──────────────────────────────────
@@ -1042,8 +1043,15 @@ def build_single_blocks(ts: TickerScore, elapsed: float) -> list:
     squeeze_tag = "  🔥 *BB Squeeze 발동*" if ts.squeeze else ""
     blocks.append(_sec_block(
         f"{ts.grade_emoji} *{ts.score}점*  `{bar}`  _{ts.grade}_{squeeze_tag}\n"
-        f"섹터: *{sector}*"
+        f"섹터: *{sector}* | 산업: *{industry}*"
     ))
+    if CONFIG.end_markets or CONFIG.core_products:
+        context_lines = []
+        if CONFIG.end_markets:
+            context_lines.append("시장: " + ", ".join(CONFIG.end_markets[:3]))
+        if CONFIG.core_products:
+            context_lines.append("핵심: " + ", ".join(CONFIG.core_products[:4]))
+        blocks.append(_ctx(" | ".join(context_lines)))
     blocks.append(_div())
 
     # ── 레이어별 상세 ─────────────────────────

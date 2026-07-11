@@ -16,13 +16,22 @@ class MonitorConfig:
     profile: str = "HOOD"
     ticker: str = "HOOD"
     company_name: str = "Robinhood Markets"
+    company_aliases: tuple[str, ...] = ()
+    exchange: str = ""
+    country: str = ""
+    currency: str = "USD"
     sector: str = ""
     industry: str = ""
     cik: str = "0001783879"
     benchmark: str = "QQQ"
     peer_tickers: tuple[str, ...] = ("COIN", "MSTR")
+    end_markets: tuple[str, ...] = ()
+    core_products: tuple[str, ...] = ()
     news_keywords: tuple[str, ...] = ()
     watch_themes: tuple[str, ...] = ()
+    priority_keywords: tuple[str, ...] = ()
+    risk_keywords: tuple[str, ...] = ()
+    profile_source_url: str = ""
     app_store_id: str = "938003185"
     state_dir: str = "state"
     market_scan_focus: str = ""
@@ -41,13 +50,18 @@ class MonitorConfig:
         words = [self.ticker]
         if self.company_name:
             words.extend(re.findall(r"[A-Za-z0-9]+", self.company_name.upper()))
+        words.extend(alias.upper() for alias in self.company_aliases)
         return tuple(dict.fromkeys(w for w in words if len(w) >= 3))
 
     @property
     def news_terms(self) -> tuple[str, ...]:
         words: list[str] = [self.ticker, self.company_name]
+        words.extend(self.company_aliases)
+        words.extend(self.core_products)
         words.extend(self.news_keywords)
         words.extend(self.watch_themes)
+        words.extend(self.priority_keywords)
+        words.extend(self.risk_keywords)
         if self.company_name:
             words.extend(re.findall(r"[A-Za-z0-9]+", self.company_name))
         cleaned = []
@@ -56,6 +70,19 @@ class MonitorConfig:
             if len(value) >= 3:
                 cleaned.append(value)
         return tuple(dict.fromkeys(cleaned))
+
+    @property
+    def profile_context(self) -> str:
+        parts = []
+        if self.sector:
+            parts.append(self.sector)
+        if self.industry:
+            parts.append(self.industry)
+        if self.end_markets:
+            parts.append("markets: " + ", ".join(self.end_markets[:3]))
+        if self.core_products:
+            parts.append("products: " + ", ".join(self.core_products[:4]))
+        return " | ".join(parts)
 
     @property
     def sec_user_agent(self) -> str:
@@ -175,20 +202,34 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
     ticker = normalize_ticker(_env_or_default("MONITOR_TICKER", values.get("ticker", selected_profile or "HOOD")))
     profile = normalize_ticker(_env_or_default("MONITOR_PROFILE", values.get("profile", selected_profile or ticker)))
     peer_source = _env_or_default("MONITOR_PEER_TICKERS", values.get("peer_tickers", "COIN,MSTR"))
+    alias_source = _env_or_default("MONITOR_COMPANY_ALIASES", values.get("company_aliases", ""))
+    end_market_source = _env_or_default("MONITOR_END_MARKETS", values.get("end_markets", ""))
+    product_source = _env_or_default("MONITOR_CORE_PRODUCTS", values.get("core_products", ""))
     news_keyword_source = _env_or_default("MONITOR_NEWS_KEYWORDS", values.get("news_keywords", ""))
     watch_theme_source = _env_or_default("MONITOR_WATCH_THEMES", values.get("watch_themes", ""))
+    priority_keyword_source = _env_or_default("MONITOR_PRIORITY_KEYWORDS", values.get("priority_keywords", ""))
+    risk_keyword_source = _env_or_default("MONITOR_RISK_KEYWORDS", values.get("risk_keywords", ""))
 
     return MonitorConfig(
         profile=profile or ticker,
         ticker=ticker or "HOOD",
         company_name=_env_or_default("MONITOR_COMPANY_NAME", values.get("company_name", "Robinhood Markets")),
+        company_aliases=_parse_text_list(alias_source),
+        exchange=_env_or_default("MONITOR_EXCHANGE", values.get("exchange", "")).strip(),
+        country=_env_or_default("MONITOR_COUNTRY", values.get("country", "")).strip(),
+        currency=_env_or_default("MONITOR_CURRENCY", values.get("currency", "USD")).strip() or "USD",
         sector=_env_or_default("MONITOR_SECTOR", values.get("sector", "")).strip(),
         industry=_env_or_default("MONITOR_INDUSTRY", values.get("industry", "")).strip(),
         cik=_env_or_default("MONITOR_CIK", values.get("cik", "0001783879")).strip(),
         benchmark=normalize_ticker(_env_or_default("MONITOR_BENCHMARK", values.get("benchmark", "QQQ"))) or "QQQ",
         peer_tickers=_parse_list(peer_source),
+        end_markets=_parse_text_list(end_market_source),
+        core_products=_parse_text_list(product_source),
         news_keywords=_parse_text_list(news_keyword_source),
         watch_themes=_parse_text_list(watch_theme_source),
+        priority_keywords=_parse_text_list(priority_keyword_source),
+        risk_keywords=_parse_text_list(risk_keyword_source),
+        profile_source_url=_env_or_default("MONITOR_PROFILE_SOURCE_URL", values.get("profile_source_url", "")).strip(),
         app_store_id=_env_or_default("MONITOR_APP_STORE_ID", values.get("app_store_id", "")).strip(),
         state_dir=_env_or_default("MONITOR_STATE_DIR", values.get("state_dir", "state")).strip() or "state",
         market_scan_focus=normalize_ticker(_env_or_default("MARKET_SCAN_FOCUS_TICKER", values.get("market_scan_focus", ""))),

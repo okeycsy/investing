@@ -25,18 +25,27 @@ ticker: $VRT
 ```text
 ticker: $VRT
 company_name: Vertiv Holdings Co
+company_aliases: Vertiv, Vertiv Holdings
+exchange: NYSE
+country: United States
+currency: USD
 sector: Industrials
-industry: Electrical Equipment & Data Center Infrastructure
+industry: Critical Digital Infrastructure, Power & Thermal Management
 cik: 0001674101
 benchmark: $QQQ
-peer_tickers: $ETN, $PWR, $SMCI
-news_keywords: Vertiv, Vertiv Holdings, data center power, data center cooling, thermal management
+peer_tickers: $ETN, $NVT, $PWR, $SMCI
+end_markets: data centers, communication networks, commercial and industrial environments
+core_products: critical power, UPS systems, power distribution, thermal management, liquid cooling
+news_keywords: Vertiv, critical digital infrastructure, data center power, data center cooling, thermal management
 watch_themes: AI data center capex, hyperscaler buildout, power grid demand
+priority_keywords: earnings, guidance, backlog, organic orders, AI data center, liquid cooling, Nvidia
+risk_keywords: order slowdown, margin pressure, supply chain, tariffs, customer concentration, competition
+profile_source_url: https://investors.vertiv.com/overview/default.aspx
 app_store_id:
 market_scan_focus: $VRT
 ```
 
-`cik`는 SEC Form 4 내부자 거래 조회에 필요합니다. `news_keywords`와 `watch_themes`는 뉴스 후보를 놓치지 않기 위한 감시 키워드입니다. 해당 종목에 앱스토어 순위 추적이 없으면 `app_store_id`는 비워두면 됩니다. `MONITOR_PROFILE` 또는 `MONITOR_TICKER` 환경 변수로도 실행 시점에 종목을 바꿀 수 있습니다.
+`cik`는 SEC Form 4 내부자 거래 조회에 필요합니다. `company_aliases`, `core_products`, `news_keywords`, `watch_themes`, `priority_keywords`, `risk_keywords`는 뉴스 후보를 놓치지 않기 위한 감시 키워드입니다. 해당 종목에 앱스토어 순위 추적이 없으면 `app_store_id`는 비워두면 됩니다. `MONITOR_PROFILE` 또는 `MONITOR_TICKER` 환경 변수로도 실행 시점에 종목을 바꿀 수 있습니다.
 
 ## 상태 파일
 
@@ -128,7 +137,7 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 
 모니터 알림 상단에는 `긴급/주의/참고` 요약이 먼저 표시됩니다. 요약은 주가 급변, 기술지표, 옵션/공매도, SEC 내부자 거래, 뉴스, DCA 점수를 기준으로 핵심 이유를 최대 4개까지 보여줍니다.
 
-뉴스는 `관련 확정 뉴스`와 `VRT 확인 후보 뉴스`를 구분합니다. Claude가 직접 영향 뉴스로 판단한 기사는 요약/번역이 표시되고, 직접 영향 필터를 통과하지 않았더라도 VRT 감시 키워드가 잡힌 기사는 후보로 따로 표시합니다.
+뉴스는 `관련 확정 뉴스`와 `VRT 확인 후보 뉴스`를 구분합니다. Claude가 직접 영향 뉴스로 판단한 기사는 요약/번역이 표시되고, 직접 영향 필터를 통과하지 않았더라도 VRT 감시 키워드가 잡힌 기사는 후보로 따로 표시합니다. `priority_keywords` 또는 `risk_keywords`가 잡힌 후보는 `우선/리스크` 라벨과 함께 표시됩니다.
 
 ## 다음 재개발 후보
 
