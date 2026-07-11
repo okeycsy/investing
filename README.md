@@ -77,7 +77,8 @@ state/VRT/app_rank_cache.json
 | VRT 13F 기관 포지션 | `VRT Monitor` / `13f` | UTC 토 10:00 = KST/JST 토 19:00 |
 | VRT 단일 종목 스캔 | `VRT Market Scan` | UTC 월-금 22:00 = KST/JST 화-토 07:00 |
 | VRT 라이브 연결 점검 | `Live Smoke Test` | `main` push 또는 수동 실행 |
-| VRT 알림 발송 점검 | `VRT Alert Delivery Smoke` | 수동 실행, 관련 파일 변경 push |
+| VRT 실제 시작 점검 | `VRT Startup Digest` | 수동 실행, 관련 파일 변경 push |
+| VRT 알림 발송 샘플 점검 | `VRT Alert Delivery Smoke` | 수동 실행 |
 | VRT 백테스트 | `V3 Score Backtester` | 수동 실행 |
 | VRT DCA 현황/업데이트 | `VRT Monitor` / `dca_status`, `dca_update` | 수동 실행 |
 
@@ -95,6 +96,7 @@ python hood_monitor.py 13f
 python market_scan.py --ticker VRT
 
 python backtest.py --ticker VRT --years 2 --no-slack
+python startup_digest.py --no-slack
 ```
 
 ## 라이브 점검

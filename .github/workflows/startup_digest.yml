@@ -1,0 +1,43 @@
+name: VRT Startup Digest
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - '.github/workflows/startup_digest.yml'
+      - 'startup_digest.py'
+      - 'hood_monitor.py'
+      - 'market_scan.py'
+      - 'monitor_config.md'
+      - 'monitor_config.py'
+      - 'profiles/VRT.md'
+      - 'requirements.txt'
+
+  workflow_dispatch:
+
+jobs:
+  startup-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send real startup digest
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SEC_CONTACT: ${{ secrets.SEC_CONTACT }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
+        run: python startup_digest.py

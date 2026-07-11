@@ -1,15 +1,6 @@
 name: VRT Alert Delivery Smoke
 
 on:
-  push:
-    branches: ['main']
-    paths:
-      - '.github/workflows/alert_delivery_smoke.yml'
-      - 'alert_delivery_smoke.py'
-      - 'monitor_config.md'
-      - 'monitor_config.py'
-      - 'profiles/VRT.md'
-
   workflow_dispatch:
 
 jobs:
