@@ -2644,6 +2644,183 @@ def _sec(text: str, fields: list = None) -> dict:
     return block
 
 
+ALERT_LEVELS = {
+    "info": (0, "참고", "⚪"),
+    "watch": (1, "주의", "🟡"),
+    "urgent": (2, "긴급", "🔴"),
+}
+
+
+def _alert_level(level: str) -> tuple:
+    return ALERT_LEVELS.get(level, ALERT_LEVELS["info"])
+
+
+def _add_reason(reasons: list, level: str, text: str):
+    if text:
+        reasons.append((level, text))
+
+
+def _strongest_level(reasons: list) -> str:
+    if not reasons:
+        return "info"
+    return max((level for level, _ in reasons), key=lambda x: _alert_level(x)[0])
+
+
+def _mode_label(mode: str) -> str:
+    return {
+        "normal": "장중",
+        "close": "장마감",
+        "morning": "아침",
+        "weekly": "주간",
+        "13f": "13F",
+        "dca_status": "DCA",
+        "dca_update": "DCA",
+    }.get(mode, mode)
+
+
+def _summarize_price_reason(price: Optional[PriceData], reasons: list):
+    if not price or price.prev_close <= 0:
+        return
+
+    abs_pct = abs(price.change_pct)
+    direction = "상승" if price.change_pct >= 0 else "하락"
+    if abs_pct >= 4:
+        _add_reason(reasons, "urgent", f"주가 전일 대비 {price.change_pct:+.1f}% {direction}: 급변동 기준 충족")
+    elif abs_pct >= 2:
+        _add_reason(reasons, "watch", f"주가 전일 대비 {price.change_pct:+.1f}% {direction}: 변동성 확대")
+    else:
+        _add_reason(reasons, "info", f"주가 전일 대비 {price.change_pct:+.1f}%: 급변동은 아님")
+
+    if price.volume > 0 and price.vol_avg_5d > 0:
+        vol_ratio = price.volume / price.vol_avg_5d
+        if vol_ratio >= 1.5:
+            _add_reason(reasons, "watch", f"거래량이 5일 평균의 {vol_ratio:.1f}배: 수급 변화 확인 필요")
+
+
+def _summarize_technical_reason(technicals: Optional[TechnicalSignals], reasons: list):
+    if not technicals:
+        return
+
+    if technicals.rsi_14 <= 30:
+        _add_reason(reasons, "watch", f"RSI {technicals.rsi_14:.1f}: 과매도 구간")
+    elif technicals.rsi_14 >= 70:
+        _add_reason(reasons, "watch", f"RSI {technicals.rsi_14:.1f}: 과열 구간")
+
+    if technicals.macd_alert == "bullish_cross":
+        _add_reason(reasons, "info", "MACD 골든크로스: 단기 모멘텀 개선")
+    elif technicals.macd_alert == "bearish_cross":
+        _add_reason(reasons, "watch", "MACD 데드크로스: 단기 모멘텀 약화")
+
+
+def _summarize_flow_reason(options: Optional[OptionsData], short: Optional[ShortInterestData], reasons: list):
+    if options:
+        if options.pcr_signal == "heavy_hedging":
+            _add_reason(reasons, "watch", f"옵션 PCR {options.pcr:.2f}: 풋 헤징이 높음")
+        elif options.pcr_signal == "bullish":
+            _add_reason(reasons, "info", f"옵션 PCR {options.pcr:.2f}: 콜 우세")
+
+    if short:
+        if short.short_pct >= 60:
+            _add_reason(reasons, "urgent", f"공매도 비중 {short.short_pct:.1f}%: 매우 높은 압박")
+        elif short.short_pct >= 50:
+            _add_reason(reasons, "watch", f"공매도 비중 {short.short_pct:.1f}%: 높은 편")
+
+
+def _summarize_insider_reason(insiders: list, reasons: list):
+    if not insiders:
+        return
+
+    sale_value = sum(t.total_value for t in insiders if t.trade_type == "Sale")
+    purchase_value = sum(t.total_value for t in insiders if t.trade_type == "Purchase")
+    sale_count = sum(1 for t in insiders if t.trade_type == "Sale")
+    purchase_count = sum(1 for t in insiders if t.trade_type == "Purchase")
+
+    if sale_count:
+        level = "urgent" if sale_value >= 5_000_000 else "watch"
+        value = f"${sale_value/1_000_000:.1f}M" if sale_value >= 1_000_000 else f"${sale_value:,.0f}"
+        _add_reason(reasons, level, f"신규 내부자 매도 {sale_count}건, 추정 {value}")
+    if purchase_count:
+        value = f"${purchase_value/1_000_000:.1f}M" if purchase_value >= 1_000_000 else f"${purchase_value:,.0f}"
+        _add_reason(reasons, "info", f"신규 내부자 매수 {purchase_count}건, 추정 {value}")
+
+
+def _summarize_news_reason(news: list, reasons: list):
+    relevant = [n for n in news if not n.get("skip") and n.get("summary")]
+    if not relevant:
+        return
+
+    negative = sum(1 for n in relevant if n.get("sentiment") == "negative")
+    positive = sum(1 for n in relevant if n.get("sentiment") == "positive")
+    if negative:
+        _add_reason(reasons, "watch", f"관련 뉴스 {len(relevant)}건 중 부정 {negative}건")
+    elif positive:
+        _add_reason(reasons, "info", f"관련 뉴스 {len(relevant)}건 중 긍정 {positive}건")
+    else:
+        _add_reason(reasons, "info", f"관련 뉴스 {len(relevant)}건 업데이트")
+
+
+def _summarize_dca_reason(dca_tech: Optional[DCATechnicalScore], reasons: list):
+    if not dca_tech:
+        return
+
+    if dca_tech.total >= 80:
+        _add_reason(reasons, "info", f"DCA 점수 {dca_tech.total}/100: {dca_tech.grade}")
+    elif dca_tech.total <= 25:
+        _add_reason(reasons, "watch", f"DCA 점수 {dca_tech.total}/100: 진입 매력 낮음")
+
+
+def build_alert_quality_blocks(
+    mode: str,
+    *,
+    price: Optional[PriceData] = None,
+    technicals: Optional[TechnicalSignals] = None,
+    options: Optional[OptionsData] = None,
+    short: Optional[ShortInterestData] = None,
+    insiders: list | None = None,
+    news: list | None = None,
+    dca_tech: Optional[DCATechnicalScore] = None,
+    extra_reasons: list | None = None,
+) -> list:
+    reasons = []
+    _summarize_price_reason(price, reasons)
+    _summarize_technical_reason(technicals, reasons)
+    _summarize_flow_reason(options, short, reasons)
+    _summarize_insider_reason(insiders or [], reasons)
+    _summarize_news_reason(news or [], reasons)
+    _summarize_dca_reason(dca_tech, reasons)
+    for level, text in extra_reasons or []:
+        _add_reason(reasons, level, text)
+
+    if not reasons:
+        _add_reason(reasons, "info", "새로운 핵심 시그널은 없고 정기 점검 결과만 공유")
+
+    strongest = _strongest_level(reasons)
+    _, label, emoji = _alert_level(strongest)
+
+    top_reasons = sorted(reasons, key=lambda item: _alert_level(item[0])[0], reverse=True)[:4]
+    reason_lines = [
+        f"• {_alert_level(level)[2]} {text}"
+        for level, text in top_reasons
+    ]
+    return [
+        _sec(
+            f"*{emoji} {label} | {DISPLAY_TICKER} {_mode_label(mode)} 핵심 요약*\n"
+            + "\n".join(reason_lines)
+        ),
+        _ctx("분류 기준: 주가 급변, 기술지표, 옵션/공매도, SEC 내부자 거래, 뉴스, DCA 점수"),
+        {"type": "divider"},
+    ]
+
+
+def insert_alert_quality_summary(blocks: list, mode: str, **kwargs):
+    summary = build_alert_quality_blocks(mode, **kwargs)
+    insert_at = 1 if blocks and blocks[0].get("type") == "header" else 0
+    if insert_at < len(blocks) and blocks[insert_at].get("type") == "divider":
+        blocks.pop(insert_at)
+    for block in reversed(summary):
+        blocks.insert(insert_at, block)
+
+
 def format_technicals_block(ts: TechnicalSignals) -> list:
     if ts.rsi_14 <= 30:
         rsi_line = f"🟢 *RSI {ts.rsi_14}* — 과매도, DCA 타이밍 가능"
@@ -2872,6 +3049,9 @@ def run_normal():
     state = load_state()
     ws = load_weekly_state()
     blocks = []
+    price = None
+    new_news = []
+    new_insiders = []
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     if state.get("price_alert_date") != today:
@@ -2958,6 +3138,14 @@ def run_normal():
     if blocks:
         blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
             "text": f"📊 {DISPLAY_TICKER} — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
+        insert_alert_quality_summary(
+            blocks,
+            "normal",
+            price=price,
+            technicals=technicals,
+            insiders=new_insiders,
+            news=new_news,
+        )
         blocks.extend(_footer())
         send_slack(blocks)
     else:
@@ -2976,6 +3164,11 @@ def run_close():
     state = load_state()
     ws = load_weekly_state()
     blocks = []
+    new_insiders = []
+    news = []
+    options = None
+    short = None
+    dca_tech = None
 
     price = fetch_price(realtime=False)
     if price and price.prev_close > 0:
@@ -3113,6 +3306,17 @@ def run_close():
 
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
         "text": f"🔔 {DISPLAY_TICKER} 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
+    insert_alert_quality_summary(
+        blocks,
+        "close",
+        price=price,
+        technicals=technicals,
+        options=options,
+        short=short,
+        insiders=new_insiders,
+        news=news,
+        dca_tech=dca_tech,
+    )
     blocks.extend(_footer())
     send_slack(blocks)
 
@@ -3146,6 +3350,11 @@ def run_morning():
         {"type": "section", "text": {"type": "mrkdwn", "text":
             f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {label}*"}},
     ]
+    insert_alert_quality_summary(
+        blocks,
+        "morning",
+        extra_reasons=[("urgent" if abs_pct >= 4 else "watch", f"어제 종가 기준 {alert['change_pct']:+.1f}% {label}: 재확인 필요")],
+    )
     blocks.extend(_footer())
     send_slack(blocks)
 
@@ -3169,6 +3378,11 @@ def run_13f():
             {"type": "header", "text": {"type": "plain_text", "text": f"🏛 {DISPLAY_TICKER} 13F 기관 포지션 업데이트"}},
             {"type": "divider"},
         ]
+        insert_alert_quality_summary(
+            blocks,
+            "13f",
+            extra_reasons=[("info", f"새 13F 포지션 {len(new_filings)}건 감지")],
+        )
         blocks.extend(format_13f_block(new_filings))
         blocks.extend(_footer())
         send_slack(blocks)
@@ -3248,10 +3462,30 @@ def run_weekly():
     # 주간 기술지표 스코어
     weekly_ohlcv_w = fetch_weekly_ohlcv(weeks=40)
     ohlcv_w = fetch_ohlcv(days=210)
+    dca_tech_w = None
     if ohlcv_w:
         dca_tech_w = calculate_dca_technical_score(ohlcv_w, weekly_ohlcv_w, sm=None)
         if dca_tech_w:
             blocks.extend(format_dca_technical_block(dca_tech_w))
+    weekly_reasons = []
+    if alerts:
+        weekly_reasons.append(("watch", f"이번 주 발생 알림 {len(alerts)}건"))
+    if insider_summary:
+        weekly_reasons.append(("watch", f"주간 내부자 거래 요약 {len(insider_summary)}건"))
+    if news_summary:
+        weekly_reasons.append(("info", f"주간 주요 뉴스 {len(news_summary)}건"))
+    insert_alert_quality_summary(
+        blocks,
+        "weekly",
+        price=price,
+        technicals=technicals,
+        options=options,
+        short=short,
+        insiders=insider_trades,
+        news=news,
+        dca_tech=dca_tech_w,
+        extra_reasons=weekly_reasons,
+    )
     blocks.extend(_footer())
 
     send_slack(blocks)
@@ -3299,6 +3533,11 @@ def run_dca_status():
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
         {"type": "divider"},
     ]
+    insert_alert_quality_summary(
+        blocks,
+        "dca_status",
+        extra_reasons=[("info", f"DCA 포지션 {shares:,.1f}주, 평단 ${avg_price:.2f}")],
+    )
     send_slack(blocks)
     log.info(f"DCA status sent: {shares:.1f}주 @ ${avg_price:.2f}")
 
@@ -3389,6 +3628,11 @@ def run_dca_update():
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
         {"type": "divider"},
     ]
+    insert_alert_quality_summary(
+        blocks,
+        "dca_update",
+        extra_reasons=[("info", f"{action} {new_shares:.1f}주 @ ${new_price:.2f} 반영")],
+    )
     send_slack(blocks)
     log.info(f"DCA updated: {total_shares:.1f}주 @ ${new_avg:.2f} ({action})")
 

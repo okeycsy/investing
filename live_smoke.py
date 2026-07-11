@@ -197,15 +197,35 @@ def check_slack(config, *, require: bool) -> tuple[bool, str]:
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     payload = {
-        "text": f"{config.display_ticker} live smoke test",
+        "text": f"{config.display_ticker} notification quality smoke test",
         "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{config.display_ticker} 알림 품질 점검",
+                },
+            },
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f":white_check_mark: *{config.display_ticker} live smoke test*\nYahoo/SEC checks reached from GitHub/Codex runtime.\n_{now}_",
+                    "text": (
+                        f"*⚪ 참고 | {config.display_ticker} 실전 연결 요약*\n"
+                        "• ✅ Yahoo 가격 데이터 연결 성공\n"
+                        "• ✅ SEC submissions/Form 4 XML 연결 성공\n"
+                        "• ✅ GitHub Actions Secret 기반 Slack 발송 성공"
+                    ),
                 },
-            }
+            },
+            {
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": f"알림 품질 개선 smoke test | {config.company_name or 'Unknown company'} | {now}",
+                }],
+            },
+            {"type": "divider"},
         ],
     }
     response = requests.post(webhook, json=payload, timeout=15)
