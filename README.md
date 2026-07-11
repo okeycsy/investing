@@ -64,6 +64,23 @@ state/VRT/app_rank_cache.json
 
 `SEC_CONTACT`는 SEC 요청의 `From` 헤더에 들어갈 연락처입니다. SEC가 특정 이메일 도메인을 `User-Agent` 안에서 차단할 수 있어 연락처는 별도 헤더로 보냅니다. 필요하면 `SEC_USER_AGENT`, legacy EDGAR/Archives 경로는 `SEC_LEGACY_USER_AGENT` 환경 변수로 앱 식별자를 직접 지정할 수 있습니다.
 
+## 알림 종류와 스케줄
+
+시간은 GitHub Actions cron 기준 UTC와 한국/일본 시간(UTC+9)을 함께 표기합니다.
+
+| 알림 | workflow | 실행 시간 |
+| --- | --- | --- |
+| VRT 장중 모니터 | `VRT Monitor` / `normal` | UTC 월-금 08:00-20:00, 22:00-23:00 매시 정각 |
+| VRT 장마감 브리핑 | `VRT Monitor` / `close` | UTC 월-금 21:00 = KST/JST 화-토 06:00 |
+| VRT 아침 재확인 | `VRT Monitor` / `morning` | UTC 월-금 21:30 = KST/JST 화-토 06:30 |
+| VRT 주간 브리핑 | `VRT Monitor` / `weekly` | UTC 일 23:00 = KST/JST 월 08:00 |
+| VRT 13F 기관 포지션 | `VRT Monitor` / `13f` | UTC 토 10:00 = KST/JST 토 19:00 |
+| VRT 단일 종목 스캔 | `VRT Market Scan` | UTC 월-금 22:00 = KST/JST 화-토 07:00 |
+| VRT 라이브 연결 점검 | `Live Smoke Test` | `main` push 또는 수동 실행 |
+| VRT 알림 발송 점검 | `VRT Alert Delivery Smoke` | 수동 실행, 관련 파일 변경 push |
+| VRT 백테스트 | `V3 Score Backtester` | 수동 실행 |
+| VRT DCA 현황/업데이트 | `VRT Monitor` / `dca_status`, `dca_update` | 수동 실행 |
+
 ## 수동 실행
 
 ```bash

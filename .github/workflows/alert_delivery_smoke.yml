@@ -1,0 +1,36 @@
+name: VRT Alert Delivery Smoke
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - '.github/workflows/alert_delivery_smoke.yml'
+      - 'alert_delivery_smoke.py'
+      - 'monitor_config.md'
+      - 'monitor_config.py'
+      - 'profiles/VRT.md'
+
+  workflow_dispatch:
+
+jobs:
+  alert-delivery-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send representative Slack alerts
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
+        run: python alert_delivery_smoke.py
