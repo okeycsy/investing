@@ -8,10 +8,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_FILE = ROOT / "monitor_config.md"
+DEFAULT_PROFILES_DIR = ROOT / "profiles"
 
 
 @dataclass(frozen=True)
 class MonitorConfig:
+    profile: str = "HOOD"
     ticker: str = "HOOD"
     company_name: str = "Robinhood Markets"
     cik: str = "0001783879"
@@ -107,6 +109,29 @@ def _read_markdown_config(path: Path) -> dict[str, str]:
     return values
 
 
+def _profile_path(profile: str) -> Path | None:
+    profile = normalize_ticker(profile)
+    if not profile:
+        return None
+
+    candidates = [
+        DEFAULT_PROFILES_DIR / f"{profile}.md",
+        DEFAULT_PROFILES_DIR / f"{profile.lower()}.md",
+        DEFAULT_PROFILES_DIR / f"{profile.upper()}.md",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _read_profile_config(profile: str) -> dict[str, str]:
+    path = _profile_path(profile)
+    if not path or not path.exists():
+        return {}
+    return _read_markdown_config(path)
+
+
 def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
     config_file = Path(
         path
@@ -114,20 +139,29 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
         or DEFAULT_CONFIG_FILE
     )
     raw = _read_markdown_config(config_file)
+    selected_profile = normalize_ticker(
+        os.environ.get("MONITOR_PROFILE", "")
+        or raw.get("profile", "")
+        or raw.get("ticker", "")
+    )
+    profile_raw = _read_profile_config(selected_profile)
+    values = {**profile_raw, **raw}
 
-    ticker = normalize_ticker(_env_or_default("MONITOR_TICKER", raw.get("ticker", "HOOD")))
-    peer_source = _env_or_default("MONITOR_PEER_TICKERS", raw.get("peer_tickers", "COIN,MSTR"))
+    ticker = normalize_ticker(_env_or_default("MONITOR_TICKER", values.get("ticker", selected_profile or "HOOD")))
+    profile = normalize_ticker(_env_or_default("MONITOR_PROFILE", values.get("profile", selected_profile or ticker)))
+    peer_source = _env_or_default("MONITOR_PEER_TICKERS", values.get("peer_tickers", "COIN,MSTR"))
 
     return MonitorConfig(
+        profile=profile or ticker,
         ticker=ticker or "HOOD",
-        company_name=_env_or_default("MONITOR_COMPANY_NAME", raw.get("company_name", "Robinhood Markets")),
-        cik=_env_or_default("MONITOR_CIK", raw.get("cik", "0001783879")).strip(),
-        benchmark=normalize_ticker(_env_or_default("MONITOR_BENCHMARK", raw.get("benchmark", "QQQ"))) or "QQQ",
+        company_name=_env_or_default("MONITOR_COMPANY_NAME", values.get("company_name", "Robinhood Markets")),
+        cik=_env_or_default("MONITOR_CIK", values.get("cik", "0001783879")).strip(),
+        benchmark=normalize_ticker(_env_or_default("MONITOR_BENCHMARK", values.get("benchmark", "QQQ"))) or "QQQ",
         peer_tickers=_parse_list(peer_source),
-        app_store_id=_env_or_default("MONITOR_APP_STORE_ID", raw.get("app_store_id", "938003185")).strip(),
-        state_dir=_env_or_default("MONITOR_STATE_DIR", raw.get("state_dir", ".")).strip() or ".",
-        market_scan_focus=normalize_ticker(_env_or_default("MARKET_SCAN_FOCUS_TICKER", raw.get("market_scan_focus", ""))),
-        sec_contact=_env_or_default("SEC_CONTACT", raw.get("sec_contact", "contact@example.com")).strip(),
+        app_store_id=_env_or_default("MONITOR_APP_STORE_ID", values.get("app_store_id", "")).strip(),
+        state_dir=_env_or_default("MONITOR_STATE_DIR", values.get("state_dir", ".")).strip() or ".",
+        market_scan_focus=normalize_ticker(_env_or_default("MARKET_SCAN_FOCUS_TICKER", values.get("market_scan_focus", ""))),
+        sec_contact=_env_or_default("SEC_CONTACT", values.get("sec_contact", "contact@example.com")).strip(),
     )
 
 

@@ -1,6 +1,19 @@
 name: Live Smoke Test
 
 on:
+  push:
+    branches: ['main']
+    paths:
+      - '.github/workflows/live_smoke.yml'
+      - 'backtest.py'
+      - 'hood_monitor.py'
+      - 'live_smoke.py'
+      - 'market_scan.py'
+      - 'monitor_config.md'
+      - 'monitor_config.py'
+      - 'profiles/**'
+      - 'requirements.txt'
+
   workflow_dispatch:
     inputs:
       require_slack:
@@ -35,8 +48,9 @@ jobs:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
         run: |
-          if [ "${{ github.event.inputs.require_slack }}" = "true" ]; then
-            python live_smoke.py --require-slack
-          else
-            python live_smoke.py
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.require_slack }}" != "true" ]; then
+            python live_smoke.py --no-slack
+            exit 0
           fi
+
+          python live_smoke.py --require-slack

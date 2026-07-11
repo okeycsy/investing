@@ -1,13 +1,8 @@
 # Monitor Config
 
-종목을 바꾸려면 아래 `ticker` 값을 수정하세요. 예: `ticker: $VRT`
+종목을 바꾸려면 아래 `ticker` 값만 수정하세요. 예: `ticker: $VRT`
+세부 정보는 `profiles/{TICKER}.md`가 있으면 자동 적용됩니다.
 
 ticker: $HOOD
-company_name: Robinhood Markets
-cik: 0001783879
-benchmark: $QQQ
-peer_tickers: $COIN, $MSTR
-app_store_id: 938003185
 state_dir: .
-market_scan_focus: $HOOD
 sec_contact: maybe2213@naver.com
