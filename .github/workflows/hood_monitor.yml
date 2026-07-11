@@ -1,4 +1,4 @@
-name: HOOD Monitor
+name: Ticker Monitor
 
 on:
   schedule:
@@ -7,8 +7,7 @@ on:
     # PRE:     UTC 08:00~13:30 (KST 17:00~22:30)
     # REGULAR: UTC 13:30~20:00 (KST 22:30~05:00)
     # POST:    UTC 20:00~24:00 (KST 05:00~09:00)
-    - cron: '0 8-19 * * 2-6'    # UTC 08~19 매시 (월~금 KST 화~토)
-    - cron: '0 20-23 * * 1-5'   # UTC 20~23 매시 (일~목 KST 월~금) POST 구간
+    - cron: '0 8-23 * * 1-5'    # UTC 월~금 관련 거래 시간대
 
     # ── close: KST 06:00 = UTC 21:00 ────────────────────────
     # NYSE 마감(UTC 20:00) 1시간 후, 확정 종가 기준
@@ -54,7 +53,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install -r requirements.txt
 
       - name: Determine RUN_MODE
         id: mode
@@ -83,10 +82,13 @@ jobs:
             echo "mode=normal" >> $GITHUB_OUTPUT
           fi
 
-      - name: Run HOOD Monitor
+      - name: Run Ticker Monitor
         env:
           SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          SEC_CONTACT:        ${{ secrets.SEC_CONTACT }}
+          SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
+          SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
           RUN_MODE:           ${{ steps.mode.outputs.mode }}
           DCA_SHARES:         ${{ github.event.inputs.dca_shares }}
           DCA_PRICE:          ${{ github.event.inputs.dca_price }}
@@ -97,6 +99,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f state.json weekly_state.json beta_cache.json app_rank_cache.json 2>/dev/null || true
+          git add -f state.json weekly_state.json beta_cache.json app_rank_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json 2>/dev/null || true
           git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
           git push || true

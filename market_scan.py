@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass, field
 
+from monitor_config import load_monitor_config
+
 try:
     import yfinance as yf
 except ImportError:
@@ -30,6 +32,9 @@ except ImportError:
 # ─────────────────────────────────────────────
 SLACK_WEBHOOK = os.environ.get("MARKET_SCAN_WEBHOOK") or os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CONFIG = load_monitor_config()
+FOCUS_TICKER = CONFIG.effective_market_scan_focus
+DISPLAY_FOCUS_TICKER = f"${FOCUS_TICKER}"
 
 KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
@@ -743,7 +748,7 @@ def score_ticker(ticker: str, sector: str, ohlcv: dict,
     if vix >= 25:
         mult = 0.8    # 시장 투매: 바닥 확인 지연 리스크
     elif btc_above_sma20:
-        mult = 1.2    # 크립토 순풍: HOOD 업사이드 확대
+        mult = 1.2    # 크립토 순풍: 고베타/크립토 민감 종목 업사이드 확대
     else:
         mult = 1.0
     ts.multiplier = mult
@@ -806,7 +811,7 @@ def _claude_comment(sectors: dict, top15: list, bottom10: list) -> str:
     bot_s = ", ".join(f"{t.ticker}({t.score})" for t in bottom10[:5])
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
-    prompt = f"""당신은 나스닥 100 섹터 분석 전문가입니다. {today} 기준 기술적 지표 스코어를 바탕으로 시장 현황을 한국어로 간결하게 해석해주세요.
+    prompt = f"""당신은 미국 주식 섹터 분석 전문가입니다. {today} 기준 기술적 지표 스코어를 바탕으로 시장 현황을 한국어로 간결하게 해석해주세요.
 
 섹터별 평균 기술점수 (100점 만점):
 {sec_lines}
@@ -886,8 +891,8 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
         blocks.append(_sec_block(claude_comment))
         blocks.append(_div())
 
-    # ── HOOD DCA 오늘의 신호 ──────────────────────────────────────
-    hood_ts = next((r for r in results if r.ticker == "HOOD" and not r.error), None)
+    # ── 설정 종목 DCA 오늘의 신호 ─────────────────────────────────
+    hood_ts = next((r for r in results if r.ticker == FOCUS_TICKER and not r.error), None)
     if hood_ts:
         score = hood_ts.score
         # 매수 금액 결정
@@ -925,7 +930,7 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
         fill = int(score / 100 * 10)
         bar  = "█" * fill + "░" * (10 - fill)
         hood_block = "\n".join([
-            "*💰 오늘의 $HOOD DCA 신호*",
+            f"*💰 오늘의 {DISPLAY_FOCUS_TICKER} DCA 신호*",
             action,
             f"`{bar}` *{score}점* ({hood_ts.grade})",
             f"CMF `{hood_ts.cmf:+.3f}` ({cmf_state})  EvsR `{hood_ts.evsr:.2f}`  RSI `{hood_ts.rsi:.0f}`",
@@ -948,11 +953,9 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
     for i, ts in enumerate(top15, 1):
         fill = int(ts.score / 100 * 6)
         bar  = "█" * fill + "░" * (6 - fill)
-        squeeze_tag = " 🔥SQ" if ts.squeeze else ""
         lines.append(
             f"{i:2d}. {ts.grade_emoji} *${ts.ticker}* `{bar}` {ts.score}점"
-            f"  RSI {ts.rsi:.0f}  MFI {ts.mfi:.0f}"
-            f"  CMF {ts.cmf:+.2f}  ADX {ts.adx:.0f}{squeeze_tag}"
+            f"  RSI {ts.rsi:.0f}  CMF {ts.cmf:+.2f}  EvsR {ts.evsr:.2f}"
             f"  _{ts.sector}_"
         )
     blocks.append(_sec_block("\n".join(lines)))
@@ -1081,10 +1084,9 @@ def _claude_single_comment(ts: TickerScore) -> str:
         prompt = (
             f"다음은 ${ts.ticker}({ts.sector}) 기술지표 스코어입니다 (100점 만점):\n"
             f"총점: {ts.score}점 ({ts.grade})\n"
-            f"Layer A(Volume/Flow): {ts.layers.get('A',0)}/28 — CMF {ts.cmf:+.3f}, MFI {ts.mfi:.0f}, EvsR {ts.evsr:.2f}\n"
-            f"Layer B(Trend): {ts.layers.get('B',0)}/20 — ADX {ts.adx:.0f}\n"
-            f"Layer C(Momentum): {ts.layers.get('C',0)}/20 — RSI {ts.rsi:.1f}\n"
-            f"Layer D(Volatility): {ts.layers.get('D',0)}/12 — BBSqueeze {'발동' if ts.squeeze else '없음'}\n\n"
+            f"Layer A(CMF): {ts.layers.get('A',0)}/50 — CMF {ts.cmf:+.3f}\n"
+            f"Layer B(EvsR): {ts.layers.get('B',0)}/30 — EvsR {ts.evsr:.2f}\n"
+            f"보조지표: RSI {ts.rsi:.1f}, UpVol {ts.upvol:.2f}, 배수 {ts.multiplier:.1f}\n\n"
             "이 데이터를 바탕으로 한국어로 2~3문장, 핵심만 날카롭게 평가해주세요. "
             "가격 예측 금지. 기술적 상태 진단만."
         )
@@ -1112,7 +1114,7 @@ def main():
     # ── CLI 파싱 ──────────────────────────────
     parser = argparse.ArgumentParser(description="S&P 500 Market Scanner v3.0")
     parser.add_argument("--ticker", type=str, default="",
-                        help="단일 종목 스캔 (예: --ticker HOOD). 없으면 전체 스캔.")
+        help=f"단일 종목 스캔 (예: --ticker {FOCUS_TICKER}). 없으면 전체 스캔.")
     args = parser.parse_args()
 
     single_ticker = args.ticker.strip().upper()

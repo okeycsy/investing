@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-$HOOD V7 Score-Forward Return Backtester + Dynamic DCA Simulator
+Ticker V7 Score-Forward Return Backtester + Dynamic DCA Simulator
 =================================================================
 사용법:
-  python backtest.py                        # 기본 ($HOOD, 2년)
+  python backtest.py                        # monitor_config.md 기본 종목, 2년
   python backtest.py --ticker NVDA --years 3
   python backtest.py --no-slack
 """
@@ -11,6 +11,7 @@ $HOOD V7 Score-Forward Return Backtester + Dynamic DCA Simulator
 import os, sys, json, time, logging, argparse, requests
 import numpy as np
 import pandas as pd
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), "outputs", ".matplotlib-cache"))
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -24,6 +25,8 @@ except ImportError:
     print("market_scan.py를 같은 디렉토리에 놓아주세요.")
     sys.exit(1)
 
+from monitor_config import load_monitor_config
+
 try:
     import yfinance as yf
 except ImportError:
@@ -35,6 +38,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 SLACK_WEBHOOK   = os.environ.get("MARKET_SCAN_WEBHOOK") or os.environ.get("SLACK_WEBHOOK_URL", "")
 IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID", "")
+CONFIG          = load_monitor_config()
 KST             = timezone(timedelta(hours=9))
 
 OUTLIER_CLIP  = 0.01
@@ -1029,13 +1033,13 @@ def send_slack(blocks):
 # 11. 메인
 # ═══════════════════════════════════════════════════════════════
 def main():
-    parser = argparse.ArgumentParser(description="$HOOD V7 Backtester")
-    parser.add_argument("--ticker",   type=str, default="HOOD")
+    parser = argparse.ArgumentParser(description="Ticker V7 Backtester")
+    parser.add_argument("--ticker",   type=str, default=CONFIG.ticker)
     parser.add_argument("--years",    type=int, default=2)
     parser.add_argument("--no-slack", action="store_true")
     parser.add_argument("--output",   type=str, default="outputs")
     args   = parser.parse_args()
-    ticker = args.ticker.upper()
+    ticker = (args.ticker.strip().upper() if args.ticker else "") or CONFIG.ticker
 
     log.info(f"=== V7 백테스트: ${ticker} ({args.years}년) ===")
     start = time.time()

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       ticker:
-        description: '분석 종목 (예: HOOD, NVDA, AAPL)'
+        description: '분석 종목 (비우면 monitor_config.md 기본 종목)'
         required: false
-        default: 'HOOD'
+        default: ''
       years:
         description: '분석 기간 (년)'
         required: false
@@ -29,7 +29,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests yfinance pandas numpy matplotlib seaborn
+        run: pip install -r requirements.txt
 
       - name: Run backtest
         env:

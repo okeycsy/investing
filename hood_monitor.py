@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-$HOOD Advanced Monitor v3.2
-============================
+Configurable Ticker Advanced Monitor v3.2
+=========================================
 v3.2 fixes:
   1. Form 4 404 → 신고자 CIK를 accession 번호에서 추출
   2. FINRA short interest → 당일 제외, float 파싱 수정
@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import hashlib
+import math
 import time
 import logging
 import xml.etree.ElementTree as ET
@@ -24,23 +25,34 @@ from dataclasses import dataclass, field
 
 import requests
 
+from monitor_config import load_monitor_config, resolve_runtime_file
+
 # ─────────────────────────────────────────────
 # 설정
 # ─────────────────────────────────────────────
-TICKER = "HOOD"
-CIK = "0001783879"          # Robinhood Markets, Inc.
-CIK_PADDED = CIK            # 10자리 (선행 0 포함)
-CIK_SHORT = CIK.lstrip("0") # 선행 0 제거
+CONFIG = load_monitor_config()
+TICKER = CONFIG.ticker
+DISPLAY_TICKER = CONFIG.display_ticker
+COMPANY_NAME = CONFIG.company_name
+CIK = CONFIG.cik.strip()
+CIK_PADDED = CIK.zfill(10) if CIK else ""  # 10자리 (선행 0 포함)
+CIK_SHORT = CIK.lstrip("0")                # 선행 0 제거
+PEER_TICKERS = CONFIG.peer_tickers
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-STATE_FILE = Path("state.json")
-WEEKLY_STATE_FILE = Path("weekly_state.json")
+STATE_FILE = resolve_runtime_file(CONFIG, "state.json", "MONITOR_STATE_FILE")
+WEEKLY_STATE_FILE = resolve_runtime_file(CONFIG, "weekly_state.json", "MONITOR_WEEKLY_STATE_FILE")
 
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+YAHOO_QUOTE_URLS = [
+    "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+    "https://query2.finance.yahoo.com/v8/finance/chart/{ticker}",
+]
 YAHOO_RSS_URL = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
 
-SEC_HEADERS = {"User-Agent": "HoodMonitor/3.1 contact@example.com"}
+SEC_HEADERS = CONFIG.sec_headers
+SEC_LEGACY_HEADERS = CONFIG.sec_legacy_headers
 FINRA_SHORT_URL = "https://cdn.finra.org/equity/regsho/daily/CNMSshvol{date}.txt"
 
 KST = timezone(timedelta(hours=9))
@@ -48,6 +60,15 @@ UTC = timezone.utc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("hood_monitor")
+
+
+class SyntheticYahooResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self) -> dict:
+        return self._payload
 
 
 # ─────────────────────────────────────────────
@@ -167,6 +188,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
 
@@ -188,6 +210,7 @@ def load_weekly_state() -> dict:
 
 
 def save_weekly_state(ws: dict):
+    WEEKLY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     WEEKLY_STATE_FILE.write_text(json.dumps(ws, indent=2, ensure_ascii=False))
 
 
@@ -236,6 +259,96 @@ def safe_get(url, headers=None, params=None, timeout=15, retries=3):
     return None
 
 
+def fetch_yahoo_chart(ticker: str, params: dict, timeout: int = 15):
+    """Try both Yahoo chart hosts because query1/query2 can be rate-limited independently."""
+    for template in YAHOO_QUOTE_URLS:
+        resp = safe_get(template.format(ticker=ticker), params=params, timeout=timeout)
+        if resp:
+            return resp
+    fallback = _fetch_yfinance_chart(ticker, params)
+    if fallback:
+        log.info(f"Yahoo chart fallback via yfinance: {ticker} {params}")
+        return SyntheticYahooResponse(fallback)
+    return None
+
+
+def _fetch_yfinance_chart(ticker: str, params: dict) -> Optional[dict]:
+    try:
+        import yfinance as yf
+    except Exception as e:
+        log.warning(f"yfinance fallback unavailable: {e}")
+        return None
+
+    period = params.get("range", "10d")
+    interval = params.get("interval", "1d")
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+            prepost=bool(params.get("includePrePost")),
+            threads=False,
+        )
+    except Exception as e:
+        log.warning(f"yfinance fallback failed ({ticker}): {e}")
+        return None
+
+    if df is None or df.empty:
+        return None
+    if hasattr(df.columns, "get_level_values"):
+        try:
+            price_cols = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
+            if price_cols & set(df.columns.get_level_values(0)):
+                df.columns = df.columns.get_level_values(0)
+            else:
+                df.columns = df.columns.get_level_values(1)
+        except Exception:
+            pass
+
+    def clean_number(value):
+        try:
+            if value is None or math.isnan(float(value)):
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    timestamps = []
+    for idx in df.index:
+        try:
+            timestamps.append(int(idx.timestamp()))
+        except Exception:
+            timestamps.append(int(datetime.combine(idx.date(), datetime.min.time(), UTC).timestamp()))
+
+    quote = {}
+    for col, key in [("Open", "open"), ("High", "high"), ("Low", "low"), ("Close", "close")]:
+        quote[key] = [clean_number(v) for v in df[col].tolist()] if col in df else []
+    quote["volume"] = [int(v) if clean_number(v) is not None else 0 for v in df["Volume"].tolist()] if "Volume" in df else []
+
+    closes = [v for v in quote.get("close", []) if v is not None]
+    highs = [v for v in quote.get("high", []) if v is not None]
+    lows = [v for v in quote.get("low", []) if v is not None]
+    last_close = closes[-1] if closes else 0.0
+
+    return {
+        "chart": {
+            "result": [{
+                "timestamp": timestamps,
+                "meta": {
+                    "currency": "USD",
+                    "regularMarketPrice": last_close,
+                    "regularMarketDayHigh": highs[-1] if highs else 0.0,
+                    "regularMarketDayLow": lows[-1] if lows else 0.0,
+                },
+                "indicators": {"quote": [quote]},
+            }],
+            "error": None,
+        }
+    }
+
+
 # ─────────────────────────────────────────────
 # 1. 주가 데이터
 # ─────────────────────────────────────────────
@@ -251,10 +364,8 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
     가장 최근 확정 종가(전일)만 prev_close로 사용.
     """
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=TICKER)
-
     # ── 1. 일봉 (timestamps 포함하여 오늘 바 필터링) ──────────────
-    resp_1d = safe_get(url, params={"interval": "1d", "range": "10d"})
+    resp_1d = fetch_yahoo_chart(TICKER, {"interval": "1d", "range": "10d"})
     if not resp_1d:
         return None
     try:
@@ -315,7 +426,7 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
 
     # ── 4. 현재가 ────────────────────────────────────────────────
     if realtime and market_state in ("PRE", "REGULAR", "POST"):
-        resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
+        resp_1m = fetch_yahoo_chart(TICKER, {"interval": "1m", "range": "2d", "includePrePost": "true"})
         if not resp_1m:
             return None
         try:
@@ -386,8 +497,7 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
 
 def fetch_price_history(days: int = 60) -> list:
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=TICKER)
-    resp = safe_get(url, params={"interval": "1d", "range": f"{days}d"})
+    resp = fetch_yahoo_chart(TICKER, {"interval": "1d", "range": f"{days}d"})
     if not resp:
         return []
     try:
@@ -402,15 +512,14 @@ def fetch_price_history(days: int = 60) -> list:
 # ─────────────────────────────────────────────
 # 1-1. 베타(β) 계산 + 기대수익률 이격도
 # ─────────────────────────────────────────────
-BETA_CACHE_FILE = Path("beta_cache.json")
-BETA_BENCHMARK = "QQQ"
+BETA_CACHE_FILE = resolve_runtime_file(CONFIG, "beta_cache.json", "MONITOR_BETA_CACHE_FILE")
+BETA_BENCHMARK = CONFIG.benchmark
 
 
 def _fetch_yearly_closes(ticker: str) -> list:
     """1년치 일간 종가 반환"""
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=ticker)
-    resp = safe_get(url, params={"interval": "1d", "range": "1y"})
+    resp = fetch_yahoo_chart(ticker, {"interval": "1d", "range": "1y"})
     if not resp:
         return []
     try:
@@ -427,12 +536,14 @@ def _calc_beta(stock_closes: list, market_closes: list) -> Optional[float]:
     if n < 30:
         return None
     # 수익률 계산 (일간 단순 수익률)
-    rs = [(stock_closes[i] - stock_closes[i-1]) / stock_closes[i-1]
-          for i in range(n - min(n, len(stock_closes)), n)
-          if stock_closes[i-1] != 0]
-    rm = [(market_closes[i] - market_closes[i-1]) / market_closes[i-1]
-          for i in range(n - min(n, len(market_closes)), n)
-          if market_closes[i-1] != 0]
+    stock_window = stock_closes[-n:]
+    market_window = market_closes[-n:]
+    rs = [(stock_window[i] - stock_window[i-1]) / stock_window[i-1]
+          for i in range(1, n)
+          if stock_window[i-1] != 0]
+    rm = [(market_window[i] - market_window[i-1]) / market_window[i-1]
+          for i in range(1, n)
+          if market_window[i-1] != 0]
 
     # 길이 맞추기
     length = min(len(rs), len(rm))
@@ -481,6 +592,7 @@ def get_beta() -> Optional[float]:
         return None
 
     # 캐시 저장
+    BETA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     BETA_CACHE_FILE.write_text(json.dumps({"date": today, "beta": beta}, indent=2))
     log.info(f"Beta 계산 완료: β={beta} → 캐시 저장")
     return beta
@@ -489,17 +601,20 @@ def get_beta() -> Optional[float]:
 def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> dict:
     """
     기대 수익률 vs 실제 수익률 이격도 + 피어 그룹 비교 통합.
-    피어($COIN, $MSTR) 데이터는 여기서 fetch하여 dict에 포함.
+    피어 데이터는 monitor_config.md의 peer_tickers를 기준으로 fetch.
     """
     expected = round(beta * market_pct, 2)
     divergence = round(actual_pct - expected, 2)
 
     # 피어 데이터 fetch (상대 강도 블록에 통합 표시)
-    coin_pct = _fetch_ticker_change("COIN") or 0.0
-    mstr_pct = _fetch_ticker_change("MSTR") or 0.0
+    peer_changes = {
+        peer: (_fetch_ticker_change(peer) or 0.0)
+        for peer in PEER_TICKERS
+    }
 
-    # 피어 평균 대비 HOOD 이격
-    peer_avg = round((coin_pct + mstr_pct) / 2, 2)
+    # 피어 평균 대비 모니터링 종목 이격
+    peer_values = list(peer_changes.values())
+    peer_avg = round(sum(peer_values) / len(peer_values), 2) if peer_values else 0.0
     peer_diff = round(actual_pct - peer_avg, 2)
 
     return {
@@ -508,15 +623,14 @@ def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> d
         "expected_pct": expected,
         "actual_pct": actual_pct,
         "divergence": divergence,
-        "coin_pct": coin_pct,
-        "mstr_pct": mstr_pct,
+        "peer_changes": peer_changes,
         "peer_avg": peer_avg,
         "peer_diff": peer_diff,
     }
 
 
 def format_beta_block(bd: dict) -> list:
-    """상대 강도 통합 블록 — 지수 대비(β 기반) + 피어 대비($COIN/$MSTR)"""
+    """상대 강도 통합 블록 — 지수 대비(β 기반) + 피어 대비"""
     div      = bd["divergence"]
     beta     = bd["beta"]
     expected = bd["expected_pct"]
@@ -524,8 +638,8 @@ def format_beta_block(bd: dict) -> list:
     qqq_pct  = bd["qqq_pct"]
     peer_diff = bd["peer_diff"]
     peer_avg  = bd["peer_avg"]
-    coin_pct  = bd["coin_pct"]
-    mstr_pct  = bd["mstr_pct"]
+    peer_changes = bd.get("peer_changes", {})
+    peer_label = "/".join(peer_changes.keys()) if peer_changes else "피어"
 
     # ── 지수 대비 (β 기반) ──
     if div >= 3:
@@ -544,16 +658,16 @@ def format_beta_block(bd: dict) -> list:
         vs_index = "⚪ *기대 범위 내*"
         vs_index_desc = f"시장 움직임과 부합 ({div:+.1f}%p)"
 
-    # ── 피어 대비 ($COIN / $MSTR) ──
+    # ── 피어 대비 ──
     if peer_diff >= 2:
         vs_peer = "🟢 *피어 아웃퍼폼*"
-        vs_peer_desc = f"COIN/MSTR 평균보다 {peer_diff:+.1f}%p 강세"
+        vs_peer_desc = f"{peer_label} 평균보다 {peer_diff:+.1f}%p 강세"
     elif peer_diff >= 0.5:
         vs_peer = "🟡 *피어 소폭 강세*"
         vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
     elif peer_diff <= -2:
         vs_peer = "🔴 *피어 언더퍼폼*"
-        vs_peer_desc = f"COIN/MSTR 평균보다 {peer_diff:+.1f}%p 약세"
+        vs_peer_desc = f"{peer_label} 평균보다 {peer_diff:+.1f}%p 약세"
     elif peer_diff <= -0.5:
         vs_peer = "🟠 *피어 소폭 약세*"
         vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
@@ -568,12 +682,14 @@ def format_beta_block(bd: dict) -> list:
             f"피어 대비: {vs_peer} — {vs_peer_desc}"
         ),
         _ctx(
-            f"*기대수익률 (HOOD) {expected:+.2f}%* (β×QQQ)  |  "
-            f"*실제수익률 (HOOD) {actual:+.2f}%*  |  "
-            f"*QQQ {qqq_pct:+.2f}%*"
+            f"*기대수익률 ({TICKER}) {expected:+.2f}%* (β×{BETA_BENCHMARK})  |  "
+            f"*실제수익률 ({TICKER}) {actual:+.2f}%*  |  "
+            f"*{BETA_BENCHMARK} {qqq_pct:+.2f}%*"
         ),
         _ctx(
-            f"피어: *COIN {coin_pct:+.2f}%*  |  *MSTR {mstr_pct:+.2f}%*  |  평균 {peer_avg:+.2f}%"
+            "피어: "
+            + ("  |  ".join(f"*{p} {v:+.2f}%*" for p, v in peer_changes.items()) if peer_changes else "미설정")
+            + f"  |  평균 {peer_avg:+.2f}%"
         ),
     ]
 
@@ -590,9 +706,7 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
     확정된 전일 종가만 prev로 사용.
     """
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=ticker)
-
-    resp_1d = safe_get(url, params={"interval": "1d", "range": "10d"})
+    resp_1d = fetch_yahoo_chart(ticker, {"interval": "1d", "range": "10d"})
     if not resp_1d:
         return None
     try:
@@ -628,7 +742,7 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
     prev = confirmed[-1]  # 전일 확정 종가
 
     if market_state in ("PRE", "REGULAR"):
-        resp_1m = safe_get(url, params={"interval": "1m", "range": "2d", "includePrePost": "true"})
+        resp_1m = fetch_yahoo_chart(ticker, {"interval": "1m", "range": "2d", "includePrePost": "true"})
         if not resp_1m:
             return None
         try:
@@ -655,11 +769,11 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
 
 
 # ─────────────────────────────────────────────
-# 1-5. HOOD × BTC 30일 상관계수
+# 1-5. 모니터링 종목 × BTC 30일 상관계수
 # ─────────────────────────────────────────────
 def calc_btc_correlation() -> Optional[dict]:
     """
-    HOOD와 BTC-USD의 최근 30일 일간 수익률 피어슨 상관계수 계산.
+    모니터링 종목과 BTC-USD의 최근 30일 일간 수익률 피어슨 상관계수 계산.
     r > 0.7 → 강한 양의 상관 (BTC 따라감)
     r < 0.3 → 독립적 움직임
     """
@@ -667,8 +781,7 @@ def calc_btc_correlation() -> Optional[dict]:
 
     def fetch_30d_returns(ticker: str) -> Optional[list]:
         _yahoo_throttle()
-        url = YAHOO_QUOTE_URL.format(ticker=ticker)
-        resp = safe_get(url, params={"interval": "1d", "range": "35d"})
+        resp = fetch_yahoo_chart(ticker, {"interval": "1d", "range": "35d"})
         if not resp:
             return None
         try:
@@ -718,17 +831,17 @@ def format_btc_correlation_block(bd: dict) -> list:
     btc  = bd.get("btc_today", 0) or 0
 
     if bd["signal"] == "high":
-        sig_line = f"🔗 *강한 BTC 연동* (r={corr:.2f}) — BTC 방향이 HOOD를 견인"
+        sig_line = f"🔗 *강한 BTC 연동* (r={corr:.2f}) — BTC 방향이 {TICKER}를 견인"
     elif bd["signal"] == "moderate":
         sig_line = f"🔗 *중간 연동* (r={corr:.2f}) — BTC와 부분적으로 동조"
     else:
-        sig_line = f"🔓 *낮은 연동* (r={corr:.2f}) — HOOD 개별 팩터 우세"
+        sig_line = f"🔓 *낮은 연동* (r={corr:.2f}) — {TICKER} 개별 팩터 우세"
 
     # BTC 방향 해석
     if bd["signal"] == "high" and btc >= 2:
-        interp = "BTC 상승 → HOOD 상승 압력 가능"
+        interp = f"BTC 상승 → {TICKER} 상승 압력 가능"
     elif bd["signal"] == "high" and btc <= -2:
-        interp = "BTC 하락 → HOOD 하락 압력 가능"
+        interp = f"BTC 하락 → {TICKER} 하락 압력 가능"
     else:
         interp = ""
 
@@ -737,7 +850,7 @@ def format_btc_correlation_block(bd: dict) -> list:
         ctx += f"  |  {interp}"
 
     return [
-        _sec(f"*₿ HOOD × BTC 상관계수*\n{sig_line}"),
+        _sec(f"*₿ {TICKER} × BTC 상관계수*\n{sig_line}"),
         _ctx(ctx),
     ]
 
@@ -745,16 +858,20 @@ def format_btc_correlation_block(bd: dict) -> list:
 # ─────────────────────────────────────────────
 # 1-6. Apple App Store 순위 트래킹
 # ─────────────────────────────────────────────
-ROBINHOOD_APP_ID = "938003185"    # App Store ID (미국 기준)
-APP_RANK_CACHE_FILE = Path("app_rank_cache.json")
+APP_STORE_ID = CONFIG.app_store_id
+APP_RANK_CACHE_FILE = resolve_runtime_file(CONFIG, "app_rank_cache.json", "MONITOR_APP_RANK_CACHE_FILE")
 
 
 def fetch_appstore_rank() -> Optional[dict]:
     """
     Apple App Store 미국 금융 카테고리 상위 200개 무료 앱 RSS에서
-    로빈후드 순위를 파싱.
+    설정된 앱 순위를 파싱.
     공식 Apple RSS: rss.applemarketingtools.com
     """
+    if not APP_STORE_ID:
+        log.info("App Store 순위 스킵: app_store_id 미설정")
+        return None
+
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
     # 캐시 확인 (당일이면 재사용)
@@ -777,7 +894,7 @@ def fetch_appstore_rank() -> Optional[dict]:
         try:
             apps = resp.json()["feed"]["results"]
             for i, app in enumerate(apps):
-                if app.get("id") == ROBINHOOD_APP_ID:
+                if app.get("id") == APP_STORE_ID:
                     result["rank_finance"] = i + 1
                     break
         except Exception as e:
@@ -790,13 +907,14 @@ def fetch_appstore_rank() -> Optional[dict]:
         try:
             apps2 = resp2.json()["feed"]["results"]
             for i, app in enumerate(apps2):
-                if app.get("id") == ROBINHOOD_APP_ID:
+                if app.get("id") == APP_STORE_ID:
                     result["rank_overall"] = i + 1
                     break
         except Exception as e:
             log.debug(f"App Store overall parse: {e}")
 
     log.info(f"App Store 순위: Finance #{result['rank_finance']} | Overall #{result['rank_overall']}")
+    APP_RANK_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     APP_RANK_CACHE_FILE.write_text(json.dumps(result, indent=2))
     return result
 
@@ -854,8 +972,7 @@ class VolumeProfile:
 def _fetch_1m_bars(ticker: str, range_str: str = "1d") -> list:
     """1분봉 데이터 반환 — [{time, open, high, low, close, volume}, ...]"""
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=ticker)
-    resp = safe_get(url, params={"interval": "1m", "range": range_str})
+    resp = fetch_yahoo_chart(ticker, {"interval": "1m", "range": range_str})
     if not resp:
         return []
     try:
@@ -970,16 +1087,17 @@ class SafetyMargin:
     # ── 신규 필드 ──
     beta_expected_pct: float = 0.0     # β 기반 기대 수익률
     beta_excess_pct: float = 0.0       # 실제 - 기대 (음수 = 베타 초과 하락)
-    divergence_warning: bool = False   # 피어 반등 중 HOOD만 하락 가속
+    divergence_warning: bool = False   # 피어 반등 중 모니터링 종목만 하락 가속
     peer_coin_pct: float = 0.0
     peer_mstr_pct: float = 0.0
+    peer_changes: dict = field(default_factory=dict)
     dca_attraction: int = 0            # DCA 매력도 1~10
 
 
 def check_safety_margin(
     closes_daily: list,
     current_price: float,
-    actual_pct: float = 0.0,   # HOOD 당일 등락률
+    actual_pct: float = 0.0,   # 모니터링 종목 당일 등락률
     beta: Optional[float] = None,
 ) -> Optional[SafetyMargin]:
     """
@@ -1051,19 +1169,25 @@ def check_safety_margin(
         beta_excess_pct = round(actual_pct - beta_expected_pct, 2)
         log.info(f"베타 초과 이탈: 기대 {beta_expected_pct:+.2f}% vs 실제 {actual_pct:+.2f}% → 초과 {beta_excess_pct:+.2f}%")
 
-    # ── 4. 피어 그룹 분기 감지 ($COIN, $MSTR) ──────
-    peer_coin_pct = _fetch_ticker_change("COIN") or 0.0
-    peer_mstr_pct = _fetch_ticker_change("MSTR") or 0.0
+    # ── 4. 피어 그룹 분기 감지 ──────
+    peer_changes = {
+        peer: (_fetch_ticker_change(peer) or 0.0)
+        for peer in PEER_TICKERS
+    }
+    peer_values = list(peer_changes.values())
+    peer_coin_pct = peer_values[0] if len(peer_values) >= 1 else 0.0
+    peer_mstr_pct = peer_values[1] if len(peer_values) >= 2 else 0.0
 
-    # HOOD가 하락 가속 중인데 피어 둘 다 양전 → Divergence Warning
+    # 모니터링 종목이 하락 가속 중인데 피어가 모두 양전 → Divergence Warning
     divergence_warning = (
         momentum_signal == "accelerating"
         and actual_pct < -2
-        and peer_coin_pct > 0
-        and peer_mstr_pct > 0
+        and bool(peer_values)
+        and all(v > 0 for v in peer_values)
     )
     if divergence_warning:
-        log.info(f"Divergence Warning: HOOD {actual_pct:+.2f}% 하락 가속 | COIN {peer_coin_pct:+.2f}% / MSTR {peer_mstr_pct:+.2f}% 반등")
+        peer_log = " / ".join(f"{p} {v:+.2f}%" for p, v in peer_changes.items())
+        log.info(f"Divergence Warning: {TICKER} {actual_pct:+.2f}% 하락 가속 | {peer_log} 반등")
 
     # ── 5. DCA 매력도 점수 1~10 ─────────────────────
     # 3가지 요소 합산: RSI(0~4점) + BB 이탈(0~3점) + 베타 초과 이탈(0~3점)
@@ -1124,6 +1248,7 @@ def check_safety_margin(
         divergence_warning=divergence_warning,
         peer_coin_pct=peer_coin_pct,
         peer_mstr_pct=peer_mstr_pct,
+        peer_changes=peer_changes,
         dca_attraction=dca_attraction,
     )
 
@@ -1191,7 +1316,7 @@ def _fetch_article_body(url: str, max_chars: int = 600) -> str:
 
 def translate_news(news: list) -> list:
     """
-    HOOD 관련 뉴스 필터링 + 한국어 요약(15자) + 기사 핵심 번역(2~3문장)
+    설정 종목 관련 뉴스 필터링 + 한국어 요약(15자) + 기사 핵심 번역(2~3문장)
     """
     if not news or not ANTHROPIC_API_KEY:
         log.info(f"translate_news skip — news:{len(news)} api_key:{'있음' if ANTHROPIC_API_KEY else '없음'}")
@@ -1211,13 +1336,13 @@ def translate_news(news: list) -> list:
     content = "\n\n".join(articles)
 
     log.info(f"Claude API 호출: 뉴스 번역 ({len(news)}건, 본문 포함)")
-    prompt = f"""당신은 $HOOD(Robinhood Markets) 투자 알림 봇입니다.
+    prompt = f"""당신은 {DISPLAY_TICKER}({COMPANY_NAME or TICKER}) 투자 알림 봇입니다.
 아래 뉴스 목록(제목+본문 발췌)을 분석해주세요.
 
 규칙:
-1. Robinhood Markets / $HOOD 주가에 직접 영향을 주는 뉴스만 포함
+1. {COMPANY_NAME or TICKER} / {DISPLAY_TICKER} 주가에 직접 영향을 주는 뉴스만 포함
 2. 포함 기준: 실적, 규제, 경쟁사 직접 비교, 경영진 변동, 주요 제품/서비스, 기관 매수/매도, 소송
-3. 제외 기준: 증권업 일반 뉴스, 금리 일반론, 다른 회사 뉴스에 HOOD가 언급만 된 경우
+3. 제외 기준: 업종 일반 뉴스, 금리 일반론, 다른 회사 뉴스에 {TICKER}가 언급만 된 경우
 4. 반드시 한국어로만 출력
 
 각 뉴스에 대해 JSON 배열로만 응답 (다른 텍스트 없이):
@@ -1340,8 +1465,7 @@ def get_technical_signals(closes: list) -> TechnicalSignals:
 def fetch_ohlcv(days: int = 210) -> dict:
     """일봉 OHLCV 반환 — closes/opens/highs/lows/volumes"""
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=TICKER)
-    resp = safe_get(url, params={"interval": "1d", "range": f"{days}d"})
+    resp = fetch_yahoo_chart(TICKER, {"interval": "1d", "range": f"{days}d"})
     if not resp:
         return {}
     try:
@@ -1364,8 +1488,7 @@ def fetch_ohlcv(days: int = 210) -> dict:
 def fetch_weekly_ohlcv(weeks: int = 40) -> dict:
     """주봉 OHLCV 반환 (MACD 계산에 최소 35주 필요)"""
     _yahoo_throttle()
-    url = YAHOO_QUOTE_URL.format(ticker=TICKER)
-    resp = safe_get(url, params={"interval": "1wk", "range": f"{weeks * 7 + 14}d"})
+    resp = fetch_yahoo_chart(TICKER, {"interval": "1wk", "range": f"{weeks * 7 + 14}d"})
     if not resp:
         return {}
     try:
@@ -2022,20 +2145,110 @@ def fetch_short_interest() -> Optional[ShortInterestData]:
 
 
 # ─────────────────────────────────────────────
-# 6. 내부자 거래 (Form 4) — EDGAR atom feed 방식
+# 6. 내부자 거래 (Form 4) — SEC submissions JSON 우선
 # ─────────────────────────────────────────────
 def fetch_insider_trades() -> list:
     """
-    EDGAR company search atom feed로 Form 4 목록을 가져온 뒤
-    각 filing의 index 페이지에서 원본 XML을 직접 찾아 파싱.
-    filing agent CIK 경로 404 문제 해결.
+    data.sec.gov submissions JSON에서 Form 4 목록을 가져온 뒤
+    각 filing의 원본 XML을 직접 열어 파싱. Atom feed는 fallback으로만 사용.
     """
     trades = []
+    if not CIK_PADDED:
+        log.info("Form 4 스킵: monitor_config.md에 cik 미설정")
+        return trades
     try:
-        # atom feed: Robinhood(CIK)가 issuer인 Form 4 목록
+        candidates = _form4_candidates_from_submissions(limit=10)
+        if candidates:
+            log.info(f"Form 4: {len(candidates)} filings found via submissions JSON")
+            for filing_date, xml_urls in candidates:
+                xml_resp = None
+                xml_url = ""
+                for candidate_url in xml_urls:
+                    log.info(f"Form 4 XML 요청: {candidate_url}")
+                    xml_resp = safe_get(candidate_url, headers=SEC_LEGACY_HEADERS, retries=1)
+                    if xml_resp:
+                        xml_url = candidate_url
+                        break
+                if not xml_resp:
+                    log.warning(f"Form 4 XML 응답 없음: {xml_urls[0] if xml_urls else ''}")
+                    continue
+                try:
+                    parsed = parse_form4_xml(xml_resp.text, filing_date, xml_url)
+                    trades.extend(parsed)
+                    log.info(f"Form 4 파싱 완료: {len(parsed)}건 — {xml_url}")
+                except Exception as e:
+                    log.warning(f"Form 4 parse error: {e}")
+                time.sleep(0.3)
+            return trades
+
+        log.warning("Form 4 submissions 후보 없음 — atom feed fallback")
+        return _fetch_insider_trades_from_atom()
+
+    except Exception as e:
+        log.error(f"Insider fetch error: {e}")
+    return trades
+
+
+def _recent_value(recent: dict, key: str, idx: int) -> str:
+    values = recent.get(key, [])
+    if idx >= len(values):
+        return ""
+    return str(values[idx] or "").strip()
+
+
+def _form4_xml_urls_from_submission(accession: str, primary_doc: str) -> list:
+    if not accession or not primary_doc:
+        return []
+
+    acc_clean = accession.replace("-", "")
+    filing_cik = accession.split("-", 1)[0].lstrip("0") or CIK_SHORT
+    primary_name = primary_doc.rsplit("/", 1)[-1]
+    if not primary_name.lower().endswith(".xml"):
+        return []
+
+    ciks = [filing_cik]
+    if CIK_SHORT and CIK_SHORT not in ciks:
+        ciks.append(CIK_SHORT)
+
+    return [
+        f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{primary_name}"
+        for cik in ciks
+    ]
+
+
+def _form4_candidates_from_submissions(limit: int = 10) -> list:
+    resp = safe_get(f"https://data.sec.gov/submissions/CIK{CIK_PADDED}.json", headers=SEC_HEADERS)
+    if not resp:
+        return []
+
+    data = resp.json()
+    recent = data.get("filings", {}).get("recent", {})
+    forms = recent.get("form", [])
+    candidates = []
+
+    for idx, form in enumerate(forms):
+        if str(form).upper() not in {"4", "4/A"}:
+            continue
+
+        accession = _recent_value(recent, "accessionNumber", idx)
+        primary_doc = _recent_value(recent, "primaryDocument", idx)
+        filing_date = _recent_value(recent, "filingDate", idx)
+        xml_urls = _form4_xml_urls_from_submission(accession, primary_doc)
+        if xml_urls:
+            candidates.append((filing_date, xml_urls))
+        if len(candidates) >= limit:
+            break
+
+    return candidates
+
+
+def _fetch_insider_trades_from_atom() -> list:
+    trades = []
+    try:
+        # atom feed: 설정 회사(CIK)가 issuer인 Form 4 목록
         resp = safe_get(
             "https://www.sec.gov/cgi-bin/browse-edgar",
-            headers=SEC_HEADERS,
+            headers=SEC_LEGACY_HEADERS,
             params={
                 "action": "getcompany",
                 "CIK": CIK_PADDED,
@@ -2091,7 +2304,7 @@ def fetch_insider_trades() -> list:
                 continue
 
             log.info(f"Form 4 index 요청: {filing_href}")
-            idx_resp = safe_get(filing_href, headers=SEC_HEADERS, retries=1)
+            idx_resp = safe_get(filing_href, headers=SEC_LEGACY_HEADERS, retries=1)
             if not idx_resp:
                 log.warning(f"Form 4 index 응답 없음: {filing_href}")
                 continue
@@ -2102,7 +2315,7 @@ def fetch_insider_trades() -> list:
                 continue
 
             log.info(f"Form 4 XML 요청: {xml_url}")
-            xml_resp = safe_get(xml_url, headers=SEC_HEADERS, retries=1)
+            xml_resp = safe_get(xml_url, headers=SEC_LEGACY_HEADERS, retries=1)
             if xml_resp:
                 try:
                     parsed = parse_form4_xml(xml_resp.text, filing_date, xml_url)
@@ -2116,7 +2329,7 @@ def fetch_insider_trades() -> list:
             time.sleep(0.3)
 
     except Exception as e:
-        log.error(f"Insider fetch error: {e}")
+        log.error(f"Insider atom fallback error: {e}")
     return trades
 
 
@@ -2258,7 +2471,7 @@ def fetch_13f_filings() -> list:
     """
     BUG 3 FIX:
     - EDGAR search API URL 수정 (파라미터 형식)
-    - 실제 13F XML에서 HOOD 보유 주식 수 / 평가금액 파싱
+    - 실제 13F XML에서 설정 종목 보유 주식 수 / 평가금액 파싱
     """
     filings = []
     try:
@@ -2268,7 +2481,7 @@ def fetch_13f_filings() -> list:
         # 수정된 EDGAR full-text search URL
         search_url = "https://efts.sec.gov/LATEST/search-index"
         params = {
-            "q": '"Robinhood Markets"',
+            "q": f'"{COMPANY_NAME or TICKER}"',
             "forms": "13F-HR",
             "dateRange": "custom",
             "startdt": start_date,
@@ -2296,7 +2509,7 @@ def fetch_13f_filings() -> list:
             if not accession_raw:
                 continue
 
-            # infoTable XML 파싱으로 HOOD 포지션 추출
+            # infoTable XML 파싱으로 설정 종목 포지션 추출
             acc_clean = accession_raw.replace("-", "")
             entity_cik = source.get("entity_id", "")
 
@@ -2321,7 +2534,7 @@ def fetch_13f_filings() -> list:
 
 def _parse_13f_position(entity_cik: str, acc_clean: str) -> tuple:
     """
-    13F infoTable XML에서 HOOD 포지션(주식 수, 평가금액) 추출
+    13F infoTable XML에서 설정 종목 포지션(주식 수, 평가금액) 추출
     Returns: (shares, value_usd, change_type)
     """
     if not entity_cik:
@@ -2365,7 +2578,7 @@ def _parse_13f_position(entity_cik: str, acc_clean: str) -> tuple:
 
 
 def _extract_hood_from_infotable(xml_text: str) -> tuple:
-    """infoTable XML에서 HOOD 항목 찾아 주식 수와 평가금액 추출"""
+    """infoTable XML에서 설정 종목 항목을 찾아 주식 수와 평가금액 추출"""
     try:
         # 네임스페이스 제거
         xml_clean = xml_text
@@ -2381,8 +2594,9 @@ def _extract_hood_from_infotable(xml_text: str) -> tuple:
             if name_elem is None:
                 continue
             name = name_elem.text or ""
-            # HOOD 또는 Robinhood 포함 여부 확인
-            if "HOOD" not in name.upper() and "ROBINHOOD" not in name.upper():
+            # 티커 또는 회사명 키워드 포함 여부 확인
+            name_upper = name.upper()
+            if not any(keyword in name_upper for keyword in CONFIG.issuer_keywords):
                 continue
 
             shares_elem = info.find("shrsOrPrnAmt/sshPrnamt") or info.find("sshPrnamt")
@@ -2597,16 +2811,20 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
             beta_line = f"🔴 *β 초과 상승 {sm.beta_excess_pct:+.2f}%p* — 기대보다 강한 상승"
         else:
             beta_line = f"⚪ *β 범위 내 {sm.beta_excess_pct:+.2f}%p*"
-        blocks.append(_ctx(f"기대수익률 {sm.beta_expected_pct:+.2f}% (β×QQQ)  |  {beta_line}"))
+        blocks.append(_ctx(f"기대수익률 {sm.beta_expected_pct:+.2f}% (β×{BETA_BENCHMARK})  |  {beta_line}"))
 
     # ── 피어 분기 경고 (Divergence Warning만 유지, 일반 피어 수치는 상대강도 블록에서 표시) ──
     if sm.divergence_warning:
         blocks.append(_sec(
             f"⚠️ *Divergence Warning*\n"
-            f"HOOD 하락 가속 중인데 피어 그룹 반등 중 — 개별 악재 가능성"
+            f"{TICKER} 하락 가속 중인데 피어 그룹 반등 중 — 개별 악재 가능성"
         ))
+        peer_text = " / ".join(
+            f"{p} {v:+.2f}%"
+            for p, v in sm.peer_changes.items()
+        ) or "피어 데이터 없음"
         blocks.append(_ctx(
-            f"COIN {sm.peer_coin_pct:+.2f}% / MSTR {sm.peer_mstr_pct:+.2f}% 반등  vs  HOOD 하락 가속"
+            f"{peer_text} 반등  vs  {TICKER} 하락 가속"
         ))
 
     return blocks
@@ -2621,25 +2839,28 @@ def _footer() -> list:
     kst = datetime.now(KST).strftime("%m/%d %H:%M KST")
     return [
         {"type": "divider"},
-        _ctx(f"🤖 HOOD Monitor  |  {kst}"),
+        _ctx(f"🤖 {TICKER} Monitor  |  {kst}"),
     ]
 
 
-def send_slack(blocks: list, text: str = "HOOD Monitor"):
+def send_slack(blocks: list, text: str = ""):
+    text = text or f"{TICKER} Monitor"
     if not SLACK_WEBHOOK:
         log.warning("SLACK_WEBHOOK_URL not set")
         for b in blocks:
             if isinstance(b.get("text"), dict):
                 print(b["text"].get("text", ""))
         return
-    try:
-        resp = requests.post(SLACK_WEBHOOK, json={"text": text, "blocks": blocks}, timeout=10)
-        if resp.status_code != 200:
-            log.error(f"Slack error: {resp.status_code} {resp.text}")
-        else:
-            log.info("Slack sent OK")
-    except Exception as e:
-        log.error(f"Slack send: {e}")
+    for i in range(0, len(blocks), 40):
+        chunk = blocks[i:i + 40]
+        try:
+            resp = requests.post(SLACK_WEBHOOK, json={"text": text, "blocks": chunk}, timeout=10)
+            if resp.status_code != 200:
+                log.error(f"Slack error: {resp.status_code} {resp.text}")
+            else:
+                log.info(f"Slack sent OK ({i + 1}-{i + len(chunk)}/{len(blocks)})")
+        except Exception as e:
+            log.error(f"Slack send: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -2682,7 +2903,7 @@ def run_normal():
                 emoji = "🚀" if direction == "up" else "💥"
                 label = "상승" if direction == "up" else "하락"
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                    f"{emoji} *$HOOD {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
+                    f"{emoji} *{DISPLAY_TICKER} {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
 
                 # 상대 강도 (β 기반)
                 _beta = get_beta()
@@ -2736,7 +2957,7 @@ def run_normal():
 
     if blocks:
         blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-            "text": f"📊 $HOOD — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
+            "text": f"📊 {DISPLAY_TICKER} — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
         blocks.extend(_footer())
         send_slack(blocks)
     else:
@@ -2776,7 +2997,7 @@ def run_close():
             emoji_big = "🚀" if direction == "up" else "💥"
             label = "상승" if direction == "up" else "하락"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"{emoji_big} *$HOOD 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
+                f"{emoji_big} *{DISPLAY_TICKER} 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
 
             # 상대 강도 (β 기반) — 장 마감 후 run_close의 별도 beta 블록과 통합
 
@@ -2808,7 +3029,7 @@ def run_close():
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
 
-    # 베타 분석 (QQQ fetch 실패 시 전체 skip — 0 fallback 시 아웃퍼폼 오판 방지)
+    # 베타 분석 (벤치마크 fetch 실패 시 전체 skip — 0 fallback 시 아웃퍼폼 오판 방지)
     beta = get_beta()
     if beta and price and price.prev_close > 0:
         qqq_pct = _fetch_ticker_change(BETA_BENCHMARK)
@@ -2816,7 +3037,7 @@ def run_close():
             bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
             blocks.extend(format_beta_block(bd))
         else:
-            log.warning("QQQ fetch 실패 — 베타 블록 스킵 (아웃퍼폼 오판 방지)")
+            log.warning(f"{BETA_BENCHMARK} fetch 실패 — 베타 블록 스킵 (아웃퍼폼 오판 방지)")
 
     # Safety Margin: close 모드에서 항상 실행 (4% 조건 제거)
     sm = None
@@ -2891,7 +3112,7 @@ def run_close():
         blocks.extend(format_dca_technical_block(dca_tech))
 
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-        "text": f"🔔 $HOOD 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
+        "text": f"🔔 {DISPLAY_TICKER} 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
     blocks.extend(_footer())
     send_slack(blocks)
 
@@ -2920,7 +3141,7 @@ def run_morning():
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text",
-            "text": f"☀️ $HOOD 아침 브리핑 — {datetime.now(KST).strftime('%m/%d')}"}},
+            "text": f"☀️ {DISPLAY_TICKER} 아침 브리핑 — {datetime.now(KST).strftime('%m/%d')}"}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text":
             f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {label}*"}},
@@ -2945,7 +3166,7 @@ def run_13f():
 
     if new_filings:
         blocks = [
-            {"type": "header", "text": {"type": "plain_text", "text": "🏛 $HOOD 13F 기관 포지션 업데이트"}},
+            {"type": "header", "text": {"type": "plain_text", "text": f"🏛 {DISPLAY_TICKER} 13F 기관 포지션 업데이트"}},
             {"type": "divider"},
         ]
         blocks.extend(format_13f_block(new_filings))
@@ -2991,7 +3212,7 @@ def run_weekly():
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text",
-            "text": f"📋 $HOOD 주간 브리핑 — {datetime.now(KST).strftime('%m/%d')} 월"}},
+            "text": f"📋 {DISPLAY_TICKER} 주간 브리핑 — {datetime.now(KST).strftime('%m/%d')} 월"}},
         {"type": "divider"},
     ]
 
@@ -3062,7 +3283,7 @@ def run_dca_status():
         return
 
     lines = [
-        f"*💼 $HOOD DCA 포지션 현황*",
+        f"*💼 {DISPLAY_TICKER} DCA 포지션 현황*",
         f"보유 수량: *{shares:,.1f}주*",
         f"평균 매수가: *${avg_price:.2f}*",
     ]
@@ -3073,7 +3294,7 @@ def run_dca_status():
             lines.append(f"• {h['date']} — {h['shares']:.1f}주 @ ${h['price']:.2f}")
 
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "💼 $HOOD DCA 현황"}},
+        {"type": "header", "text": {"type": "plain_text", "text": f"💼 {DISPLAY_TICKER} DCA 현황"}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
         {"type": "divider"},
@@ -3177,7 +3398,7 @@ def run_dca_update():
 # ─────────────────────────────────────────────
 def main():
     mode = os.environ.get("RUN_MODE", sys.argv[1] if len(sys.argv) > 1 else "normal").lower()
-    log.info(f"HOOD Monitor v3.1 — mode: {mode} | {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}")
+    log.info(f"{TICKER} Monitor v3.2 — mode: {mode} | {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}")
     {
         "normal": run_normal,
         "close": run_close,
