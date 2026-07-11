@@ -65,6 +65,9 @@ state/VRT/app_rank_cache.json
 - `hood_monitor.py`: 실행 모드 조립, Yahoo/FINRA/SEC 호출 흐름, 알림 발송 오케스트레이션
 - `monitor_models.py`: 가격, 기술지표, SEC 거래, DCA 점수 데이터 구조
 - `monitor_state.py`: 런타임 상태 파일 로드/저장
+- `market_data.py`: HTTP GET, Yahoo chart query1/query2, yfinance fallback
+- `technical_indicators.py`: RSI, MACD, EMA, OBV, MFI, Stochastic, ATR, CMF, HVN 계산
+- `dca_scoring.py`: 5-Layer DCA 기술지표 점수 엔진
 - `sec_filings.py`: SEC Form 4 / 13F XML 파싱
 - `alert_quality.py`: Slack 알림 상단의 긴급/주의/참고 요약 판단
 - `slack_blocks.py`: Slack Block Kit 공통 블록과 전송 유틸
@@ -147,7 +150,7 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 코드, 프로필, 테스트, 의존성이 바뀌면 GitHub Actions의 `Tests`가 자동으로 실행됩니다. 로컬에서는 아래 명령으로 같은 검사를 돌릴 수 있습니다.
 
 ```bash
-python -m py_compile monitor_config.py monitor_models.py monitor_state.py slack_blocks.py sec_filings.py alert_quality.py market_calendar.py schedule_state.py hood_monitor.py startup_digest.py market_scan.py alert_delivery_smoke.py live_smoke.py
+python -m py_compile monitor_config.py monitor_models.py monitor_state.py market_data.py technical_indicators.py dca_scoring.py slack_blocks.py sec_filings.py alert_quality.py market_calendar.py schedule_state.py hood_monitor.py startup_digest.py market_scan.py alert_delivery_smoke.py live_smoke.py
 python -m unittest discover tests
 ```
 
@@ -159,7 +162,6 @@ python -m unittest discover tests
 
 ## 다음 재개발 후보
 
-- Yahoo/가격 수집과 기술지표/DCA 점수 계산 추가 분리
 - 상태 파일을 개인 포지션 정보와 알림 중복 방지 정보로 분리
-- Yahoo/FINRA 파서 단위 테스트 추가
+- Yahoo/FINRA 가격·수급 파서 단위 테스트 추가
 - S&P 500 종목 목록을 코드가 아니라 데이터 파일로 분리
