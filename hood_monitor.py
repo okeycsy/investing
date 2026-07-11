@@ -15,6 +15,7 @@ import sys
 import json
 import hashlib
 import math
+import re
 import time
 import logging
 import xml.etree.ElementTree as ET
@@ -38,6 +39,7 @@ CIK = CONFIG.cik.strip()
 CIK_PADDED = CIK.zfill(10) if CIK else ""  # 10자리 (선행 0 포함)
 CIK_SHORT = CIK.lstrip("0")                # 선행 0 제거
 PEER_TICKERS = CONFIG.peer_tickers
+NEWS_MATCH_TERMS = CONFIG.news_terms
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1273,6 +1275,7 @@ def fetch_news() -> list:
                 "title": title,
                 "date":  pub_date,
                 "link":  link,
+                "source": item.findtext("source", ""),
                 "hash":  hashlib.md5(title.encode()).hexdigest()[:12],
             })
         return news
@@ -1314,17 +1317,81 @@ def _fetch_article_body(url: str, max_chars: int = 600) -> str:
         return ""
 
 
+def _shorten(text: str, limit: int = 90) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _news_text(news_item: dict) -> str:
+    return " ".join(
+        str(news_item.get(key, "") or "")
+        for key in ("title", "body", "source")
+    )
+
+
+def _term_matches_text(term: str, text: str) -> bool:
+    term = (term or "").strip()
+    if len(term) < 3:
+        return False
+
+    upper_text = text.upper()
+    upper_term = term.upper()
+    if upper_term == TICKER or (upper_term.isalpha() and upper_term == term and len(upper_term) <= 5):
+        pattern = rf"(?<![A-Z0-9]){re.escape(upper_term)}(?![A-Z0-9])"
+        return re.search(pattern, upper_text) is not None
+
+    return term.lower() in text.lower()
+
+
+def _match_news_terms(news_item: dict) -> list[str]:
+    text = _news_text(news_item)
+    matches = []
+    for term in NEWS_MATCH_TERMS:
+        if _term_matches_text(term, text):
+            matches.append(term)
+    return list(dict.fromkeys(matches))
+
+
+def annotate_news_candidates(news: list) -> list:
+    for item in news:
+        matches = _match_news_terms(item)
+        item["keyword_matches"] = matches
+        if matches:
+            item.setdefault("candidate_summary", _shorten(item.get("title", ""), 80))
+    return news
+
+
+def news_relevant_items(news: list) -> list:
+    return [n for n in news if not n.get("skip") and n.get("summary")]
+
+
+def news_candidate_items(news: list) -> list:
+    relevant_ids = {n.get("hash") or id(n) for n in news_relevant_items(news)}
+    return [
+        n for n in news
+        if n.get("keyword_matches") and (n.get("hash") or id(n)) not in relevant_ids
+    ]
+
+
 def translate_news(news: list) -> list:
     """
     설정 종목 관련 뉴스 필터링 + 한국어 요약(15자) + 기사 핵심 번역(2~3문장)
     """
-    if not news or not ANTHROPIC_API_KEY:
+    if not news:
+        return news
+
+    annotate_news_candidates(news)
+
+    if not ANTHROPIC_API_KEY:
         log.info(f"translate_news skip — news:{len(news)} api_key:{'있음' if ANTHROPIC_API_KEY else '없음'}")
         return news
 
     # 기사 본문 발췌 (관련성 판단 전 미리 fetch)
     for n in news:
         n["body"] = _fetch_article_body(n.get("link", ""))
+    annotate_news_candidates(news)
 
     # 제목 + 본문 발췌 함께 전달
     articles = []
@@ -1339,11 +1406,15 @@ def translate_news(news: list) -> list:
     prompt = f"""당신은 {DISPLAY_TICKER}({COMPANY_NAME or TICKER}) 투자 알림 봇입니다.
 아래 뉴스 목록(제목+본문 발췌)을 분석해주세요.
 
+감시 키워드:
+{", ".join(NEWS_MATCH_TERMS[:25])}
+
 규칙:
 1. {COMPANY_NAME or TICKER} / {DISPLAY_TICKER} 주가에 직접 영향을 주는 뉴스만 포함
 2. 포함 기준: 실적, 규제, 경쟁사 직접 비교, 경영진 변동, 주요 제품/서비스, 기관 매수/매도, 소송
 3. 제외 기준: 업종 일반 뉴스, 금리 일반론, 다른 회사 뉴스에 {TICKER}가 언급만 된 경우
-4. 반드시 한국어로만 출력
+4. 감시 키워드와 맞아도 직접 영향이 약하면 relevant=false
+5. 반드시 한국어로만 출력
 
 각 뉴스에 대해 JSON 배열로만 응답 (다른 텍스트 없이):
 [
@@ -1400,6 +1471,7 @@ def translate_news(news: list) -> list:
                 news[idx]["summary"]     = item.get("summary", "")
                 news[idx]["translation"] = item.get("translation", "")
                 news[idx]["sentiment"]   = item.get("sentiment", "neutral")
+                news[idx]["skip"]        = False
     except Exception as e:
         log.warning(f"뉴스 번역 예외: {e}")
 
@@ -2931,15 +3003,28 @@ def format_13f_block(filings: list) -> list:
 
 
 def format_news_block(news: list) -> list:
-    relevant = [n for n in news if not n.get("skip") and n.get("summary")]
-    if not relevant:
+    relevant = news_relevant_items(news)
+    candidates = news_candidate_items(news)
+    if not relevant and not candidates:
         return []
+
     blocks = []
-    for n in relevant[:5]:
-        tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
-        blocks.append(_sec(f"*📰 {tag} {n['summary']}*"))
-        if n.get("translation"):
-            blocks.append(_ctx(n["translation"]))
+    if relevant:
+        for n in relevant[:5]:
+            tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
+            blocks.append(_sec(f"*📰 {tag} {n['summary']}*"))
+            if n.get("translation"):
+                blocks.append(_ctx(n["translation"]))
+
+    if candidates:
+        lines = []
+        for n in candidates[:5]:
+            title = _shorten(n.get("candidate_summary") or n.get("title", ""), 105)
+            matches = ", ".join(n.get("keyword_matches", [])[:3])
+            suffix = f" _(키워드: {matches})_" if matches else ""
+            lines.append(f"• {title}{suffix}")
+        blocks.append(_sec("*📰 VRT 확인 후보 뉴스*\n" + "\n".join(lines)))
+        blocks.append(_ctx("AI 직접 영향 필터를 통과하지 않았거나 번역 API를 쓰지 못했지만, VRT 감시 키워드가 잡힌 기사입니다."))
     return blocks
 
 

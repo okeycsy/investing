@@ -25,14 +25,18 @@ ticker: $VRT
 ```text
 ticker: $VRT
 company_name: Vertiv Holdings Co
+sector: Industrials
+industry: Electrical Equipment & Data Center Infrastructure
 cik: 0001674101
 benchmark: $QQQ
 peer_tickers: $ETN, $PWR, $SMCI
+news_keywords: Vertiv, Vertiv Holdings, data center power, data center cooling, thermal management
+watch_themes: AI data center capex, hyperscaler buildout, power grid demand
 app_store_id:
 market_scan_focus: $VRT
 ```
 
-`cik`는 SEC Form 4 내부자 거래 조회에 필요합니다. 해당 종목에 앱스토어 순위 추적이 없으면 `app_store_id`는 비워두면 됩니다. `MONITOR_PROFILE` 또는 `MONITOR_TICKER` 환경 변수로도 실행 시점에 종목을 바꿀 수 있습니다.
+`cik`는 SEC Form 4 내부자 거래 조회에 필요합니다. `news_keywords`와 `watch_themes`는 뉴스 후보를 놓치지 않기 위한 감시 키워드입니다. 해당 종목에 앱스토어 순위 추적이 없으면 `app_store_id`는 비워두면 됩니다. `MONITOR_PROFILE` 또는 `MONITOR_TICKER` 환경 변수로도 실행 시점에 종목을 바꿀 수 있습니다.
 
 ## 상태 파일
 
@@ -76,9 +80,10 @@ state/VRT/app_rank_cache.json
 | VRT 주간 브리핑 | `VRT Monitor` / `weekly` | UTC 일 23:00 = KST/JST 월 08:00 |
 | VRT 13F 기관 포지션 | `VRT Monitor` / `13f` | UTC 토 10:00 = KST/JST 토 19:00 |
 | VRT 단일 종목 스캔 | `VRT Market Scan` | UTC 월-금 22:00 = KST/JST 화-토 07:00 |
+| VRT 수동 실행 컨트롤 | `VRT Alert Control` | 수동 실행 |
 | VRT 라이브 연결 점검 | `Live Smoke Test` | `main` push 또는 수동 실행 |
 | VRT 실제 시작 점검 | `VRT Startup Digest` | 수동 실행, 관련 파일 변경 push |
-| VRT 알림 발송 샘플 점검 | `VRT Alert Delivery Smoke` | 수동 실행 |
+| VRT 알림 발송 샘플 점검 | `VRT Sample Alert Delivery Smoke` | 수동 실행 |
 | VRT 백테스트 | `V3 Score Backtester` | 수동 실행 |
 | VRT DCA 현황/업데이트 | `VRT Monitor` / `dca_status`, `dca_update` | 수동 실행 |
 
@@ -99,6 +104,8 @@ python backtest.py --ticker VRT --years 2 --no-slack
 python startup_digest.py --no-slack
 ```
 
+GitHub에서는 Actions 탭의 `VRT Alert Control`을 누르면 실제 시작 점검, 실제 장중/마감/주간/13F 알림, 실제 단일 종목 스캔, 라이브 연결 점검, 샘플 알림 점검을 한 화면에서 선택할 수 있습니다. 이름이 `actual_`로 시작하는 항목은 Yahoo/SEC/뉴스/Market Scan을 실제 조회해서 Slack으로 보냅니다. `sample_delivery_smoke`는 발송 형식만 확인하는 샘플입니다.
+
 ## 라이브 점검
 
 Yahoo/SEC/Slack이 실제로 연결되는지 확인하려면:
@@ -118,6 +125,8 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 ## Slack 알림 품질
 
 모니터 알림 상단에는 `긴급/주의/참고` 요약이 먼저 표시됩니다. 요약은 주가 급변, 기술지표, 옵션/공매도, SEC 내부자 거래, 뉴스, DCA 점수를 기준으로 핵심 이유를 최대 4개까지 보여줍니다.
+
+뉴스는 `관련 확정 뉴스`와 `VRT 확인 후보 뉴스`를 구분합니다. Claude가 직접 영향 뉴스로 판단한 기사는 요약/번역이 표시되고, 직접 영향 필터를 통과하지 않았더라도 VRT 감시 키워드가 잡힌 기사는 후보로 따로 표시합니다.
 
 ## 다음 재개발 후보
 

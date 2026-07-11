@@ -16,9 +16,13 @@ class MonitorConfig:
     profile: str = "HOOD"
     ticker: str = "HOOD"
     company_name: str = "Robinhood Markets"
+    sector: str = ""
+    industry: str = ""
     cik: str = "0001783879"
     benchmark: str = "QQQ"
     peer_tickers: tuple[str, ...] = ("COIN", "MSTR")
+    news_keywords: tuple[str, ...] = ()
+    watch_themes: tuple[str, ...] = ()
     app_store_id: str = "938003185"
     state_dir: str = "state"
     market_scan_focus: str = ""
@@ -38,6 +42,20 @@ class MonitorConfig:
         if self.company_name:
             words.extend(re.findall(r"[A-Za-z0-9]+", self.company_name.upper()))
         return tuple(dict.fromkeys(w for w in words if len(w) >= 3))
+
+    @property
+    def news_terms(self) -> tuple[str, ...]:
+        words: list[str] = [self.ticker, self.company_name]
+        words.extend(self.news_keywords)
+        words.extend(self.watch_themes)
+        if self.company_name:
+            words.extend(re.findall(r"[A-Za-z0-9]+", self.company_name))
+        cleaned = []
+        for word in words:
+            value = (word or "").strip()
+            if len(value) >= 3:
+                cleaned.append(value)
+        return tuple(dict.fromkeys(cleaned))
 
     @property
     def sec_user_agent(self) -> str:
@@ -82,6 +100,12 @@ def _clean_value(value: str) -> str:
 def _parse_list(value: str) -> tuple[str, ...]:
     parts = re.split(r"[,/ ]+", value)
     return tuple(dict.fromkeys(normalize_ticker(p) for p in parts if normalize_ticker(p)))
+
+
+def _parse_text_list(value: str) -> tuple[str, ...]:
+    parts = re.split(r"[,;\n]+", value or "")
+    cleaned = [p.strip().strip("\"'") for p in parts if p.strip()]
+    return tuple(dict.fromkeys(cleaned))
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -151,14 +175,20 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
     ticker = normalize_ticker(_env_or_default("MONITOR_TICKER", values.get("ticker", selected_profile or "HOOD")))
     profile = normalize_ticker(_env_or_default("MONITOR_PROFILE", values.get("profile", selected_profile or ticker)))
     peer_source = _env_or_default("MONITOR_PEER_TICKERS", values.get("peer_tickers", "COIN,MSTR"))
+    news_keyword_source = _env_or_default("MONITOR_NEWS_KEYWORDS", values.get("news_keywords", ""))
+    watch_theme_source = _env_or_default("MONITOR_WATCH_THEMES", values.get("watch_themes", ""))
 
     return MonitorConfig(
         profile=profile or ticker,
         ticker=ticker or "HOOD",
         company_name=_env_or_default("MONITOR_COMPANY_NAME", values.get("company_name", "Robinhood Markets")),
+        sector=_env_or_default("MONITOR_SECTOR", values.get("sector", "")).strip(),
+        industry=_env_or_default("MONITOR_INDUSTRY", values.get("industry", "")).strip(),
         cik=_env_or_default("MONITOR_CIK", values.get("cik", "0001783879")).strip(),
         benchmark=normalize_ticker(_env_or_default("MONITOR_BENCHMARK", values.get("benchmark", "QQQ"))) or "QQQ",
         peer_tickers=_parse_list(peer_source),
+        news_keywords=_parse_text_list(news_keyword_source),
+        watch_themes=_parse_text_list(watch_theme_source),
         app_store_id=_env_or_default("MONITOR_APP_STORE_ID", values.get("app_store_id", "")).strip(),
         state_dir=_env_or_default("MONITOR_STATE_DIR", values.get("state_dir", "state")).strip() or "state",
         market_scan_focus=normalize_ticker(_env_or_default("MARKET_SCAN_FOCUS_TICKER", values.get("market_scan_focus", ""))),

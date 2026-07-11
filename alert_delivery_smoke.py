@@ -32,7 +32,7 @@ def build_smoke_messages(config) -> list[tuple[str, list]]:
     ticker = config.display_ticker
     company = config.company_name or "Unknown company"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    ctx = f"서비스 시작 알림 점검 | {company} | {now}"
+    ctx = f"샘플 알림 발송 점검 | 실제 데이터 아님 | {company} | {now}"
 
     return [
         (

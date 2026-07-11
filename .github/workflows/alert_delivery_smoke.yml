@@ -1,4 +1,4 @@
-name: VRT Alert Delivery Smoke
+name: VRT Sample Alert Delivery Smoke
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Send representative Slack alerts
+      - name: Send sample representative Slack alerts
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}

@@ -59,12 +59,18 @@ def _format_technicals(technicals) -> tuple[str, str]:
 
 
 def _format_news(news: list) -> tuple[str, str]:
-    relevant = [n for n in news if not n.get("skip") and n.get("summary")]
+    relevant = hm.news_relevant_items(news)
+    candidates = hm.news_candidate_items(news)
+    if not relevant and candidates:
+        titles = "; ".join((n.get("candidate_summary") or n.get("title", ""))[:45] for n in candidates[:3])
+        return f"관련 확정 0건, VRT 확인 후보 {len(candidates)}건: {titles}", "info"
     if not relevant:
-        return f"뉴스 후보 {len(news)}건 중 현재 필터 통과 0건", "info"
+        return f"뉴스 후보 {len(news)}건, VRT 키워드 후보 0건", "info"
     negative = sum(1 for n in relevant if n.get("sentiment") == "negative")
     level = "watch" if negative else "info"
     headlines = "; ".join(n.get("summary", "") for n in relevant[:3])
+    if candidates:
+        return f"관련 뉴스 {len(relevant)}건: {headlines} | 확인 후보 {len(candidates)}건", level
     return f"관련 뉴스 {len(relevant)}건: {headlines}", level
 
 
@@ -93,7 +99,7 @@ def _market_scan_summary(ticker: str) -> tuple[str, str]:
     ohlcv_map = ms.batch_download([ticker], period="6mo")
     ts = ms.score_ticker(
         ticker,
-        ms.SP500.get(ticker, "Unknown"),
+        ms.sector_for_ticker(ticker),
         ohlcv_map.get(ticker, {}),
         btc_above_sma20=macro["btc_above_sma20"],
         vix=macro["vix"],
@@ -147,6 +153,10 @@ def build_digest() -> tuple[str, list]:
         _ctx(f"{config.company_name or ticker} | 샘플 아님: Yahoo/SEC/뉴스/Market Scan 실제 조회 | {now}"),
         _divider(),
     ]
+    news_blocks = hm.format_news_block(news)
+    if news_blocks:
+        blocks.extend(news_blocks)
+        blocks.append(_divider())
     return f"{display} actual startup digest", blocks
 
 

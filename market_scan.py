@@ -224,6 +224,15 @@ SP500 = {
 }
 
 
+def sector_for_ticker(ticker: str) -> str:
+    ticker = (ticker or "").upper().strip()
+    if ticker in SP500:
+        return SP500[ticker]
+    if ticker == FOCUS_TICKER and CONFIG.sector:
+        return CONFIG.sector
+    return "Unknown"
+
+
 
 # ─────────────────────────────────────────────
 # 데이터 클래스
@@ -1126,7 +1135,7 @@ def main():
         log.info(f"=== 단일 종목 스캔: ${single_ticker} ===")
         start = time.time()
 
-        sector = SP500.get(single_ticker, "Unknown")
+        sector = sector_for_ticker(single_ticker)
         macro  = fetch_macro_context()
         ohlcv_map = batch_download([single_ticker], period="6mo")
         ts = score_ticker(single_ticker, sector, ohlcv_map.get(single_ticker, {}),
