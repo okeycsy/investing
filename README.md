@@ -60,6 +60,15 @@ state/VRT/app_rank_cache.json
 
 현재 기본값인 `ticker: $VRT`는 같은 이름의 파일들을 `state/VRT/` 아래에 생성합니다. 기존 HOOD 기록은 `state/HOOD/`에 남아 있습니다.
 
+## 코드 구조
+
+- `hood_monitor.py`: 실행 모드 조립, Yahoo/FINRA/SEC 호출 흐름, 알림 발송 오케스트레이션
+- `monitor_models.py`: 가격, 기술지표, SEC 거래, DCA 점수 데이터 구조
+- `monitor_state.py`: 런타임 상태 파일 로드/저장
+- `sec_filings.py`: SEC Form 4 / 13F XML 파싱
+- `alert_quality.py`: Slack 알림 상단의 긴급/주의/참고 요약 판단
+- `slack_blocks.py`: Slack Block Kit 공통 블록과 전송 유틸
+
 ## GitHub Secrets
 
 필수:
@@ -138,7 +147,7 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 코드, 프로필, 테스트, 의존성이 바뀌면 GitHub Actions의 `Tests`가 자동으로 실행됩니다. 로컬에서는 아래 명령으로 같은 검사를 돌릴 수 있습니다.
 
 ```bash
-python -m py_compile monitor_config.py market_calendar.py schedule_state.py hood_monitor.py startup_digest.py market_scan.py alert_delivery_smoke.py live_smoke.py
+python -m py_compile monitor_config.py monitor_models.py monitor_state.py slack_blocks.py sec_filings.py alert_quality.py market_calendar.py schedule_state.py hood_monitor.py startup_digest.py market_scan.py alert_delivery_smoke.py live_smoke.py
 python -m unittest discover tests
 ```
 
@@ -146,11 +155,11 @@ python -m unittest discover tests
 
 모니터 알림 상단에는 `긴급/주의/참고` 요약이 먼저 표시됩니다. 요약은 주가 급변, 기술지표, 옵션/공매도, SEC 내부자 거래, 뉴스, DCA 점수를 기준으로 핵심 이유를 최대 4개까지 보여줍니다.
 
-뉴스는 `관련 확정 뉴스`와 `VRT 확인 후보 뉴스`를 구분합니다. Claude가 직접 영향 뉴스로 판단한 기사는 요약/번역이 표시되고, 직접 영향 필터를 통과하지 않았더라도 VRT 감시 키워드가 잡힌 기사는 후보로 따로 표시합니다. `priority_keywords` 또는 `risk_keywords`가 잡힌 후보는 `우선/리스크` 라벨과 함께 표시됩니다.
+뉴스는 `관련 확정 뉴스`와 `{티커} 확인 후보 뉴스`를 구분합니다. Claude가 직접 영향 뉴스로 판단한 기사는 요약/번역이 표시되고, 직접 영향 필터를 통과하지 않았더라도 설정 종목 감시 키워드가 잡힌 기사는 후보로 따로 표시합니다. `priority_keywords` 또는 `risk_keywords`가 잡힌 후보는 `우선/리스크` 라벨과 함께 표시됩니다.
 
 ## 다음 재개발 후보
 
-- `hood_monitor.py`를 데이터 수집, 점수 계산, Slack 출력, 상태 관리 모듈로 분리
+- Yahoo/가격 수집과 기술지표/DCA 점수 계산 추가 분리
 - 상태 파일을 개인 포지션 정보와 알림 중복 방지 정보로 분리
 - Yahoo/FINRA 파서 단위 테스트 추가
 - S&P 500 종목 목록을 코드가 아니라 데이터 파일로 분리

@@ -20,15 +20,35 @@ import time
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass, field
 
 import requests
 
+import alert_quality
+import sec_filings
 from monitor_config import load_monitor_config, resolve_runtime_file
+from monitor_models import (
+    DCALayerScore,
+    DCAScoreItem,
+    DCATechnicalScore,
+    Filing13F,
+    InsiderTrade,
+    OptionsData,
+    PriceData,
+    SafetyMargin,
+    ShortInterestData,
+    TechnicalSignals,
+    VolumeProfile,
+)
+from monitor_state import (
+    default_state,
+    default_weekly_state,
+    load_state_file,
+    save_state_file,
+)
 from market_calendar import get_market_state, trading_date_for_utc
 import schedule_state
+from slack_blocks import context_block, section_block, send_slack_blocks
 
 # ─────────────────────────────────────────────
 # 설정
@@ -79,146 +99,22 @@ class SyntheticYahooResponse:
 
 
 # ─────────────────────────────────────────────
-# 데이터 클래스
-# ─────────────────────────────────────────────
-@dataclass
-class PriceData:
-    current: float = 0.0
-    prev_close: float = 0.0
-    change_pct: float = 0.0
-    high: float = 0.0
-    low: float = 0.0
-    volume: int = 0
-    vol_avg_5d: int = 0
-    market_state: str = ""    # "REGULAR" | "PRE" | "POST" | "CLOSED"
-    timestamp: str = ""
-
-
-@dataclass
-class TechnicalSignals:
-    rsi_14: float = 50.0
-    macd_line: float = 0.0
-    macd_signal: float = 0.0
-    macd_histogram: float = 0.0
-    rsi_alert: str = ""
-    macd_alert: str = ""
-
-
-@dataclass
-class OptionsData:
-    pcr: float = 0.0
-    total_puts: int = 0
-    total_calls: int = 0
-    pcr_signal: str = ""
-
-
-@dataclass
-class ShortInterestData:
-    short_volume: int = 0
-    total_volume: int = 0
-    short_pct: float = 0.0
-    date: str = ""
-    signal: str = ""
-
-
-@dataclass
-class InsiderTrade:
-    filer: str = ""
-    title: str = ""
-    trade_type: str = ""   # "Purchase" | "Sale" | "Award"
-    txn_code: str = ""     # 원본 SEC transaction code (P/S/A/D 등)
-    shares: int = 0
-    price: float = 0.0
-    total_value: float = 0.0
-    date: str = ""
-    url: str = ""
-
-
-@dataclass
-class Filing13F:
-    institution: str = ""
-    shares: int = 0
-    value_usd: float = 0.0
-    change_type: str = ""
-    filing_date: str = ""
-    url: str = ""
-
-
-@dataclass
-class DCAScoreItem:
-    label: str = ""
-    score: int = 0
-    max_pts: int = 0
-    desc: str = ""
-
-
-@dataclass
-class DCALayerScore:
-    name: str = ""
-    layer_id: str = ""
-    pts: int = 0
-    max_pts: int = 0
-    items: list = field(default_factory=list)
-
-
-@dataclass
-class DCATechnicalScore:
-    layers: list = field(default_factory=list)
-    total: int = 0
-    grade: str = ""
-    grade_emoji: str = ""
-
-
-# ─────────────────────────────────────────────
 # 상태 관리
 # ─────────────────────────────────────────────
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception:
-            pass
-    return {
-        "last_news_hashes": [],
-        "last_insider_hashes": [],
-        "last_13f_hashes": [],
-        "price_history": [],
-        "price_alert_max_pct": 0,
-        "price_alert_direction": "",
-        "price_alert_date": "",
-        "pending_morning_alert": None,
-        # ── DCA 포트폴리오 ──
-        "dca_shares": 0.0,        # 총 보유 수량
-        "dca_avg_price": 0.0,     # 평균 매수가
-        "dca_history": [],        # 매수 이력
-    }
+    return load_state_file(STATE_FILE, default_state)
 
 
 def save_state(state: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    save_state_file(STATE_FILE, state)
 
 
 def load_weekly_state() -> dict:
-    if WEEKLY_STATE_FILE.exists():
-        try:
-            return json.loads(WEEKLY_STATE_FILE.read_text())
-        except Exception:
-            pass
-    return {
-        "week_start": "",
-        "alerts_fired": [],
-        "insider_trades": [],
-        "news_headlines": [],
-        "rsi_readings": [],
-        "pcr_readings": [],
-        "short_readings": [],
-    }
+    return load_state_file(WEEKLY_STATE_FILE, default_weekly_state)
 
 
 def save_weekly_state(ws: dict):
-    WEEKLY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    WEEKLY_STATE_FILE.write_text(json.dumps(ws, indent=2, ensure_ascii=False))
+    save_state_file(WEEKLY_STATE_FILE, ws)
 
 
 # ─────────────────────────────────────────────
@@ -779,20 +675,20 @@ def calc_btc_correlation() -> Optional[dict]:
             log.debug(f"30d returns fetch ({ticker}): {e}")
             return None
 
-    hood_r = fetch_30d_returns(TICKER)
-    btc_r  = fetch_30d_returns("BTC-USD")
+    ticker_returns = fetch_30d_returns(TICKER)
+    btc_r = fetch_30d_returns("BTC-USD")
 
-    if not hood_r or not btc_r:
+    if not ticker_returns or not btc_r:
         log.warning("BTC 상관계수: 데이터 부족")
         return None
 
-    n = min(len(hood_r), len(btc_r))
-    hood_r, btc_r = hood_r[-n:], btc_r[-n:]
+    n = min(len(ticker_returns), len(btc_r))
+    ticker_returns, btc_r = ticker_returns[-n:], btc_r[-n:]
 
-    mean_h = sum(hood_r) / n
+    mean_h = sum(ticker_returns) / n
     mean_b = sum(btc_r) / n
-    cov    = sum((hood_r[i] - mean_h) * (btc_r[i] - mean_b) for i in range(n)) / n
-    std_h  = (sum((x - mean_h) ** 2 for x in hood_r) / n) ** 0.5
+    cov    = sum((ticker_returns[i] - mean_h) * (btc_r[i] - mean_b) for i in range(n)) / n
+    std_h  = (sum((x - mean_h) ** 2 for x in ticker_returns) / n) ** 0.5
     std_b  = (sum((x - mean_b) ** 2 for x in btc_r)  / n) ** 0.5
 
     if std_h == 0 or std_b == 0:
@@ -944,17 +840,6 @@ def format_appstore_rank_block(prev: Optional[dict], curr: dict) -> list:
         _sec(f"*📱 App Store 순위 (미국)*\n" + "  |  ".join(lines) + fomo_warn),
         _ctx("Apple RSS 기준 | 전일 대비 ▲상승 ▼하락"),
     ]
-@dataclass
-class VolumeProfile:
-    poc_price: float = 0.0          # Point of Control (거래 집중 가격대)
-    current_price: float = 0.0
-    poc_signal: str = ""            # "resistance" | "support"
-    vol_30m: int = 0                # 최근 30분 거래량
-    vol_avg_30m: int = 0            # 5일 동일 시간대 평균 거래량
-    vol_ratio: float = 0.0          # 현재 / 평균
-    whale_detected: bool = False
-
-
 def _fetch_1m_bars(ticker: str, range_str: str = "1d") -> list:
     """1분봉 데이터 반환 — [{time, open, high, low, close, volume}, ...]"""
     _yahoo_throttle()
@@ -1059,27 +944,6 @@ def analyze_volume_profile(current_price: float) -> Optional[VolumeProfile]:
 # ─────────────────────────────────────────────
 # 1-4. 안전 마진 / 하락 모멘텀 측정 (Safety Margin)
 # ─────────────────────────────────────────────
-@dataclass
-class SafetyMargin:
-    sma20: float = 0.0
-    bb_upper: float = 0.0
-    bb_lower: float = 0.0
-    current_price: float = 0.0
-    bb_signal: str = ""
-    momentum_signal: str = ""
-    pct_from_lower: float = 0.0
-    mom_30m_prev: float = 0.0
-    mom_30m_curr: float = 0.0
-    # ── 신규 필드 ──
-    beta_expected_pct: float = 0.0     # β 기반 기대 수익률
-    beta_excess_pct: float = 0.0       # 실제 - 기대 (음수 = 베타 초과 하락)
-    divergence_warning: bool = False   # 피어 반등 중 모니터링 종목만 하락 가속
-    peer_coin_pct: float = 0.0
-    peer_mstr_pct: float = 0.0
-    peer_changes: dict = field(default_factory=dict)
-    dca_attraction: int = 0            # DCA 매력도 1~10
-
-
 def check_safety_margin(
     closes_daily: list,
     current_price: float,
@@ -2263,30 +2127,11 @@ def fetch_insider_trades() -> list:
 
 
 def _recent_value(recent: dict, key: str, idx: int) -> str:
-    values = recent.get(key, [])
-    if idx >= len(values):
-        return ""
-    return str(values[idx] or "").strip()
+    return sec_filings.recent_value(recent, key, idx)
 
 
 def _form4_xml_urls_from_submission(accession: str, primary_doc: str) -> list:
-    if not accession or not primary_doc:
-        return []
-
-    acc_clean = accession.replace("-", "")
-    filing_cik = accession.split("-", 1)[0].lstrip("0") or CIK_SHORT
-    primary_name = primary_doc.rsplit("/", 1)[-1]
-    if not primary_name.lower().endswith(".xml"):
-        return []
-
-    ciks = [filing_cik]
-    if CIK_SHORT and CIK_SHORT not in ciks:
-        ciks.append(CIK_SHORT)
-
-    return [
-        f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{primary_name}"
-        for cik in ciks
-    ]
+    return sec_filings.form4_xml_urls_from_submission(accession, primary_doc, CIK_SHORT)
 
 
 def _form4_candidates_from_submissions(limit: int = 10) -> list:
@@ -2296,23 +2141,7 @@ def _form4_candidates_from_submissions(limit: int = 10) -> list:
 
     data = resp.json()
     recent = data.get("filings", {}).get("recent", {})
-    forms = recent.get("form", [])
-    candidates = []
-
-    for idx, form in enumerate(forms):
-        if str(form).upper() not in {"4", "4/A"}:
-            continue
-
-        accession = _recent_value(recent, "accessionNumber", idx)
-        primary_doc = _recent_value(recent, "primaryDocument", idx)
-        filing_date = _recent_value(recent, "filingDate", idx)
-        xml_urls = _form4_xml_urls_from_submission(accession, primary_doc)
-        if xml_urls:
-            candidates.append((filing_date, xml_urls))
-        if len(candidates) >= limit:
-            break
-
-    return candidates
+    return sec_filings.form4_candidates_from_recent(recent, CIK_SHORT, limit)
 
 
 def _fetch_insider_trades_from_atom() -> list:
@@ -2407,139 +2236,15 @@ def _fetch_insider_trades_from_atom() -> list:
 
 
 def _find_form4_xml_url(index_html: str, index_url: str) -> str:
-    """
-    Form 4 index HTML에서 원본 XML 파일 URL 추출.
-    예: .../0002049077-26-000009-index.htm 페이지에서
-        wk-form4_xxxx.xml 링크 찾기
-    """
-    import re
-    from urllib.parse import unquote, urljoin, urlsplit
-
-    # href에서 실제 .xml 파일 찾기 (SEC 뷰어/렌더링 경로 제외)
-    for href in re.findall(r'href=["\']([^"\']+)["\']', index_html):
-        parsed = urlsplit(unquote(href))
-        path = parsed.path
-        name = path.rsplit("/", 1)[-1]
-        href_lower = href.lower()
-        name_lower = name.lower()
-
-        if not path.lower().endswith(".xml"):
-            continue
-        if parsed.query or "ixviewer" in href_lower or "/doc/action" in href_lower:
-            continue
-        if "xsl" in href_lower:
-            continue
-        if name.startswith("R") or "financial" in name_lower:
-            continue
-
-        return urljoin(index_url, href)
-    return ""
+    return sec_filings.find_form4_xml_url(index_html, index_url)
 
 
 def parse_form4_xml(xml_text: str, filing_date: str, url: str) -> list:
-    trades = []
-    try:
-        xml_clean = xml_text
-        for ns in ['xmlns="http://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"',
-                   'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"']:
-            xml_clean = xml_clean.replace(ns, "")
-        root = ET.fromstring(xml_clean)
-
-        reporter = root.find(".//reportingOwner/reportingOwnerId")
-        if reporter is None:
-            reporter = root.find(".//reportingOwnerId")
-        filer_name = reporter.findtext("rptOwnerName", "Unknown") if reporter is not None else "Unknown"
-
-        rel = root.find(".//reportingOwner/reportingOwnerRelationship")
-        if rel is None:
-            rel = root.find(".//reportingOwnerRelationship")
-
-        filer_title = ""
-        if rel is not None:
-            filer_title = rel.findtext("officerTitle", "").strip()
-            # officerTitle 없으면 역할 필드로 fallback
-            if not filer_title:
-                is_director  = rel.findtext("isDirector", "0").strip()
-                is_officer   = rel.findtext("isOfficer", "0").strip()
-                is_10pct     = rel.findtext("isTenPercentOwner", "0").strip()
-                if is_director == "1":
-                    filer_title = "Director"
-                elif is_officer == "1":
-                    filer_title = "Officer"
-                elif is_10pct == "1":
-                    filer_title = "10% Owner"
-
-        for txn in root.findall(".//nonDerivativeTransaction"):
-            t = _parse_transaction(txn, filer_name, filer_title, filing_date, url)
-            if t:
-                trades.append(t)
-        for txn in root.findall(".//derivativeTransaction"):
-            t = _parse_transaction(txn, filer_name, filer_title, filing_date, url)
-            if t:
-                trades.append(t)
-    except ET.ParseError:
-        log.warning("Form 4 XML parse error")
-    except Exception as e:
-        log.warning(f"Form 4 detail error: {e}")
-    return trades
+    return sec_filings.parse_form4_xml(xml_text, filing_date, url)
 
 
 def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
-    try:
-        coding = txn.find("transactionCoding")
-        txn_code = ""
-        if coding is not None:
-            txn_code_e = coding.find("transactionCode")
-            txn_code = txn_code_e.text.strip() if txn_code_e is not None and txn_code_e.text else ""
-
-        # 제외 코드: 주주 입장에서 의미 없는 비시장 거래
-        # C=전환, J=기타, G=증여, W=상속, Z=신탁
-        SKIP_CODES = {"C", "J", "G", "W", "Z"}
-        if txn_code in SKIP_CODES:
-            log.debug(f"Form 4 스킵 (code={txn_code}): {filer_name}")
-            return None
-
-        amounts = txn.find("transactionAmounts")
-        if amounts is None:
-            return None
-
-        shares_e = amounts.find("transactionShares/value")
-        price_e  = amounts.find("transactionPricePerShare/value")
-        code_e   = amounts.find("transactionAcquiredDisposedCode/value")
-
-        shares = float(shares_e.text) if shares_e is not None and shares_e.text else 0
-        price  = float(price_e.text)  if price_e  is not None and price_e.text  else 0
-        acq    = code_e.text.strip()  if code_e   is not None and code_e.text   else ""
-
-        if shares == 0:
-            return None
-
-        # ── 거래 유형 분류 ──────────────────────────────────
-        # P = 장내 매수 (Open Market Purchase)  → 강한 강세 시그널
-        # S = 장내 매도 (Open Market Sale)      → 강한 약세 시그널
-        # A = RSU 귀속/스톡옵션 부여 (Award)    → 보상, 시장 신호 아님
-        # D = 처분 (Disposition, 비시장 매도 등) → 약세 시그널
-        if txn_code == "P":
-            trade_type = "Purchase"
-        elif txn_code == "S":
-            trade_type = "Sale"
-        elif txn_code == "A":
-            trade_type = "Award"     # RSU 귀속 / 스톡옵션 부여
-        elif txn_code == "D" or acq == "D":
-            trade_type = "Sale"
-        else:
-            return None              # 분류 불가 → 스킵
-
-        return InsiderTrade(
-            filer=filer_name, title=filer_title, trade_type=trade_type,
-            txn_code=txn_code,
-            shares=int(shares), price=round(price, 2),
-            total_value=round(shares * price, 2),
-            date=filing_date, url=url,
-        )
-    except Exception as e:
-        log.debug(f"_parse_transaction error: {e}")
-        return None
+    return sec_filings.parse_form4_transaction(txn, filer_name, filer_title, filing_date, url)
 
 
 # ─────────────────────────────────────────────
@@ -2648,52 +2353,16 @@ def _parse_13f_position(entity_cik: str, acc_clean: str) -> tuple:
         if not xml_resp:
             return 0, 0.0, ""
 
-        return _extract_hood_from_infotable(xml_resp.text)
+        return _extract_ticker_from_infotable(xml_resp.text)
 
     except Exception as e:
         log.debug(f"13F infoTable parse error: {e}")
         return 0, 0.0, ""
 
 
-def _extract_hood_from_infotable(xml_text: str) -> tuple:
+def _extract_ticker_from_infotable(xml_text: str) -> tuple:
     """infoTable XML에서 설정 종목 항목을 찾아 주식 수와 평가금액 추출"""
-    try:
-        # 네임스페이스 제거
-        xml_clean = xml_text
-        import re
-        xml_clean = re.sub(r'\s+xmlns[^"]*"[^"]*"', "", xml_clean)
-        xml_clean = re.sub(r'\s+xmlns[^=]*=\S+', "", xml_clean)
-
-        root = ET.fromstring(xml_clean)
-
-        # infoTable 항목 순회
-        for info in root.iter("infoTable"):
-            name_elem = info.find("nameOfIssuer")
-            if name_elem is None:
-                continue
-            name = name_elem.text or ""
-            # 티커 또는 회사명 키워드 포함 여부 확인
-            name_upper = name.upper()
-            if not any(keyword in name_upper for keyword in CONFIG.issuer_keywords):
-                continue
-
-            shares_elem = info.find("shrsOrPrnAmt/sshPrnamt") or info.find("sshPrnamt")
-            value_elem = info.find("value")
-            put_call_elem = info.find("putCall")
-
-            # 옵션 제외 (주식만)
-            if put_call_elem is not None and put_call_elem.text:
-                continue
-
-            shares = int(shares_elem.text.replace(",", "")) if shares_elem is not None and shares_elem.text else 0
-            value = float(value_elem.text.replace(",", "")) * 1000 if value_elem is not None and value_elem.text else 0.0
-
-            return shares, value, "REPORTED"
-
-    except Exception as e:
-        log.debug(f"infoTable XML parse: {e}")
-
-    return 0, 0.0, ""
+    return sec_filings.extract_ticker_from_infotable(xml_text, CONFIG.issuer_keywords)
 
 
 # ─────────────────────────────────────────────
@@ -2710,141 +2379,11 @@ def _is_recent(date_str: str, days: int) -> bool:
 # Slack 포맷터 (Section + Context 구조)
 # ─────────────────────────────────────────────
 def _ctx(text: str) -> dict:
-    """Context 블록 헬퍼 — 작은 글씨 보조 정보"""
-    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+    return context_block(text)
 
 
 def _sec(text: str, fields: list = None) -> dict:
-    """Section 블록 헬퍼. fields 있으면 2열 레이아웃"""
-    block = {"type": "section", "text": {"type": "mrkdwn", "text": text}}
-    if fields:
-        block["fields"] = [{"type": "mrkdwn", "text": f} for f in fields]
-    return block
-
-
-ALERT_LEVELS = {
-    "info": (0, "참고", "⚪"),
-    "watch": (1, "주의", "🟡"),
-    "urgent": (2, "긴급", "🔴"),
-}
-
-
-def _alert_level(level: str) -> tuple:
-    return ALERT_LEVELS.get(level, ALERT_LEVELS["info"])
-
-
-def _add_reason(reasons: list, level: str, text: str):
-    if text:
-        reasons.append((level, text))
-
-
-def _strongest_level(reasons: list) -> str:
-    if not reasons:
-        return "info"
-    return max((level for level, _ in reasons), key=lambda x: _alert_level(x)[0])
-
-
-def _mode_label(mode: str) -> str:
-    return {
-        "normal": "장중",
-        "close": "장마감",
-        "morning": "아침",
-        "weekly": "주간",
-        "13f": "13F",
-        "dca_status": "DCA",
-        "dca_update": "DCA",
-    }.get(mode, mode)
-
-
-def _summarize_price_reason(price: Optional[PriceData], reasons: list):
-    if not price or price.prev_close <= 0:
-        return
-
-    abs_pct = abs(price.change_pct)
-    direction = "상승" if price.change_pct >= 0 else "하락"
-    if abs_pct >= 4:
-        _add_reason(reasons, "urgent", f"주가 전일 대비 {price.change_pct:+.1f}% {direction}: 급변동 기준 충족")
-    elif abs_pct >= 2:
-        _add_reason(reasons, "watch", f"주가 전일 대비 {price.change_pct:+.1f}% {direction}: 변동성 확대")
-    else:
-        _add_reason(reasons, "info", f"주가 전일 대비 {price.change_pct:+.1f}%: 급변동은 아님")
-
-    if price.volume > 0 and price.vol_avg_5d > 0:
-        vol_ratio = price.volume / price.vol_avg_5d
-        if vol_ratio >= 1.5:
-            _add_reason(reasons, "watch", f"거래량이 5일 평균의 {vol_ratio:.1f}배: 수급 변화 확인 필요")
-
-
-def _summarize_technical_reason(technicals: Optional[TechnicalSignals], reasons: list):
-    if not technicals:
-        return
-
-    if technicals.rsi_14 <= 30:
-        _add_reason(reasons, "watch", f"RSI {technicals.rsi_14:.1f}: 과매도 구간")
-    elif technicals.rsi_14 >= 70:
-        _add_reason(reasons, "watch", f"RSI {technicals.rsi_14:.1f}: 과열 구간")
-
-    if technicals.macd_alert == "bullish_cross":
-        _add_reason(reasons, "info", "MACD 골든크로스: 단기 모멘텀 개선")
-    elif technicals.macd_alert == "bearish_cross":
-        _add_reason(reasons, "watch", "MACD 데드크로스: 단기 모멘텀 약화")
-
-
-def _summarize_flow_reason(options: Optional[OptionsData], short: Optional[ShortInterestData], reasons: list):
-    if options:
-        if options.pcr_signal == "heavy_hedging":
-            _add_reason(reasons, "watch", f"옵션 PCR {options.pcr:.2f}: 풋 헤징이 높음")
-        elif options.pcr_signal == "bullish":
-            _add_reason(reasons, "info", f"옵션 PCR {options.pcr:.2f}: 콜 우세")
-
-    if short:
-        if short.short_pct >= 60:
-            _add_reason(reasons, "urgent", f"공매도 비중 {short.short_pct:.1f}%: 매우 높은 압박")
-        elif short.short_pct >= 50:
-            _add_reason(reasons, "watch", f"공매도 비중 {short.short_pct:.1f}%: 높은 편")
-
-
-def _summarize_insider_reason(insiders: list, reasons: list):
-    if not insiders:
-        return
-
-    sale_value = sum(t.total_value for t in insiders if t.trade_type == "Sale")
-    purchase_value = sum(t.total_value for t in insiders if t.trade_type == "Purchase")
-    sale_count = sum(1 for t in insiders if t.trade_type == "Sale")
-    purchase_count = sum(1 for t in insiders if t.trade_type == "Purchase")
-
-    if sale_count:
-        level = "urgent" if sale_value >= 5_000_000 else "watch"
-        value = f"${sale_value/1_000_000:.1f}M" if sale_value >= 1_000_000 else f"${sale_value:,.0f}"
-        _add_reason(reasons, level, f"신규 내부자 매도 {sale_count}건, 추정 {value}")
-    if purchase_count:
-        value = f"${purchase_value/1_000_000:.1f}M" if purchase_value >= 1_000_000 else f"${purchase_value:,.0f}"
-        _add_reason(reasons, "info", f"신규 내부자 매수 {purchase_count}건, 추정 {value}")
-
-
-def _summarize_news_reason(news: list, reasons: list):
-    relevant = [n for n in news if not n.get("skip") and n.get("summary")]
-    if not relevant:
-        return
-
-    negative = sum(1 for n in relevant if n.get("sentiment") == "negative")
-    positive = sum(1 for n in relevant if n.get("sentiment") == "positive")
-    if negative:
-        _add_reason(reasons, "watch", f"관련 뉴스 {len(relevant)}건 중 부정 {negative}건")
-    elif positive:
-        _add_reason(reasons, "info", f"관련 뉴스 {len(relevant)}건 중 긍정 {positive}건")
-    else:
-        _add_reason(reasons, "info", f"관련 뉴스 {len(relevant)}건 업데이트")
-
-
-def _summarize_dca_reason(dca_tech: Optional[DCATechnicalScore], reasons: list):
-    if not dca_tech:
-        return
-
-    if dca_tech.total >= 80:
-        _add_reason(reasons, "info", f"DCA 점수 {dca_tech.total}/100: {dca_tech.grade}")
-    elif dca_tech.total <= 25:
-        _add_reason(reasons, "watch", f"DCA 점수 {dca_tech.total}/100: 진입 매력 낮음")
+    return section_block(text, fields)
 
 
 def build_alert_quality_blocks(
@@ -2859,44 +2398,22 @@ def build_alert_quality_blocks(
     dca_tech: Optional[DCATechnicalScore] = None,
     extra_reasons: list | None = None,
 ) -> list:
-    reasons = []
-    _summarize_price_reason(price, reasons)
-    _summarize_technical_reason(technicals, reasons)
-    _summarize_flow_reason(options, short, reasons)
-    _summarize_insider_reason(insiders or [], reasons)
-    _summarize_news_reason(news or [], reasons)
-    _summarize_dca_reason(dca_tech, reasons)
-    for level, text in extra_reasons or []:
-        _add_reason(reasons, level, text)
-
-    if not reasons:
-        _add_reason(reasons, "info", "새로운 핵심 시그널은 없고 정기 점검 결과만 공유")
-
-    strongest = _strongest_level(reasons)
-    _, label, emoji = _alert_level(strongest)
-
-    top_reasons = sorted(reasons, key=lambda item: _alert_level(item[0])[0], reverse=True)[:4]
-    reason_lines = [
-        f"• {_alert_level(level)[2]} {text}"
-        for level, text in top_reasons
-    ]
-    return [
-        _sec(
-            f"*{emoji} {label} | {DISPLAY_TICKER} {_mode_label(mode)} 핵심 요약*\n"
-            + "\n".join(reason_lines)
-        ),
-        _ctx("분류 기준: 주가 급변, 기술지표, 옵션/공매도, SEC 내부자 거래, 뉴스, DCA 점수"),
-        {"type": "divider"},
-    ]
+    return alert_quality.build_alert_quality_blocks(
+        DISPLAY_TICKER,
+        mode,
+        price=price,
+        technicals=technicals,
+        options=options,
+        short=short,
+        insiders=insiders,
+        news=news,
+        dca_tech=dca_tech,
+        extra_reasons=extra_reasons,
+    )
 
 
 def insert_alert_quality_summary(blocks: list, mode: str, **kwargs):
-    summary = build_alert_quality_blocks(mode, **kwargs)
-    insert_at = 1 if blocks and blocks[0].get("type") == "header" else 0
-    if insert_at < len(blocks) and blocks[insert_at].get("type") == "divider":
-        blocks.pop(insert_at)
-    for block in reversed(summary):
-        blocks.insert(insert_at, block)
+    alert_quality.insert_alert_quality_summary(blocks, DISPLAY_TICKER, mode, **kwargs)
 
 
 def format_technicals_block(ts: TechnicalSignals) -> list:
@@ -3038,8 +2555,8 @@ def format_news_block(news: list) -> list:
             icon = "🟡" if n.get("candidate_level") == "watch" else "⚪"
             suffix = f" _({label}: {', '.join(matches[:3])})_" if matches else ""
             lines.append(f"• {icon} {title}{suffix}")
-        blocks.append(_sec("*📰 VRT 확인 후보 뉴스*\n" + "\n".join(lines)))
-        blocks.append(_ctx("AI 직접 영향 필터를 통과하지 않았거나 번역 API를 쓰지 못했지만, VRT 감시 키워드가 잡힌 기사입니다."))
+        blocks.append(_sec(f"*📰 {DISPLAY_TICKER} 확인 후보 뉴스*\n" + "\n".join(lines)))
+        blocks.append(_ctx(f"AI 직접 영향 필터를 통과하지 않았거나 번역 API를 쓰지 못했지만, {DISPLAY_TICKER} 감시 키워드가 잡힌 기사입니다."))
     return blocks
 
 
@@ -3122,22 +2639,14 @@ def _footer() -> list:
 
 def send_slack(blocks: list, text: str = ""):
     text = text or f"{TICKER} Monitor"
-    if not SLACK_WEBHOOK:
-        log.warning("SLACK_WEBHOOK_URL not set")
-        for b in blocks:
-            if isinstance(b.get("text"), dict):
-                print(b["text"].get("text", ""))
-        return
-    for i in range(0, len(blocks), 40):
-        chunk = blocks[i:i + 40]
-        try:
-            resp = requests.post(SLACK_WEBHOOK, json={"text": text, "blocks": chunk}, timeout=10)
-            if resp.status_code != 200:
-                log.error(f"Slack error: {resp.status_code} {resp.text}")
-            else:
-                log.info(f"Slack sent OK ({i + 1}-{i + len(chunk)}/{len(blocks)})")
-        except Exception as e:
-            log.error(f"Slack send: {e}")
+    send_slack_blocks(
+        blocks,
+        webhook=SLACK_WEBHOOK,
+        text=text,
+        logger=log,
+        timeout=10,
+        print_when_missing=True,
+    )
 
 
 # ─────────────────────────────────────────────

@@ -903,9 +903,9 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
         blocks.append(_div())
 
     # ── 설정 종목 DCA 오늘의 신호 ─────────────────────────────────
-    hood_ts = next((r for r in results if r.ticker == FOCUS_TICKER and not r.error), None)
-    if hood_ts:
-        score = hood_ts.score
+    focus_score = next((r for r in results if r.ticker == FOCUS_TICKER and not r.error), None)
+    if focus_score:
+        score = focus_score.score
         # 매수 금액 결정
         if score >= 80:
             action = "🟢🟢 *STRONG BUY* — 오늘 $200 매수 (Cash Pool 한도 내)"
@@ -921,9 +921,9 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
             action_short = "AVOID / $0"
 
         # CMF 상태 레이블
-        a_pts = hood_ts.layers.get("A", 0)
-        cmf_state = ("양수유지" if (hood_ts.cmf > 0.02 and a_pts == 50) else
-                     "전환중"   if (hood_ts.cmf <= 0.02 and a_pts == 30) else
+        a_pts = focus_score.layers.get("A", 0)
+        cmf_state = ("양수유지" if (focus_score.cmf > 0.02 and a_pts == 50) else
+                     "전환중"   if (focus_score.cmf <= 0.02 and a_pts == 30) else
                      "전환완료" if a_pts == 10 else
                      "중립"     if a_pts == 5  else "매도압력")
 
@@ -940,14 +940,14 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
 
         fill = int(score / 100 * 10)
         bar  = "█" * fill + "░" * (10 - fill)
-        hood_block = "\n".join([
+        focus_block = "\n".join([
             f"*💰 오늘의 {DISPLAY_FOCUS_TICKER} DCA 신호*",
             action,
-            f"`{bar}` *{score}점* ({hood_ts.grade})",
-            f"CMF `{hood_ts.cmf:+.3f}` ({cmf_state})  EvsR `{hood_ts.evsr:.2f}`  RSI `{hood_ts.rsi:.0f}`",
+            f"`{bar}` *{score}점* ({focus_score.grade})",
+            f"CMF `{focus_score.cmf:+.3f}` ({cmf_state})  EvsR `{focus_score.evsr:.2f}`  RSI `{focus_score.rsi:.0f}`",
             macro_tag,
         ])
-        blocks.append(_sec_block(hood_block))
+        blocks.append(_sec_block(focus_block))
         blocks.append(_div())
 
     # 섹터 히트맵

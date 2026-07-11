@@ -9,14 +9,15 @@ from datetime import datetime, timezone
 import requests
 
 from monitor_config import load_monitor_config
+from slack_blocks import context_block, section_block
 
 
 def _ctx(text: str) -> dict:
-    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+    return context_block(text)
 
 
 def _sec(text: str) -> dict:
-    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+    return section_block(text)
 
 
 def _message(title: str, body: str, context: str) -> list:
@@ -116,7 +117,7 @@ def build_smoke_messages(config) -> list[tuple[str, list]]:
                 (
                     f"*⚪ 참고 | {ticker} Market Scan 샘플*\n"
                     "• ⚪ 4-Layer 점수, CMF, EvsR, RSI, 매크로 상태 표시\n"
-                    "• ⚪ 스케줄에서는 VRT 단일 종목만 스캔"
+                    f"• ⚪ 스케줄에서는 {ticker} 단일 종목만 스캔"
                 ),
                 ctx,
             ),

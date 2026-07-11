@@ -10,14 +10,15 @@ import requests
 import hood_monitor as hm
 import market_scan as ms
 from monitor_config import load_monitor_config
+from slack_blocks import context_block, section_block
 
 
 def _ctx(text: str) -> dict:
-    return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+    return context_block(text)
 
 
 def _sec(text: str) -> dict:
-    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+    return section_block(text)
 
 
 def _divider() -> dict:
@@ -59,14 +60,16 @@ def _format_technicals(technicals) -> tuple[str, str]:
 
 
 def _format_news(news: list) -> tuple[str, str]:
+    config = load_monitor_config()
+    display = config.display_ticker
     relevant = hm.news_relevant_items(news)
     candidates = hm.news_candidate_items(news)
     if not relevant and candidates:
         titles = "; ".join((n.get("candidate_summary") or n.get("title", ""))[:45] for n in candidates[:3])
         level = "watch" if any(n.get("candidate_level") == "watch" for n in candidates) else "info"
-        return f"관련 확정 0건, VRT 확인 후보 {len(candidates)}건: {titles}", level
+        return f"관련 확정 0건, {display} 확인 후보 {len(candidates)}건: {titles}", level
     if not relevant:
-        return f"뉴스 후보 {len(news)}건, VRT 키워드 후보 0건", "info"
+        return f"뉴스 후보 {len(news)}건, {display} 키워드 후보 0건", "info"
     negative = sum(1 for n in relevant if n.get("sentiment") == "negative")
     level = "watch" if negative else "info"
     headlines = "; ".join(n.get("summary", "") for n in relevant[:3])
