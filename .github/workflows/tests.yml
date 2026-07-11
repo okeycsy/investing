@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - '.github/workflows/tests.yml'
+      - '*.py'
+      - 'profiles/**'
+      - 'tests/**'
+      - 'requirements.txt'
+  pull_request:
+    branches: ['main']
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m py_compile monitor_config.py market_calendar.py schedule_state.py hood_monitor.py startup_digest.py market_scan.py alert_delivery_smoke.py live_smoke.py
+
+      - name: Run unit tests
+        run: python -m unittest discover tests

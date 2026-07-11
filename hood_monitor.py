@@ -2413,21 +2413,26 @@ def _find_form4_xml_url(index_html: str, index_url: str) -> str:
         wk-form4_xxxx.xml 링크 찾기
     """
     import re
-    # base URL: index URL에서 파일명 제거
-    base = index_url.rsplit("/", 1)[0] + "/"
+    from urllib.parse import unquote, urljoin, urlsplit
 
-    # href에서 .xml 파일 찾기 (xsl 렌더링 경로 제외)
+    # href에서 실제 .xml 파일 찾기 (SEC 뷰어/렌더링 경로 제외)
     for href in re.findall(r'href=["\']([^"\']+)["\']', index_html):
-        name = href.split("/")[-1]
-        # 파일명과 경로 모두에서 xsl 렌더링 경로 제외
-        if (name.endswith(".xml")
-                and "xsl" not in href.lower()       # 경로에 xslF345 등 포함 여부
-                and not name.startswith("R")
-                and "Financial" not in name):
-            # 절대 경로면 그대로, 상대 경로면 base 붙이기
-            if href.startswith("http"):
-                return href
-            return "https://www.sec.gov" + href if href.startswith("/") else base + name
+        parsed = urlsplit(unquote(href))
+        path = parsed.path
+        name = path.rsplit("/", 1)[-1]
+        href_lower = href.lower()
+        name_lower = name.lower()
+
+        if not path.lower().endswith(".xml"):
+            continue
+        if parsed.query or "ixviewer" in href_lower or "/doc/action" in href_lower:
+            continue
+        if "xsl" in href_lower:
+            continue
+        if name.startswith("R") or "financial" in name_lower:
+            continue
+
+        return urljoin(index_url, href)
     return ""
 
 

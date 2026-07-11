@@ -133,6 +133,15 @@ python live_smoke.py --no-slack
 
 GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니다. `main`에 push될 때도 자동 실행되며, 이때는 Slack Secret까지 필수로 확인합니다. `workflow_dispatch`에서 `require_slack=false`를 고르면 Slack 없이 Yahoo/SEC만 확인할 수 있습니다.
 
+## 자동 테스트
+
+코드, 프로필, 테스트, 의존성이 바뀌면 GitHub Actions의 `Tests`가 자동으로 실행됩니다. 로컬에서는 아래 명령으로 같은 검사를 돌릴 수 있습니다.
+
+```bash
+python -m py_compile monitor_config.py market_calendar.py schedule_state.py hood_monitor.py startup_digest.py market_scan.py alert_delivery_smoke.py live_smoke.py
+python -m unittest discover tests
+```
+
 ## Slack 알림 품질
 
 모니터 알림 상단에는 `긴급/주의/참고` 요약이 먼저 표시됩니다. 요약은 주가 급변, 기술지표, 옵션/공매도, SEC 내부자 거래, 뉴스, DCA 점수를 기준으로 핵심 이유를 최대 4개까지 보여줍니다.
@@ -143,5 +152,5 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 
 - `hood_monitor.py`를 데이터 수집, 점수 계산, Slack 출력, 상태 관리 모듈로 분리
 - 상태 파일을 개인 포지션 정보와 알림 중복 방지 정보로 분리
-- SEC/Yahoo/FINRA 파서 단위 테스트 추가
+- Yahoo/FINRA 파서 단위 테스트 추가
 - S&P 500 종목 목록을 코드가 아니라 데이터 파일로 분리
