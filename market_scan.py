@@ -19,8 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass, field
 
-from monitor_config import load_monitor_config, resolve_runtime_file
-import schedule_state
+from monitor_config import load_monitor_config
 
 try:
     import yfinance as yf
@@ -36,7 +35,6 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CONFIG = load_monitor_config()
 FOCUS_TICKER = CONFIG.effective_market_scan_focus
 DISPLAY_FOCUS_TICKER = f"${FOCUS_TICKER}"
-SCHEDULE_STATE_FILE = resolve_runtime_file(CONFIG, "schedule_state.json", "MONITOR_SCHEDULE_STATE_FILE")
 
 KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
@@ -224,15 +222,6 @@ SP500 = {
     "KMI":  "Energy", "LNG":  "Energy", "TRGP": "Energy",
     "DINO": "Energy",
 }
-
-
-def sector_for_ticker(ticker: str) -> str:
-    ticker = (ticker or "").upper().strip()
-    if ticker in SP500:
-        return SP500[ticker]
-    if ticker == FOCUS_TICKER and CONFIG.sector:
-        return CONFIG.sector
-    return "Unknown"
 
 
 
@@ -903,9 +892,9 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
         blocks.append(_div())
 
     # ── 설정 종목 DCA 오늘의 신호 ─────────────────────────────────
-    focus_score = next((r for r in results if r.ticker == FOCUS_TICKER and not r.error), None)
-    if focus_score:
-        score = focus_score.score
+    hood_ts = next((r for r in results if r.ticker == FOCUS_TICKER and not r.error), None)
+    if hood_ts:
+        score = hood_ts.score
         # 매수 금액 결정
         if score >= 80:
             action = "🟢🟢 *STRONG BUY* — 오늘 $200 매수 (Cash Pool 한도 내)"
@@ -921,9 +910,9 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
             action_short = "AVOID / $0"
 
         # CMF 상태 레이블
-        a_pts = focus_score.layers.get("A", 0)
-        cmf_state = ("양수유지" if (focus_score.cmf > 0.02 and a_pts == 50) else
-                     "전환중"   if (focus_score.cmf <= 0.02 and a_pts == 30) else
+        a_pts = hood_ts.layers.get("A", 0)
+        cmf_state = ("양수유지" if (hood_ts.cmf > 0.02 and a_pts == 50) else
+                     "전환중"   if (hood_ts.cmf <= 0.02 and a_pts == 30) else
                      "전환완료" if a_pts == 10 else
                      "중립"     if a_pts == 5  else "매도압력")
 
@@ -940,14 +929,14 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
 
         fill = int(score / 100 * 10)
         bar  = "█" * fill + "░" * (10 - fill)
-        focus_block = "\n".join([
+        hood_block = "\n".join([
             f"*💰 오늘의 {DISPLAY_FOCUS_TICKER} DCA 신호*",
             action,
-            f"`{bar}` *{score}점* ({focus_score.grade})",
-            f"CMF `{focus_score.cmf:+.3f}` ({cmf_state})  EvsR `{focus_score.evsr:.2f}`  RSI `{focus_score.rsi:.0f}`",
+            f"`{bar}` *{score}점* ({hood_ts.grade})",
+            f"CMF `{hood_ts.cmf:+.3f}` ({cmf_state})  EvsR `{hood_ts.evsr:.2f}`  RSI `{hood_ts.rsi:.0f}`",
             macro_tag,
         ])
-        blocks.append(_sec_block(focus_block))
+        blocks.append(_sec_block(hood_block))
         blocks.append(_div())
 
     # 섹터 히트맵
@@ -996,7 +985,7 @@ def build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
         )
         lines.append(f"• {lname}: *{best[0]}* ({best[1]:.0f}점)")
     blocks.append(_ctx("\n".join(lines)))
-    blocks.append(_ctx("기술지표 기반 참고용. 투자 결정은 본인 판단하에. 다음 스캔: 다음 NYSE 거래일 마감 + 120분"))
+    blocks.append(_ctx("기술지표 기반 참고용. 투자 결정은 본인 판단하에. 다음 스캔: 내일 KST 07:00"))
     return blocks
 
 
@@ -1028,7 +1017,6 @@ def _pct(val: float) -> str:
 def build_single_blocks(ts: TickerScore, elapsed: float) -> list:
     today  = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     sector = ts.sector or "Unknown"
-    industry = CONFIG.industry or "Unknown industry"
     blocks = []
 
     # ── 헤더 ──────────────────────────────────
@@ -1043,15 +1031,8 @@ def build_single_blocks(ts: TickerScore, elapsed: float) -> list:
     squeeze_tag = "  🔥 *BB Squeeze 발동*" if ts.squeeze else ""
     blocks.append(_sec_block(
         f"{ts.grade_emoji} *{ts.score}점*  `{bar}`  _{ts.grade}_{squeeze_tag}\n"
-        f"섹터: *{sector}* | 산업: *{industry}*"
+        f"섹터: *{sector}*"
     ))
-    if CONFIG.end_markets or CONFIG.core_products:
-        context_lines = []
-        if CONFIG.end_markets:
-            context_lines.append("시장: " + ", ".join(CONFIG.end_markets[:3]))
-        if CONFIG.core_products:
-            context_lines.append("핵심: " + ", ".join(CONFIG.core_products[:4]))
-        blocks.append(_ctx(" | ".join(context_lines)))
     blocks.append(_div())
 
     # ── 레이어별 상세 ─────────────────────────
@@ -1138,9 +1119,6 @@ def main():
 
     single_ticker = args.ticker.strip().upper()
 
-    if schedule_state.should_skip(SCHEDULE_STATE_FILE, log):
-        return
-
     # ══════════════════════════════════════════
     # 모드 A: 단일 종목 스캔
     # ══════════════════════════════════════════
@@ -1148,7 +1126,7 @@ def main():
         log.info(f"=== 단일 종목 스캔: ${single_ticker} ===")
         start = time.time()
 
-        sector = sector_for_ticker(single_ticker)
+        sector = SP500.get(single_ticker, "Unknown")
         macro  = fetch_macro_context()
         ohlcv_map = batch_download([single_ticker], period="6mo")
         ts = score_ticker(single_ticker, sector, ohlcv_map.get(single_ticker, {}),
@@ -1166,7 +1144,6 @@ def main():
         )
         blocks = build_single_blocks(ts, elapsed)
         send_slack(blocks, text=f"${single_ticker} 단일 종목 스캔")
-        schedule_state.mark_completed(SCHEDULE_STATE_FILE, log)
         log.info("=== 완료 ===")
         return
 
@@ -1209,7 +1186,6 @@ def main():
     blocks = build_blocks(results, sectors, top15, bottom10, claude_comment, elapsed,
                           macro=macro)
     send_slack(blocks, text="S&P 500 Market Scan")
-    schedule_state.mark_completed(SCHEDULE_STATE_FILE, log)
     log.info("=== 완료 ===")
 
 
