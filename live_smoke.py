@@ -238,10 +238,15 @@ def main() -> int:
             ok, detail = False, f"{exc.__class__.__name__}: {exc}"
         print(f"[{_status(ok)}] {name}: {detail}")
         if not ok:
-            failures.append(name)
+            failures.append((name, detail))
 
     if failures:
-        print("Failed checks: " + ", ".join(failures))
+        failed_names = ", ".join(name for name, _ in failures)
+        print("Failed checks: " + failed_names)
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            detail = " | ".join(f"{name}: {message}" for name, message in failures)
+            detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::error title=Live Smoke failed::{detail}")
         return 1
     return 0
 
