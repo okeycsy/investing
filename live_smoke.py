@@ -178,6 +178,8 @@ def check_sec_form4(config) -> tuple[bool, str]:
             response = requests.get(xml_url, headers=config.sec_legacy_headers, timeout=20)
             if response.status_code == 404:
                 continue
+            if response.status_code == 403:
+                return _check_yahoo_insider_fallback(config, "SEC Archives HTTP 403")
             response.raise_for_status()
             if "<ownershipDocument" in response.text:
                 filing_date = recent_item("filingDate")
@@ -187,6 +189,20 @@ def check_sec_form4(config) -> tuple[bool, str]:
         return False, "SEC Form 4 XML was listed but archive paths returned 404"
 
     return True, "SEC Form 4 submissions reachable, no recent Form 4 entries"
+
+
+def _check_yahoo_insider_fallback(config, sec_detail: str) -> tuple[bool, str]:
+    try:
+        import yfinance as yf
+
+        data = yf.Ticker(config.ticker).insider_transactions
+        if data is None or data.empty:
+            return False, f"{sec_detail}; Yahoo insider fallback returned no rows"
+        latest = data.iloc[0].get("Start Date")
+        latest_text = latest.strftime("%Y-%m-%d") if hasattr(latest, "strftime") else str(latest or "")[:10]
+        return True, f"{sec_detail}; Yahoo insider fallback rows={len(data)}, latest={latest_text}"
+    except Exception as exc:
+        return False, f"{sec_detail}; Yahoo insider fallback failed: {exc}"
 
 
 def check_slack(config, *, require: bool) -> tuple[bool, str]:

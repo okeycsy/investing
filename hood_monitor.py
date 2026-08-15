@@ -15,6 +15,7 @@ import sys
 import json
 import hashlib
 import math
+import re
 import time
 import logging
 import xml.etree.ElementTree as ET
@@ -2171,7 +2172,7 @@ def fetch_insider_trades() -> list:
                         break
                 if not xml_resp:
                     log.warning(f"Form 4 XML 응답 없음: {xml_urls[0] if xml_urls else ''}")
-                    continue
+                    break
                 try:
                     parsed = parse_form4_xml(xml_resp.text, filing_date, xml_url)
                     trades.extend(parsed)
@@ -2179,14 +2180,83 @@ def fetch_insider_trades() -> list:
                 except Exception as e:
                     log.warning(f"Form 4 parse error: {e}")
                 time.sleep(0.3)
-            return trades
+            if trades:
+                return trades
+            log.warning("SEC Form 4 원문 접근 불가 — Yahoo 내부자 거래 fallback")
+            return _fetch_insider_trades_from_yahoo()
 
         log.warning("Form 4 submissions 후보 없음 — atom feed fallback")
-        return _fetch_insider_trades_from_atom()
+        atom_trades = _fetch_insider_trades_from_atom()
+        return atom_trades or _fetch_insider_trades_from_yahoo()
 
     except Exception as e:
         log.error(f"Insider fetch error: {e}")
-    return trades
+    return trades or _fetch_insider_trades_from_yahoo()
+
+
+def _fetch_insider_trades_from_yahoo(limit: int = 30) -> list:
+    """SEC Archives가 자동화 요청을 막을 때 Yahoo 거래 내역을 대체 사용."""
+    try:
+        import yfinance as yf
+
+        data = yf.Ticker(TICKER).insider_transactions
+        if data is None or data.empty:
+            log.warning("Yahoo 내부자 거래 데이터 없음")
+            return []
+
+        trades = []
+        for _, row in data.head(limit).iterrows():
+            text = str(row.get("Text") or "")
+            lowered = text.lower()
+            if "sale" in lowered:
+                trade_type, txn_code = "Sale", "S"
+            elif "purchase" in lowered or "buy" in lowered:
+                trade_type, txn_code = "Purchase", "P"
+            elif "award" in lowered or "grant" in lowered:
+                trade_type, txn_code = "Award", "A"
+            else:
+                continue
+
+            try:
+                shares = int(float(row.get("Shares") or 0))
+            except (TypeError, ValueError):
+                shares = 0
+            try:
+                total_value = float(row.get("Value") or 0)
+            except (TypeError, ValueError):
+                total_value = 0.0
+            if shares <= 0:
+                continue
+
+            price = total_value / shares if total_value > 0 else 0.0
+            if price <= 0:
+                price_match = re.search(r"price\s+([0-9,.]+)", text, re.IGNORECASE)
+                if price_match:
+                    price = float(price_match.group(1).replace(",", ""))
+
+            date_value = row.get("Start Date")
+            date = date_value.strftime("%Y-%m-%d") if hasattr(date_value, "strftime") else str(date_value or "")[:10]
+            url = str(row.get("URL") or "")
+            if not url:
+                url = f"https://finance.yahoo.com/quote/{TICKER}/insider-transactions/"
+
+            trades.append(InsiderTrade(
+                filer=str(row.get("Insider") or "Unknown"),
+                title=str(row.get("Position") or ""),
+                trade_type=trade_type,
+                txn_code=txn_code,
+                shares=shares,
+                price=round(price, 2),
+                total_value=round(total_value, 2),
+                date=date,
+                url=url,
+            ))
+
+        log.info(f"Yahoo 내부자 거래 fallback: {len(trades)}건")
+        return trades
+    except Exception as e:
+        log.warning(f"Yahoo 내부자 거래 fallback 실패: {e}")
+        return []
 
 
 def _recent_value(recent: dict, key: str, idx: int) -> str:
