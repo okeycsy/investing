@@ -1,6 +1,8 @@
-# Ticker Monitor
+# Ticker Thesis Monitor
 
-GitHub Actions 기반 미국 주식 모니터링 봇입니다. 현재 기본 종목은 `$VRT`이며, `monitor_config.md`에서 종목을 바꾸면 같은 기능을 다른 티커에 적용할 수 있습니다.
+GitHub Actions 기반 단일 종목 투자 논지 모니터입니다. 현재 기본 종목은 `$VRT`입니다. 가격 화면이 아니라 중요 뉴스, 발행사 SEC 공시, 내부자 거래, 장마감 상대 성과와 주간 논지 변화를 Slack으로 전달합니다.
+
+제품 동작과 표시 금지사항은 `HOOD_MONITOR_PRODUCT.md`에 고정되어 있습니다.
 
 ## 1차 정리 범위
 
@@ -31,11 +33,11 @@ market_scan_focus: $VRT
 필수:
 
 - `SLACK_WEBHOOK_URL`
+- `ANTHROPIC_API_KEY`
 
 선택:
 
 - `MARKET_SCAN_WEBHOOK`
-- `ANTHROPIC_API_KEY`
 - `IMGUR_CLIENT_ID`
 - `SEC_CONTACT`
 - `SEC_USER_AGENT`
@@ -50,7 +52,6 @@ pip install -r requirements.txt
 
 python hood_monitor.py normal
 python hood_monitor.py close
-python hood_monitor.py morning
 python hood_monitor.py weekly
 python hood_monitor.py 13f
 
@@ -62,13 +63,13 @@ python backtest.py --ticker VRT --years 2 --no-slack
 
 ## 라이브 점검
 
-Yahoo/SEC/Slack이 실제로 연결되는지 확인하려면:
+Yahoo/SEC/AI/Slack이 실제로 연결되는지 확인하려면:
 
 ```bash
 python live_smoke.py --require-slack
 ```
 
-Slack Webhook 없이 Yahoo/SEC만 확인하려면:
+Slack Webhook 없이 Yahoo/SEC/AI만 확인하려면:
 
 ```bash
 python live_smoke.py --no-slack
@@ -78,10 +79,10 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 
 내부자 거래는 SEC 제출 목록과 Form 4 원문을 우선 조회합니다. SEC Archives가 자동화 요청을 `403`으로 제한하면 Yahoo 내부자 거래 데이터로 자동 전환합니다.
 
-## 다음 재개발 후보
+## 알림 원칙
 
-- `hood_monitor.py`를 데이터 수집, 점수 계산, Slack 출력, 상태 관리 모듈로 분리
-- 상태 파일을 개인 포지션 정보와 알림 중복 방지 정보로 분리
-- SEC/Yahoo/FINRA 파서 단위 테스트 추가
-- 여름/겨울 미국장 시간대를 명시적으로 처리
-- S&P 500 종목 목록을 코드가 아니라 데이터 파일로 분리
+- 장중에는 새 뉴스, 발행사 중요 SEC 공시, 내부자 거래, 큰 폭의 이상 움직임만 전송합니다.
+- 장마감에는 가격과 정확한 등락률 없이 `양전/음전/보합`, SOXX 상대 성과, 투자 논지와 DCA 계획을 먼저 표시합니다.
+- 주간 브리핑은 실제 5거래일 변화를 사용합니다.
+- AI 분석 실패 뉴스는 확인 완료로 저장하지 않으며 다음 실행에서 재시도합니다.
+- 기술지표는 DCA 보조 맥락이며 자동 매수 지시가 아닙니다.

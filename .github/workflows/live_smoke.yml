@@ -7,11 +7,14 @@ on:
       - '.github/workflows/live_smoke.yml'
       - 'backtest.py'
       - 'hood_monitor.py'
+      - 'HOOD_MONITOR_PRODUCT.md'
       - 'live_smoke.py'
       - 'market_scan.py'
       - 'monitor_config.md'
       - 'monitor_config.py'
       - 'requirements.txt'
+      - 'tests/**'
+      - '.github/workflows/hood_monitor.yml'
 
   workflow_dispatch:
     inputs:
@@ -46,7 +49,10 @@ jobs:
           SEC_CONTACT: ${{ secrets.SEC_CONTACT }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          python -m unittest discover -s tests -v
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.require_slack }}" != "true" ]; then
             python live_smoke.py --no-slack
             exit 0

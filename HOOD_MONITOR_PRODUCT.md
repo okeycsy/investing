@@ -1,0 +1,43 @@
+# Hood Monitor Product Contract
+
+`hood_monitor.py` is a single-stock, long-term investment thesis monitor. VRT is
+the reference profile. The product reports material changes and preserves the
+user's DCA discipline; it is not a quote screen or an automated trading system.
+
+## Decision Questions
+
+Every visible alert must answer at least one question:
+
+1. What new fact appeared?
+2. Why does it matter to the configured investment thesis?
+3. Does the existing DCA plan remain intact?
+4. What source or next event should be checked?
+
+## Alert Contracts
+
+- `normal`: material news, issuer SEC filings, meaningful insider transactions,
+  or an abnormal company-specific move. Silent when nothing changed.
+- `close`: one daily decision summary followed by the existing useful detail.
+- `weekly`: the week's thesis changes, market direction, relative performance,
+  and next checks. It must use a real weekly comparison.
+- `13f`: only newly filed positions, with quarter-over-quarter direction when
+  the previous position is available.
+- `morning`: retained only as a compatibility command; it must not be scheduled.
+
+## Visible Output Rules
+
+- Never show the current stock price or exact daily stock/benchmark return.
+- Show only `양전/음전/보합` and benchmark `아웃퍼폼/언더퍼폼/동조`.
+- Every displayed news or issuer filing must include a source link.
+- Facts and AI interpretation must be visibly separated.
+- AI failure must not consume the news de-duplication key.
+- A partial source failure must be disclosed; it must not look like "no change".
+- Technical indicators are secondary context. They must not say `Strong Buy`,
+  `Buy`, or `Avoid`, and must not prescribe a dollar purchase amount.
+- FINRA daily short volume must not be labeled as short interest.
+
+## Usability Guardrail
+
+Existing collection depth is preserved unless a source is irrelevant to the
+configured profile. Improvements should add a concise decision summary above
+useful detail, not replace working detail with a generic status card.

@@ -21,6 +21,41 @@ class MonitorConfig:
     state_dir: str = "."
     market_scan_focus: str = ""
     sec_contact: str = "maybe2213@naver.com"
+    company_aliases: tuple[str, ...] = ("Vertiv", "Vertiv Holdings")
+    news_terms: tuple[str, ...] = (
+        "data center cooling",
+        "liquid cooling",
+        "AI infrastructure",
+        "hyperscaler",
+    )
+    priority_keywords: tuple[str, ...] = (
+        "backlog",
+        "orders",
+        "organic sales",
+        "guidance",
+        "operating margin",
+        "free cash flow",
+    )
+    risk_keywords: tuple[str, ...] = (
+        "margin pressure",
+        "guidance cut",
+        "order cancellation",
+        "supply chain",
+        "tariff",
+        "customer concentration",
+    )
+    core_kpis: tuple[str, ...] = (
+        "backlog",
+        "organic sales growth",
+        "adjusted operating margin",
+        "EPS guidance",
+        "revenue guidance",
+        "free cash flow",
+    )
+    profile_context: str = (
+        "AI data-center power and thermal infrastructure, especially liquid cooling; "
+        "watch orders, backlog conversion, capacity, margins, guidance, and cash flow."
+    )
 
     @property
     def display_ticker(self) -> str:
@@ -32,10 +67,10 @@ class MonitorConfig:
 
     @property
     def issuer_keywords(self) -> tuple[str, ...]:
-        words = [self.ticker]
+        words = [self.ticker, *self.company_aliases]
         if self.company_name:
             words.extend(re.findall(r"[A-Za-z0-9]+", self.company_name.upper()))
-        return tuple(dict.fromkeys(w for w in words if len(w) >= 3))
+        return tuple(dict.fromkeys(w.upper() for w in words if len(w) >= 3))
 
     @property
     def sec_user_agent(self) -> str:
@@ -85,6 +120,11 @@ def _parse_list(value: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(normalize_ticker(p) for p in parts if normalize_ticker(p)))
 
 
+def _parse_text_list(value: str) -> tuple[str, ...]:
+    parts = re.split(r"[,;]", value or "")
+    return tuple(dict.fromkeys(part.strip() for part in parts if part.strip()))
+
+
 def _env_or_default(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
@@ -121,6 +161,9 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
     ticker = normalize_ticker(_env_or_default("MONITOR_TICKER", raw.get("ticker", "VRT")))
     peer_source = _env_or_default("MONITOR_PEER_TICKERS", raw.get("peer_tickers", "ETN,NVT,PWR,SMCI"))
 
+    def text_list(env_name: str, key: str, default: str) -> tuple[str, ...]:
+        return _parse_text_list(_env_or_default(env_name, raw.get(key, default)))
+
     return MonitorConfig(
         ticker=ticker or "VRT",
         company_name=_env_or_default("MONITOR_COMPANY_NAME", raw.get("company_name", "Vertiv Holdings Co")),
@@ -131,6 +174,33 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
         state_dir=_env_or_default("MONITOR_STATE_DIR", raw.get("state_dir", ".")).strip() or ".",
         market_scan_focus=normalize_ticker(_env_or_default("MARKET_SCAN_FOCUS_TICKER", raw.get("market_scan_focus", ""))),
         sec_contact=_env_or_default("SEC_CONTACT", raw.get("sec_contact", "maybe2213@naver.com")).strip(),
+        company_aliases=text_list(
+            "MONITOR_COMPANY_ALIASES", "company_aliases", "Vertiv, Vertiv Holdings"
+        ),
+        news_terms=text_list(
+            "MONITOR_NEWS_TERMS", "news_terms",
+            "data center cooling, liquid cooling, AI infrastructure, hyperscaler",
+        ),
+        priority_keywords=text_list(
+            "MONITOR_PRIORITY_KEYWORDS", "priority_keywords",
+            "backlog, orders, organic sales, guidance, operating margin, free cash flow",
+        ),
+        risk_keywords=text_list(
+            "MONITOR_RISK_KEYWORDS", "risk_keywords",
+            "margin pressure, guidance cut, order cancellation, supply chain, tariff, customer concentration",
+        ),
+        core_kpis=text_list(
+            "MONITOR_CORE_KPIS", "core_kpis",
+            "backlog, organic sales growth, adjusted operating margin, EPS guidance, revenue guidance, free cash flow",
+        ),
+        profile_context=_env_or_default(
+            "MONITOR_PROFILE_CONTEXT",
+            raw.get(
+                "profile_context",
+                "AI data-center power and thermal infrastructure, especially liquid cooling; "
+                "watch orders, backlog conversion, capacity, margins, guidance, and cash flow.",
+            ),
+        ).strip(),
     )
 
 

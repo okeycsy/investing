@@ -5,6 +5,7 @@ Live smoke checks for the configured ticker.
 This intentionally performs real external calls:
 - Yahoo Finance chart API
 - SEC submissions and Form 4 XML
+- Anthropic news-analysis API
 - Slack Incoming Webhook, when SLACK_WEBHOOK_URL or MARKET_SCAN_WEBHOOK is set
 """
 
@@ -25,6 +26,7 @@ YAHOO_CHART_URLS = [
     "https://query2.finance.yahoo.com/v8/finance/chart/{ticker}",
 ]
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 
 
 def _status(ok: bool) -> str:
@@ -191,6 +193,37 @@ def check_sec_form4(config) -> tuple[bool, str]:
     return True, "SEC Form 4 submissions reachable, no recent Form 4 entries"
 
 
+def check_anthropic(config) -> tuple[bool, str]:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return False, "ANTHROPIC_API_KEY is not configured"
+    response = requests.post(
+        ANTHROPIC_MESSAGES_URL,
+        headers={
+            "x-api-key": api_key,
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+        },
+        json={
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 30,
+            "messages": [{
+                "role": "user",
+                "content": f"Return only the text OK for a {config.ticker} monitor health check.",
+            }],
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        return False, f"Anthropic HTTP {response.status_code}: {response.text[:120]}"
+    text = "".join(
+        block.get("text", "")
+        for block in response.json().get("content", [])
+        if block.get("type") == "text"
+    ).strip()
+    return (True, "Anthropic message API responded") if text else (False, "Anthropic returned no text")
+
+
 def _check_yahoo_insider_fallback(config, sec_detail: str) -> tuple[bool, str]:
     try:
         import yfinance as yf
@@ -219,7 +252,7 @@ def check_slack(config, *, require: bool) -> tuple[bool, str]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f":white_check_mark: *{config.display_ticker} live smoke test*\nYahoo/SEC checks reached from GitHub/Codex runtime.\n_{now}_",
+                    "text": f":white_check_mark: *{config.display_ticker} live smoke test*\nYahoo/SEC/AI checks reached from GitHub/Codex runtime.\n_{now}_",
                 },
             }
         ],
@@ -231,7 +264,7 @@ def check_slack(config, *, require: bool) -> tuple[bool, str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run live Yahoo/SEC/Slack smoke checks.")
+    parser = argparse.ArgumentParser(description="Run live Yahoo/SEC/AI/Slack smoke checks.")
     parser.add_argument("--require-slack", action="store_true", help="Fail when no Slack webhook is configured.")
     parser.add_argument("--no-slack", action="store_true", help="Skip Slack even when a webhook is configured.")
     args = parser.parse_args()
@@ -241,6 +274,7 @@ def main() -> int:
         ("Yahoo", lambda: check_yahoo(config)),
         ("SEC submissions", lambda: check_sec(config)),
         ("SEC Form 4 XML", lambda: check_sec_form4(config)),
+        ("Anthropic", lambda: check_anthropic(config)),
     ]
     if not args.no_slack:
         checks.append(("Slack", lambda: check_slack(config, require=args.require_slack)))

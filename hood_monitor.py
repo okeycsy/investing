@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -39,6 +40,12 @@ CIK = CONFIG.cik.strip()
 CIK_PADDED = CIK.zfill(10) if CIK else ""  # 10자리 (선행 0 포함)
 CIK_SHORT = CIK.lstrip("0")                # 선행 0 제거
 PEER_TICKERS = CONFIG.peer_tickers
+COMPANY_ALIASES = CONFIG.company_aliases
+NEWS_TERMS = CONFIG.news_terms
+PRIORITY_KEYWORDS = CONFIG.priority_keywords
+RISK_KEYWORDS = CONFIG.risk_keywords
+CORE_KPIS = CONFIG.core_kpis
+PROFILE_CONTEXT = CONFIG.profile_context
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -58,9 +65,15 @@ FINRA_SHORT_URL = "https://cdn.finra.org/equity/regsho/daily/CNMSshvol{date}.txt
 
 KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
+NY_TZ = ZoneInfo("America/New_York")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("hood_monitor")
+SOURCE_HEALTH: dict[str, str] = {}
+
+
+def _set_source_health(source: str, status: str):
+    SOURCE_HEALTH[source] = status
 
 
 class SyntheticYahooResponse:
@@ -86,6 +99,7 @@ class PriceData:
     vol_avg_5d: int = 0
     market_state: str = ""    # "REGULAR" | "PRE" | "POST" | "CLOSED"
     timestamp: str = ""
+    market_date: str = ""
 
 
 @dataclass
@@ -139,6 +153,17 @@ class Filing13F:
 
 
 @dataclass
+class CompanyFiling:
+    form: str = ""
+    filing_date: str = ""
+    report_date: str = ""
+    description: str = ""
+    accession: str = ""
+    url: str = ""
+    hash: str = ""
+
+
+@dataclass
 class DCAScoreItem:
     label: str = ""
     score: int = 0
@@ -176,6 +201,8 @@ def load_state() -> dict:
         "last_news_hashes": [],
         "last_insider_hashes": [],
         "last_13f_hashes": [],
+        "last_company_filing_hashes": [],
+        "last_13f_positions": {},
         "price_history": [],
         "price_alert_max_pct": 0,
         "price_alert_direction": "",
@@ -204,6 +231,8 @@ def load_weekly_state() -> dict:
         "alerts_fired": [],
         "insider_trades": [],
         "news_headlines": [],
+        "company_filings": [],
+        "thesis_impacts": [],
         "rsi_readings": [],
         "pcr_readings": [],
         "short_readings": [],
@@ -213,6 +242,26 @@ def load_weekly_state() -> dict:
 def save_weekly_state(ws: dict):
     WEEKLY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     WEEKLY_STATE_FILE.write_text(json.dumps(ws, indent=2, ensure_ascii=False))
+
+
+def _merge_hashes(existing: list, new_hashes: list, limit: int = 60) -> list:
+    return list(dict.fromkeys([*new_hashes, *existing]))[:limit]
+
+
+def remember_analyzed_news(state: dict, news: list):
+    hashes = analyzed_news_hashes(news)
+    if hashes:
+        state["last_news_hashes"] = _merge_hashes(
+            state.get("last_news_hashes", []), hashes
+        )
+
+
+def remember_company_filings(state: dict, filings: list):
+    hashes = [filing.hash for filing in filings if filing.hash]
+    if hashes:
+        state["last_company_filing_hashes"] = _merge_hashes(
+            state.get("last_company_filing_hashes", []), hashes
+        )
 
 
 # ─────────────────────────────────────────────
@@ -380,20 +429,20 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
         return None
 
     # ── 2. 장 상태 판별 ──────────────────────────────────────────
-    now_utc = datetime.now(UTC)
-    today_utc = now_utc.date()
-    hm  = now_utc.hour * 60 + now_utc.minute
-    dow = now_utc.weekday()  # 0=Mon 6=Sun
+    now_ny = datetime.now(NY_TZ)
+    today_market = now_ny.date()
+    hm  = now_ny.hour * 60 + now_ny.minute
+    dow = now_ny.weekday()  # 0=Mon 6=Sun
 
     if dow >= 5:
         market_state = "CLOSED"
-    elif hm < 8 * 60:
+    elif hm < 4 * 60:
         market_state = "CLOSED"
-    elif hm < 13 * 60 + 30:
+    elif hm < 9 * 60 + 30:
         market_state = "PRE"
-    elif hm < 20 * 60:
+    elif hm < 16 * 60:
         market_state = "REGULAR"
-    elif hm < 24 * 60:
+    elif hm < 20 * 60:
         market_state = "POST"
     else:
         market_state = "CLOSED"
@@ -404,8 +453,8 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
     confirmed_closes  = []
     confirmed_volumes = []
     for i, ts in enumerate(ts_daily_raw):
-        bar_date = datetime.fromtimestamp(ts, UTC).date()
-        if bar_date < today_utc:
+        bar_date = datetime.fromtimestamp(ts, NY_TZ).date()
+        if bar_date < today_market:
             c = closes_raw[i] if i < len(closes_raw) else None
             v = volumes_raw[i] if i < len(volumes_raw) else None
             if c is not None:
@@ -438,13 +487,13 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
             current    = None
             today_vol  = 0
             for i in range(len(timestamps) - 1, -1, -1):
-                bar_date = datetime.fromtimestamp(timestamps[i], UTC).date()
-                if bar_date == today_utc:
+                bar_date = datetime.fromtimestamp(timestamps[i], NY_TZ).date()
+                if bar_date == today_market:
                     if current is None and i < len(closes_1m) and closes_1m[i] is not None:
                         current = round(float(closes_1m[i]), 2)
                     if i < len(volumes_1m) and volumes_1m[i]:
                         today_vol += int(volumes_1m[i])
-                elif bar_date < today_utc and current is not None:
+                elif bar_date < today_market and current is not None:
                     break  # 오늘 바 모두 처리 완료
         except Exception as e:
             log.error(f"fetch_price 1분봉 파싱 실패: {e}")
@@ -493,6 +542,10 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
         vol_avg_5d=vol_avg_5d,
         market_state=market_state,
         timestamp=datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
+        market_date=(
+            datetime.fromtimestamp(ts_daily_raw[-1], NY_TZ).strftime("%Y-%m-%d")
+            if ts_daily_raw else ""
+        ),
     )
 
 
@@ -630,68 +683,37 @@ def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> d
     }
 
 
+def _direction_label(change_pct: Optional[float]) -> str:
+    if change_pct is None or abs(change_pct) < 0.01:
+        return "보합"
+    return "양전" if change_pct > 0 else "음전"
+
+
+def _relative_label(actual_pct: Optional[float], benchmark_pct: Optional[float]) -> str:
+    if actual_pct is None or benchmark_pct is None:
+        return f"{BETA_BENCHMARK} 비교 불가"
+    diff = actual_pct - benchmark_pct
+    if diff > 0.15:
+        return f"{BETA_BENCHMARK} 대비 아웃퍼폼"
+    if diff < -0.15:
+        return f"{BETA_BENCHMARK} 대비 언더퍼폼"
+    return f"{BETA_BENCHMARK}와 동조"
+
+
 def format_beta_block(bd: dict) -> list:
-    """상대 강도 통합 블록 — 지수 대비(β 기반) + 피어 대비"""
-    div      = bd["divergence"]
-    beta     = bd["beta"]
-    expected = bd["expected_pct"]
-    actual   = bd["actual_pct"]
-    qqq_pct  = bd["qqq_pct"]
-    peer_diff = bd["peer_diff"]
-    peer_avg  = bd["peer_avg"]
-    peer_changes = bd.get("peer_changes", {})
-    peer_label = "/".join(peer_changes.keys()) if peer_changes else "피어"
-
-    # ── 지수 대비 (β 기반) ──
-    if div >= 3:
-        vs_index = "🟢 *아웃퍼폼*"
-        vs_index_desc = f"β 기대치보다 {div:+.1f}%p 초과 상승"
-    elif div >= 1:
-        vs_index = "🟡 *소폭 아웃퍼폼*"
-        vs_index_desc = f"기대 범위 상단 ({div:+.1f}%p)"
-    elif div <= -3:
-        vs_index = "🔴 *언더퍼폼*"
-        vs_index_desc = f"β 기대치보다 {div:+.1f}%p 초과 하락"
-    elif div <= -1:
-        vs_index = "🟠 *소폭 언더퍼폼*"
-        vs_index_desc = f"기대 범위 하단 ({div:+.1f}%p)"
-    else:
-        vs_index = "⚪ *기대 범위 내*"
-        vs_index_desc = f"시장 움직임과 부합 ({div:+.1f}%p)"
-
-    # ── 피어 대비 ──
-    if peer_diff >= 2:
-        vs_peer = "🟢 *피어 아웃퍼폼*"
-        vs_peer_desc = f"{peer_label} 평균보다 {peer_diff:+.1f}%p 강세"
-    elif peer_diff >= 0.5:
-        vs_peer = "🟡 *피어 소폭 강세*"
-        vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
-    elif peer_diff <= -2:
-        vs_peer = "🔴 *피어 언더퍼폼*"
-        vs_peer_desc = f"{peer_label} 평균보다 {peer_diff:+.1f}%p 약세"
-    elif peer_diff <= -0.5:
-        vs_peer = "🟠 *피어 소폭 약세*"
-        vs_peer_desc = f"피어 평균 대비 {peer_diff:+.1f}%p"
-    else:
-        vs_peer = "⚪ *피어 동조*"
-        vs_peer_desc = f"피어 평균과 유사 ({peer_diff:+.1f}%p)"
-
+    """가격과 등락률 숫자 없이 방향과 벤치마크 상대 성과만 표시."""
+    actual = bd.get("actual_pct")
+    benchmark_pct = bd.get("qqq_pct")
+    direction = _direction_label(actual)
+    relative = _relative_label(actual, benchmark_pct)
+    icon = "🟢" if "아웃퍼폼" in relative else "🔴" if "언더퍼폼" in relative else "⚪"
     return [
         _sec(
-            f"*📐 상대 강도*  β = *{beta:.2f}*\n"
-            f"지수 대비: {vs_index} — {vs_index_desc}\n"
-            f"피어 대비: {vs_peer} — {vs_peer_desc}"
+            f"*📐 방향 / {BETA_BENCHMARK} 상대 성과*\n"
+            f"{DISPLAY_TICKER}: *{direction}*\n"
+            f"{icon} *{relative}*"
         ),
-        _ctx(
-            f"*기대수익률 ({TICKER}) {expected:+.2f}%* (β×{BETA_BENCHMARK})  |  "
-            f"*실제수익률 ({TICKER}) {actual:+.2f}%*  |  "
-            f"*{BETA_BENCHMARK} {qqq_pct:+.2f}%*"
-        ),
-        _ctx(
-            "피어: "
-            + ("  |  ".join(f"*{p} {v:+.2f}%*" for p, v in peer_changes.items()) if peer_changes else "미설정")
-            + f"  |  평균 {peer_avg:+.2f}%"
-        ),
+        _ctx("가격과 정확한 일일 등락률은 표시하지 않습니다."),
     ]
 
 
@@ -717,21 +739,22 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
     except Exception:
         return None
 
-    now_utc   = datetime.now(UTC)
-    today_utc = now_utc.date()
-    hm  = now_utc.hour * 60 + now_utc.minute
-    dow = now_utc.weekday()
+    now_ny = datetime.now(NY_TZ)
+    today_market = now_ny.date()
+    hm  = now_ny.hour * 60 + now_ny.minute
+    dow = now_ny.weekday()
 
     if dow >= 5:                  market_state = "CLOSED"
-    elif hm < 8 * 60:             market_state = "CLOSED"
-    elif hm < 13 * 60 + 30:      market_state = "PRE"
-    elif hm < 20 * 60:           market_state = "REGULAR"
-    else:                         market_state = "POST"
+    elif hm < 4 * 60:             market_state = "CLOSED"
+    elif hm < 9 * 60 + 30:       market_state = "PRE"
+    elif hm < 16 * 60:           market_state = "REGULAR"
+    elif hm < 20 * 60:           market_state = "POST"
+    else:                         market_state = "CLOSED"
 
     # 오늘 날짜 바 제거 → 확정 종가만 추출
     confirmed = [float(closes_raw[i]) for i, ts in enumerate(ts_daily)
                  if i < len(closes_raw) and closes_raw[i] is not None
-                 and datetime.fromtimestamp(ts, UTC).date() < today_utc]
+                 and datetime.fromtimestamp(ts, NY_TZ).date() < today_market]
 
     if len(confirmed) < 1:
         # fallback: 전체 [-2] 사용
@@ -753,7 +776,7 @@ def _fetch_ticker_change(ticker: str) -> Optional[float]:
             current    = None
             for i in range(len(timestamps) - 1, -1, -1):
                 if i < len(closes_1m) and closes_1m[i] is not None:
-                    if datetime.fromtimestamp(timestamps[i], UTC).date() == today_utc:
+                    if datetime.fromtimestamp(timestamps[i], NY_TZ).date() == today_market:
                         current = float(closes_1m[i])
                         break
         except Exception as e:
@@ -1262,6 +1285,7 @@ def fetch_news() -> list:
     url = YAHOO_RSS_URL.format(ticker=TICKER)
     resp = safe_get(url)
     if not resp:
+        _set_source_health("Yahoo 뉴스", "실패")
         return []
     try:
         root = ET.fromstring(resp.text)
@@ -1270,15 +1294,23 @@ def fetch_news() -> list:
             title    = item.findtext("title", "")
             pub_date = item.findtext("pubDate", "")
             link     = item.findtext("link", "")
+            try:
+                from urllib.parse import urlparse
+                source = urlparse(link).netloc.lower().removeprefix("www.")
+            except Exception:
+                source = ""
             news.append({
                 "title": title,
                 "date":  pub_date,
                 "link":  link,
+                "source": source or "Yahoo Finance",
                 "hash":  hashlib.md5(title.encode()).hexdigest()[:12],
             })
+        _set_source_health("Yahoo 뉴스", "정상")
         return news
     except Exception as e:
         log.error(f"News parse error: {e}")
+        _set_source_health("Yahoo 뉴스", "실패")
         return []
 
 
@@ -1319,8 +1351,15 @@ def translate_news(news: list) -> list:
     """
     설정 종목 관련 뉴스 필터링 + 한국어 요약(15자) + 기사 핵심 번역(2~3문장)
     """
-    if not news or not ANTHROPIC_API_KEY:
-        log.info(f"translate_news skip — news:{len(news)} api_key:{'있음' if ANTHROPIC_API_KEY else '없음'}")
+    if not news:
+        return news
+    for item in news:
+        item["analysis_status"] = "pending"
+    if not ANTHROPIC_API_KEY:
+        log.info("translate_news skip — ANTHROPIC_API_KEY 없음")
+        for item in news:
+            item["analysis_status"] = "unavailable"
+        _set_source_health("AI 뉴스", "키 없음")
         return news
 
     # 기사 본문 발췌 (관련성 판단 전 미리 fetch)
@@ -1337,14 +1376,27 @@ def translate_news(news: list) -> list:
     content = "\n\n".join(articles)
 
     log.info(f"Claude API 호출: 뉴스 번역 ({len(news)}건, 본문 포함)")
-    prompt = f"""당신은 {DISPLAY_TICKER}({COMPANY_NAME or TICKER}) 투자 알림 봇입니다.
+    profile_terms = ", ".join(NEWS_TERMS)
+    priority_terms = ", ".join(PRIORITY_KEYWORDS)
+    risk_terms = ", ".join(RISK_KEYWORDS)
+    kpis = ", ".join(CORE_KPIS)
+    aliases = ", ".join(COMPANY_ALIASES)
+    prompt = f"""당신은 {DISPLAY_TICKER}({COMPANY_NAME or TICKER}) 장기투자 논지 모니터입니다.
 아래 뉴스 목록(제목+본문 발췌)을 분석해주세요.
+
+회사 별칭: {aliases}
+사업 맥락: {PROFILE_CONTEXT}
+핵심 테마: {profile_terms}
+중요 이벤트·KPI: {priority_terms}, {kpis}
+핵심 위험: {risk_terms}
 
 규칙:
 1. {COMPANY_NAME or TICKER} / {DISPLAY_TICKER} 주가에 직접 영향을 주는 뉴스만 포함
-2. 포함 기준: 실적, 규제, 경쟁사 직접 비교, 경영진 변동, 주요 제품/서비스, 기관 매수/매도, 소송
+2. 포함 기준: 실적, 가이던스, 수주, backlog, 마진, 현금흐름, 생산능력, 규제, 경쟁, 경영진, 주요 제품, 소송
 3. 제외 기준: 업종 일반 뉴스, 금리 일반론, 다른 회사 뉴스에 {TICKER}가 언급만 된 경우
-4. 반드시 한국어로만 출력
+4. 기사에 없는 사실을 추정하지 말고 사실과 해석을 분리
+5. 반드시 한국어로만 출력
+6. 현재 주가, 목표주가, 정확한 일일 등락률은 출력하지 말 것
 
 각 뉴스에 대해 JSON 배열로만 응답 (다른 텍스트 없이):
 [
@@ -1352,8 +1404,11 @@ def translate_news(news: list) -> list:
     "idx": 1,
     "relevant": true,
     "summary": "15자 이내 핵심 요약",
-    "translation": "기사 핵심 내용을 2~3문장으로 자연스러운 한국어로 번역. 투자자 관점에서 중요한 수치·사실 위주로.",
-    "sentiment": "positive|negative|neutral"
+    "translation": "기사에서 확인되는 핵심 사실 2~3문장. 중요한 수치와 전후 변화 포함.",
+    "sentiment": "positive|negative|neutral",
+    "thesis_impact": "strengthen|neutral|risk|damage",
+    "impact_reason": "투자 논지에 미치는 이유 한 문장",
+    "confidence": "high|medium|low"
   }},
   {{"idx": 2, "relevant": false}}
 ]
@@ -1371,13 +1426,16 @@ def translate_news(news: list) -> list:
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 1500,
+                "max_tokens": 3000,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=40,
         )
         if resp.status_code != 200:
             log.error(f"Claude API 오류 (뉴스 번역): HTTP {resp.status_code} — {resp.text[:200]}")
+            for item in news:
+                item["analysis_status"] = "failed"
+            _set_source_health("AI 뉴스", "실패")
             return news
 
         text = ""
@@ -1387,24 +1445,73 @@ def translate_news(news: list) -> list:
         text = text.strip().replace("```json", "").replace("```", "").strip()
         results = json.loads(text)
 
-        relevant = sum(1 for r in results if r.get("relevant", False))
-        skipped  = len(results) - relevant
-        log.info(f"뉴스 번역 완료: 총 {len(results)}건 — 관련 {relevant}건 / 스킵 {skipped}건")
+        if not isinstance(results, list):
+            raise ValueError("뉴스 분석 응답이 JSON 배열이 아님")
 
+        for item in news:
+            item["analysis_status"] = "failed"
+            item["skip"] = True
+
+        analyzed_indices = set()
+        relevant_count = 0
         for item in results:
-            idx = item.get("idx", 0) - 1
+            try:
+                idx = int(item.get("idx", 0)) - 1
+            except (TypeError, ValueError):
+                continue
             if not (0 <= idx < len(news)):
                 continue
-            if not item.get("relevant", False):
+            is_relevant = item.get("relevant")
+            if not isinstance(is_relevant, bool):
+                continue
+            if is_relevant:
+                summary = str(item.get("summary", "")).strip()
+                translation = str(item.get("translation", "")).strip()
+                impact_reason = str(item.get("impact_reason", "")).strip()
+                thesis_impact = item.get("thesis_impact", "")
+                if (
+                    not summary
+                    or not translation
+                    or not impact_reason
+                    or thesis_impact not in {"strengthen", "neutral", "risk", "damage"}
+                ):
+                    continue
+            analyzed_indices.add(idx)
+            news[idx]["analysis_status"] = "success"
+            if not is_relevant:
                 news[idx]["skip"] = True
             else:
-                news[idx]["summary"]     = item.get("summary", "")
-                news[idx]["translation"] = item.get("translation", "")
+                relevant_count += 1
+                news[idx]["skip"] = False
+                news[idx]["summary"]     = summary
+                news[idx]["translation"] = translation
                 news[idx]["sentiment"]   = item.get("sentiment", "neutral")
+                news[idx]["thesis_impact"] = thesis_impact
+                news[idx]["impact_reason"] = impact_reason
+                news[idx]["confidence"] = item.get("confidence", "medium")
+        log.info(
+            f"뉴스 번역 완료: 응답 {len(results)}건 — "
+            f"관련 {relevant_count}건 / 분석 완료 {len(analyzed_indices)}건"
+        )
+        missing = len(news) - len(analyzed_indices)
+        if missing:
+            log.warning(f"뉴스 분석 응답 누락: {missing}건 — 다음 실행에서 재시도")
+            _set_source_health("AI 뉴스", f"부분 실패 ({missing}건 재시도)")
+        else:
+            _set_source_health("AI 뉴스", "정상")
     except Exception as e:
         log.warning(f"뉴스 번역 예외: {e}")
+        for item in news:
+            item["analysis_status"] = "failed"
+        _set_source_health("AI 뉴스", "실패")
 
     return news
+
+
+def analyzed_news_hashes(news: list) -> list:
+    """AI 분석이 완료된 뉴스만 중복 방지 상태에 반영한다."""
+    return [item["hash"] for item in news
+            if item.get("analysis_status") == "success" and item.get("hash")]
 
 
 # ─────────────────────────────────────────────
@@ -1836,11 +1943,11 @@ def calculate_dca_technical_score(
     # C1. RSI(14) 일봉 (8pts)
     rsi_val = calculate_rsi(closes)
     if rsi_val <= 25:
-        c1, desc = 8, f"RSI {rsi_val:.1f} — 극과매도 (역사적 저점) 🟢"
+        c1, desc = 8, f"RSI {rsi_val:.1f} — 극과매도 구간 🟢"
     elif rsi_val <= 30:
-        c1, desc = 7, f"RSI {rsi_val:.1f} — 과매도, 단기 반등 가능성 🟢"
+        c1, desc = 7, f"RSI {rsi_val:.1f} — 과매도 구간 🟢"
     elif rsi_val <= 40:
-        c1, desc = 5, f"RSI {rsi_val:.1f} — 매수 관심 구간 🟡"
+        c1, desc = 5, f"RSI {rsi_val:.1f} — 약세 구간 🟡"
     elif rsi_val <= 50:
         c1, desc = 2, f"RSI {rsi_val:.1f} — 중립 하단 ⚪"
     elif rsi_val >= 70:
@@ -1978,15 +2085,15 @@ def calculate_dca_technical_score(
     # ═════════════════
     total = max(0, min(100, sum(l.pts for l in layers)))
     if total >= 80:
-        grade, grade_emoji = "Strong Buy", "🟢🟢"
+        grade, grade_emoji = "Strong Technical Support", "🟢🟢"
     elif total >= 60:
-        grade, grade_emoji = "Buy", "🟢"
+        grade, grade_emoji = "Technical Support", "🟢"
     elif total >= 40:
         grade, grade_emoji = "Neutral", "⚪"
     elif total >= 20:
         grade, grade_emoji = "Caution", "🟡"
     else:
-        grade, grade_emoji = "Avoid", "🔴"
+        grade, grade_emoji = "Technical Risk", "🔴"
 
     log.info(f"DCA 기술지표 점수: {total}/100 ({grade})")
     return DCATechnicalScore(layers=layers, total=total,
@@ -2002,9 +2109,19 @@ def format_dca_technical_block(score: DCATechnicalScore) -> list:
     fill = int(score.total / 100 * 10)
     bar = "█" * fill + "░" * (10 - fill)
 
+    if score.total >= 80:
+        condition = "눌림 신호 강함"
+    elif score.total >= 60:
+        condition = "눌림 신호 있음"
+    elif score.total >= 40:
+        condition = "기술 신호 혼재"
+    elif score.total >= 20:
+        condition = "진입 신호 약함"
+    else:
+        condition = "기술 위험 우세"
+
     blocks = [_sec(
-        f"*🧮 DCA 기술지표 점수: {score.total}/100*  "
-        f"{score.grade_emoji} {score.grade}\n`{bar}`"
+        f"*🧮 DCA 보조 기술환경: {score.total}/100*  {condition}\n`{bar}`"
     )]
 
     for layer in score.layers:
@@ -2014,6 +2131,7 @@ def format_dca_technical_block(score: DCATechnicalScore) -> list:
             lines.append(f"({item.score}/{item.max_pts}) *{item.label}*: {item.desc}")
         blocks.append(_ctx("\n".join(lines)))
 
+    blocks.append(_ctx("기술지표는 기존 DCA 계획을 변경하는 단독 근거가 아닙니다."))
     return blocks
 
 
@@ -2146,8 +2264,74 @@ def fetch_short_interest() -> Optional[ShortInterestData]:
 
 
 # ─────────────────────────────────────────────
-# 6. 내부자 거래 (Form 4) — SEC submissions JSON 우선
+# 6. 발행사 중요 공시 + 내부자 거래
 # ─────────────────────────────────────────────
+MATERIAL_COMPANY_FORMS = {
+    "8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A",
+    "6-K", "6-K/A", "20-F", "20-F/A",
+}
+
+
+def fetch_company_filings(limit: int = 20, lookback_days: int = 21) -> list:
+    """SEC submissions에서 발행사의 최근 중요 공시를 조회한다."""
+    if not CIK_PADDED:
+        _set_source_health("SEC 공시", "CIK 없음")
+        return []
+    resp = safe_get(
+        f"https://data.sec.gov/submissions/CIK{CIK_PADDED}.json",
+        headers=SEC_HEADERS,
+    )
+    if not resp:
+        _set_source_health("SEC 공시", "실패")
+        return []
+    try:
+        recent = resp.json().get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        cutoff = datetime.now(UTC).date() - timedelta(days=lookback_days)
+        filings = []
+
+        def value(key: str, idx: int) -> str:
+            values = recent.get(key, [])
+            return str(values[idx] or "").strip() if idx < len(values) else ""
+
+        for idx, form_value in enumerate(forms):
+            form = str(form_value).upper()
+            if form not in MATERIAL_COMPANY_FORMS:
+                continue
+            filing_date = value("filingDate", idx)
+            try:
+                if filing_date and datetime.strptime(filing_date, "%Y-%m-%d").date() < cutoff:
+                    continue
+            except ValueError:
+                pass
+            accession = value("accessionNumber", idx)
+            primary_doc = value("primaryDocument", idx).rsplit("/", 1)[-1]
+            if not accession or not primary_doc:
+                continue
+            acc_clean = accession.replace("-", "")
+            url = (
+                f"https://www.sec.gov/Archives/edgar/data/{CIK_SHORT}/"
+                f"{acc_clean}/{primary_doc}"
+            )
+            filings.append(CompanyFiling(
+                form=form,
+                filing_date=filing_date,
+                report_date=value("reportDate", idx),
+                description=value("primaryDocDescription", idx) or f"{form} filing",
+                accession=accession,
+                url=url,
+                hash=hashlib.md5(f"{accession}:{form}".encode()).hexdigest()[:12],
+            ))
+            if len(filings) >= limit:
+                break
+        _set_source_health("SEC 공시", "정상")
+        return filings
+    except Exception as e:
+        log.warning(f"Company filings parse error: {e}")
+        _set_source_health("SEC 공시", "실패")
+        return []
+
+
 def fetch_insider_trades() -> list:
     """
     data.sec.gov submissions JSON에서 Form 4 목록을 가져온 뒤
@@ -2156,6 +2340,7 @@ def fetch_insider_trades() -> list:
     trades = []
     if not CIK_PADDED:
         log.info("Form 4 스킵: monitor_config.md에 cik 미설정")
+        _set_source_health("SEC Form4", "CIK 없음")
         return trades
     try:
         candidates = _form4_candidates_from_submissions(limit=10)
@@ -2181,12 +2366,15 @@ def fetch_insider_trades() -> list:
                     log.warning(f"Form 4 parse error: {e}")
                 time.sleep(0.3)
             if trades:
+                _set_source_health("SEC Form4", "정상")
                 return trades
             log.warning("SEC Form 4 원문 접근 불가 — Yahoo 내부자 거래 fallback")
             return _fetch_insider_trades_from_yahoo()
 
         log.warning("Form 4 submissions 후보 없음 — atom feed fallback")
         atom_trades = _fetch_insider_trades_from_atom()
+        if atom_trades:
+            _set_source_health("SEC Form4", "정상")
         return atom_trades or _fetch_insider_trades_from_yahoo()
 
     except Exception as e:
@@ -2202,6 +2390,7 @@ def _fetch_insider_trades_from_yahoo(limit: int = 30) -> list:
         data = yf.Ticker(TICKER).insider_transactions
         if data is None or data.empty:
             log.warning("Yahoo 내부자 거래 데이터 없음")
+            _set_source_health("SEC Form4", "Yahoo 대체 데이터 없음")
             return []
 
         trades = []
@@ -2253,9 +2442,11 @@ def _fetch_insider_trades_from_yahoo(limit: int = 30) -> list:
             ))
 
         log.info(f"Yahoo 내부자 거래 fallback: {len(trades)}건")
+        _set_source_health("SEC Form4", "Yahoo 대체")
         return trades
     except Exception as e:
         log.warning(f"Yahoo 내부자 거래 fallback 실패: {e}")
+        _set_source_health("SEC Form4", "실패")
         return []
 
 
@@ -2510,7 +2701,7 @@ def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
         # P = 장내 매수 (Open Market Purchase)  → 강한 강세 시그널
         # S = 장내 매도 (Open Market Sale)      → 강한 약세 시그널
         # A = RSU 귀속/스톡옵션 부여 (Award)    → 보상, 시장 신호 아님
-        # D = 처분 (Disposition, 비시장 매도 등) → 약세 시그널
+        # D = 처분 (세금 원천징수 등 비시장 거래 포함) → 방향성 판단 금지
         if txn_code == "P":
             trade_type = "Purchase"
         elif txn_code == "S":
@@ -2518,7 +2709,7 @@ def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
         elif txn_code == "A":
             trade_type = "Award"     # RSU 귀속 / 스톡옵션 부여
         elif txn_code == "D" or acq == "D":
-            trade_type = "Sale"
+            trade_type = "Disposition"
         else:
             return None              # 분류 불가 → 스킵
 
@@ -2714,13 +2905,71 @@ def _sec(text: str, fields: list = None) -> dict:
     return block
 
 
+def _thesis_decision(news: list, filings: list, insiders: Optional[list] = None) -> tuple[str, str]:
+    impacts = {item.get("thesis_impact", "neutral") for item in news}
+    if "damage" in impacts:
+        return "훼손 가능성", "중단 검토"
+    has_open_market_sale = any(
+        trade.trade_type == "Sale" for trade in (insiders or [])
+    )
+    if "risk" in impacts or filings or has_open_market_sale:
+        return "확인 필요", "점검 필요"
+    if "strengthen" in impacts:
+        return "강화 근거 확인", "기존 계획 유지"
+    return "변화 없음", "기존 계획 유지"
+
+
+def build_decision_summary_blocks(
+    *,
+    price: Optional[PriceData],
+    benchmark_pct: Optional[float],
+    news: list,
+    filings: list,
+    insiders: Optional[list] = None,
+    source_health: Optional[dict] = None,
+) -> list:
+    """가격 숫자 없이 하루의 핵심 의사결정을 먼저 보여준다."""
+    direction = _direction_label(price.change_pct if price else None)
+    relative = _relative_label(price.change_pct if price else None, benchmark_pct)
+    thesis, dca = _thesis_decision(news, filings, insiders)
+    material_news = [item for item in news if not item.get("skip") and item.get("summary")]
+    directional_insiders = [
+        trade for trade in (insiders or [])
+        if trade.trade_type in {"Purchase", "Sale"}
+    ]
+    event_count = len(material_news) + len(filings) + len(directional_insiders)
+    event_text = f"중요 변화 {event_count}건" if event_count else "새로운 중요 사건 없음"
+    health = source_health if source_health is not None else SOURCE_HEALTH
+    has_source_failure = any(
+        any(token in status for token in ("실패", "키 없음", "확인 불가"))
+        for status in health.values()
+    )
+    if has_source_failure and not event_count:
+        event_text = "판정 보류 (일부 데이터 실패)"
+        thesis, dca = "확인 불가", "점검 필요"
+    health_text = " · ".join(f"{name} {status}" for name, status in health.items()) or "수집 상태 확인 불가"
+    icon = "🔴" if dca == "중단 검토" else "🟡" if dca == "점검 필요" else "🟢"
+    return [
+        _sec(
+            f"*{icon} 오늘의 판단*\n"
+            f"시장 방향: *{direction}*\n"
+            f"상대 성과: *{relative}*\n"
+            f"핵심 변화: *{event_text}*\n"
+            f"투자 논지: *{thesis}*\n"
+            f"DCA 계획: *{dca}*"
+        ),
+        _ctx(f"데이터 상태: {health_text}"),
+        {"type": "divider"},
+    ]
+
+
 def format_technicals_block(ts: TechnicalSignals) -> list:
     if ts.rsi_14 <= 30:
-        rsi_line = f"🟢 *RSI {ts.rsi_14}* — 과매도, DCA 타이밍 가능"
+        rsi_line = f"🟢 *RSI {ts.rsi_14}* — 기술적 과매도"
     elif ts.rsi_14 <= 40:
-        rsi_line = f"🟡 *RSI {ts.rsi_14}* — 약세, 매수 관심"
+        rsi_line = f"🟡 *RSI {ts.rsi_14}* — 약세 구간"
     elif ts.rsi_14 >= 70:
-        rsi_line = f"🔴 *RSI {ts.rsi_14}* — 과열, 추격 자제"
+        rsi_line = f"🔴 *RSI {ts.rsi_14}* — 기술적 과열"
     else:
         rsi_line = f"⚪ *RSI {ts.rsi_14}* — 중립"
 
@@ -2749,10 +2998,12 @@ def format_options_block(od: OptionsData) -> list:
 
 
 def format_short_block(si: ShortInterestData) -> list:
-    emoji = "🔴" if si.signal == "high_short" else "⚪"
     return [
-        _sec(f"*🩳 공매도*  {emoji} *{si.short_pct:.1f}%*"),
-        _ctx(f"기준일 {si.date} | 공매도 {si.short_volume:,} / 총 {si.total_volume:,}"),
+        _sec(f"*🩳 FINRA 일일 공매도 체결 비중*  *{si.short_pct:.1f}%*"),
+        _ctx(
+            f"기준일 {si.date} | 공매도 체결 {si.short_volume:,} / 보고 거래량 {si.total_volume:,} | "
+            "미결제 공매도 잔고(short interest)가 아닙니다."
+        ),
     ]
 
 
@@ -2765,13 +3016,14 @@ def format_insider_block(trades: list) -> list:
         "Purchase": ("🟢", "장내 매수"),
         "Sale":     ("🔴", "장내 매도"),
         "Award":    ("🔵", "RSU 귀속"),
+        "Disposition": ("⚪", "비시장 처분 가능"),
     }
     # txn_code 보조 레이블 (Purchase/Sale 내에서 세분화)
     CODE_LABEL = {
         "P": "장내 매수",
         "S": "장내 매도",
         "A": "RSU 귀속",
-        "D": "처분 매도",
+        "D": "비시장 처분 가능",
     }
 
     lines = []
@@ -2795,16 +3047,58 @@ def format_insider_block(trades: list) -> list:
             scale = "대규모" if t.shares >= 50_000 else "중규모" if t.shares >= 5_000 else "소규모"
 
         # 가격: RSU 귀속은 가격 없음이 정상이므로 표시 생략
-        price_str = f" @ ${t.price:.2f}" if t.price > 0 and t.trade_type != "Award" else ""
+        source_link = f"  <{t.url}|원문>" if t.url else ""
 
         lines.append(
             f"{emoji} *{t.filer}*{title_str}\n"
-            f"   {type_label}  {t.shares:,}주{price_str}  {scale}  _{t.date}_"
+            f"   {type_label}  {t.shares:,}주  {scale}  _{t.date}_{source_link}"
         )
 
     return [
         _sec("*🕴 내부자 거래*\n" + "\n".join(lines)),
-        _ctx("🟢 장내 매수  🔴 장내 매도  🔵 RSU 귀속(보상, 시장 신호 아님)"),
+        _ctx("🟢 장내 매수  🔴 장내 매도  🔵 보상  ⚪ 비시장 처분 가능(방향성 판단 제외)"),
+    ]
+
+
+def material_insider_trades(
+    trades: list,
+    lookback_days: int = 21,
+    as_of=None,
+) -> list:
+    """최근 발생한 장내 거래 중 즉시 판단 가치가 있는 항목만 반환한다."""
+    as_of = as_of or datetime.now(NY_TZ).date()
+    cutoff = as_of - timedelta(days=lookback_days)
+    material = []
+    for trade in trades:
+        try:
+            trade_date = datetime.strptime(trade.date, "%Y-%m-%d").date()
+            if trade_date < cutoff or trade_date > as_of:
+                continue
+        except (TypeError, ValueError):
+            pass
+        if trade.trade_type == "Purchase":
+            material.append(trade)
+        elif trade.trade_type == "Sale" and (
+            trade.total_value >= 100_000 or trade.shares >= 1_000
+        ):
+            material.append(trade)
+    return material
+
+
+def format_company_filings_block(filings: list) -> list:
+    if not filings:
+        return []
+    lines = []
+    for filing in filings[:6]:
+        report = f" · 보고기간 {filing.report_date}" if filing.report_date else ""
+        link = f"<{filing.url}|SEC 원문>" if filing.url else "SEC 원문 없음"
+        lines.append(
+            f"📄 *{filing.form}* — {filing.description}{report}\n"
+            f"   _제출 {filing.filing_date}_ · {link} · 내용 확인 필요"
+        )
+    return [
+        _sec("*🏛 발행사 중요 SEC 공시*\n" + "\n".join(lines)),
+        _ctx("공시 제출 사실과 투자 논지 해석을 분리합니다. 원문 확인 전 방향을 단정하지 않습니다."),
     ]
 
 
@@ -2817,7 +3111,16 @@ def format_13f_block(filings: list) -> list:
         if f.shares > 0:
             val_str = f"${f.value_usd/1_000_000:.1f}M" if f.value_usd >= 1_000_000 else f"${f.value_usd:,.0f}"
             detail = f"  {f.shares:,}주 / {val_str}"
-        lines.append(f"📋 *{f.institution}*{detail}  _{f.filing_date}_")
+        change = {
+            "BASELINE": "기준 설정",
+            "NEW": "신규",
+            "INCREASE": "증가",
+            "DECREASE": "감소",
+            "EXIT": "청산",
+            "UNCHANGED": "유지",
+        }.get(f.change_type, "보고")
+        link = f"  <{f.url}|원문>" if f.url else ""
+        lines.append(f"📋 *{f.institution}* · {change}{detail}  _{f.filing_date}_{link}")
     return [
         _sec("*🏛 13F 기관 포지션*\n" + "\n".join(lines)),
     ]
@@ -2828,11 +3131,26 @@ def format_news_block(news: list) -> list:
     if not relevant:
         return []
     blocks = []
+    impact_labels = {
+        "strengthen": "논지 강화",
+        "neutral": "논지 중립",
+        "risk": "위험 증가",
+        "damage": "논지 훼손",
+    }
     for n in relevant[:5]:
         tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
         blocks.append(_sec(f"*📰 {tag} {n['summary']}*"))
         if n.get("translation"):
-            blocks.append(_ctx(n["translation"]))
+            blocks.append(_ctx(f"사실: {n['translation']}"))
+        impact = impact_labels.get(n.get("thesis_impact", "neutral"), "논지 중립")
+        reason = n.get("impact_reason", "")
+        confidence = n.get("confidence", "medium")
+        source = n.get("source", "원문")
+        link = f"<{n.get('link')}|{source} 원문>" if n.get("link") else source
+        impact_line = f"해석: *{impact}*"
+        if reason:
+            impact_line += f" — {reason}"
+        blocks.append(_ctx(f"{impact_line} | 확신도 {confidence} | {link}"))
     return blocks
 
 
@@ -2843,7 +3161,7 @@ def format_volume_profile_block(vp: VolumeProfile) -> list:
     poc_desc = "매물대 상단 (저항)" if vp.poc_signal == "resistance" else "지지선 확보"
     whale = "  🐋 *Whale Activity Detected*" if vp.whale_detected else ""
     return [
-        _sec(f"*📊 수급 구조 (30분 POC)*  {poc_emoji} *${vp.poc_price:.2f}* — {poc_desc}{whale}"),
+        _sec(f"*📊 수급 구조 (30분 POC)*  {poc_emoji} *{poc_desc}*{whale}"),
         _ctx(f"30분 거래량 {vp.vol_30m:,} | 동시간대 5일평균 {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"),
     ]
 
@@ -2867,21 +3185,20 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
         f"*🛡 안전 마진*  {bb_map.get(sm.bb_signal, '')}  |  {mom_map.get(sm.momentum_signal, '')}"
     ))
     blocks.append(_ctx(
-        f"BB 하단 ${sm.bb_lower:.2f} | SMA20 ${sm.sma20:.2f} | BB 상단 ${sm.bb_upper:.2f}  |  "
-        f"하단 대비 *{sm.pct_from_lower:+.2f}%*  |  모멘텀 {sm.mom_30m_prev:+.2f}% → {sm.mom_30m_curr:+.2f}%"
+        "가격 레벨과 정확한 일일 등락률은 표시하지 않습니다."
     ))
 
     # ── 베타 초과 이탈 ──
     if sm.beta_excess_pct != 0:
         if sm.beta_excess_pct <= -3:
-            beta_line = f"🟢 *β 초과 이탈 {sm.beta_excess_pct:+.2f}%p* — 기대보다 과도한 하락, 통계적 반등 가능"
+            beta_line = "🟢 *벤치마크 기대보다 과도한 하락* — 원인 확인 필요"
         elif sm.beta_excess_pct <= -1:
-            beta_line = f"🟡 *β 소폭 초과 이탈 {sm.beta_excess_pct:+.2f}%p*"
+            beta_line = "🟡 *벤치마크 기대보다 소폭 약세*"
         elif sm.beta_excess_pct >= 3:
-            beta_line = f"🔴 *β 초과 상승 {sm.beta_excess_pct:+.2f}%p* — 기대보다 강한 상승"
+            beta_line = "🟢 *벤치마크 기대보다 강한 상승*"
         else:
-            beta_line = f"⚪ *β 범위 내 {sm.beta_excess_pct:+.2f}%p*"
-        blocks.append(_ctx(f"기대수익률 {sm.beta_expected_pct:+.2f}% (β×{BETA_BENCHMARK})  |  {beta_line}"))
+            beta_line = "⚪ *벤치마크 기대 범위 내*"
+        blocks.append(_ctx(f"{BETA_BENCHMARK} 기준 상대 흐름: {beta_line}"))
 
     # ── 피어 분기 경고 (Divergence Warning만 유지, 일반 피어 수치는 상대강도 블록에서 표시) ──
     if sm.divergence_warning:
@@ -2889,13 +3206,8 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
             f"⚠️ *Divergence Warning*\n"
             f"{TICKER} 하락 가속 중인데 피어 그룹 반등 중 — 개별 악재 가능성"
         ))
-        peer_text = " / ".join(
-            f"{p} {v:+.2f}%"
-            for p, v in sm.peer_changes.items()
-        ) or "피어 데이터 없음"
-        blocks.append(_ctx(
-            f"{peer_text} 반등  vs  {TICKER} 하락 가속"
-        ))
+        peer_text = "/".join(sm.peer_changes) or "피어 그룹"
+        blocks.append(_ctx(f"{peer_text}와 다른 방향이 감지됨. 개별 원인을 확인하세요."))
 
     return blocks
 
@@ -2916,6 +3228,8 @@ def _footer() -> list:
 def send_slack(blocks: list, text: str = ""):
     text = text or f"{TICKER} Monitor"
     if not SLACK_WEBHOOK:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            raise RuntimeError("SLACK_WEBHOOK_URL not set")
         log.warning("SLACK_WEBHOOK_URL not set")
         for b in blocks:
             if isinstance(b.get("text"), dict):
@@ -2923,26 +3237,23 @@ def send_slack(blocks: list, text: str = ""):
         return
     for i in range(0, len(blocks), 40):
         chunk = blocks[i:i + 40]
-        try:
-            resp = requests.post(SLACK_WEBHOOK, json={"text": text, "blocks": chunk}, timeout=10)
-            if resp.status_code != 200:
-                log.error(f"Slack error: {resp.status_code} {resp.text}")
-            else:
-                log.info(f"Slack sent OK ({i + 1}-{i + len(chunk)}/{len(blocks)})")
-        except Exception as e:
-            log.error(f"Slack send: {e}")
+        resp = requests.post(SLACK_WEBHOOK, json={"text": text, "blocks": chunk}, timeout=10)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Slack error: {resp.status_code} {resp.text[:200]}")
+        log.info(f"Slack sent OK ({i + 1}-{i + len(chunk)}/{len(blocks)})")
 
 
 # ─────────────────────────────────────────────
 # 실행 모드
 # ─────────────────────────────────────────────
 def run_normal():
-    """장중 모드: 뉴스 + 기술지표(시그널시) + 내부자 + 가격 급변동"""
+    """장중 모드: 새 사실과 의미 있는 이상 움직임만 알린다."""
     log.info("=== NORMAL ===")
+    SOURCE_HEALTH.clear()
     state = load_state()
     ws = load_weekly_state()
     blocks = []
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    today = datetime.now(NY_TZ).strftime("%Y-%m-%d")
 
     if state.get("price_alert_date") != today:
         state["price_alert_max_pct"] = 0
@@ -2950,6 +3261,7 @@ def run_normal():
         state["price_alert_date"] = today
 
     price = fetch_price()
+    _set_source_health("Yahoo 시세", "정상" if price else "실패")
     if price and price.prev_close > 0:
         log.info(f"가격: {price.change_pct:+.2f}% | market_state={price.market_state}")
 
@@ -2971,15 +3283,16 @@ def run_normal():
             )
             if should_alert:
                 emoji = "🚀" if direction == "up" else "💥"
-                label = "상승" if direction == "up" else "하락"
+                label = _direction_label(price.change_pct)
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                    f"{emoji} *{DISPLAY_TICKER} {int(abs_pct)}% {label} 돌파!*\n전일 대비 {abs_pct:.1f}% {label} 중"}})
+                    f"{emoji} *{DISPLAY_TICKER} 큰 폭 {label} 감지*\n정확한 가격과 일일 등락률은 표시하지 않습니다."}})
 
-                # 상대 강도 (β 기반)
-                _beta = get_beta()
-                if _beta:
-                    _qqq = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
-                    blocks.extend(format_beta_block(calc_beta_divergence(_beta, _qqq, price.change_pct)))
+                benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
+                if benchmark_pct is not None:
+                    blocks.extend(format_beta_block({
+                        "actual_pct": price.change_pct,
+                        "qqq_pct": benchmark_pct,
+                    }))
 
                 # Volume Profile
                 vp = analyze_volume_profile(price.current)
@@ -2988,7 +3301,7 @@ def run_normal():
 
                 state["price_alert_max_pct"] = abs_pct if direction != prev_dir else max(prev_max, abs_pct)
                 state["price_alert_direction"] = direction
-                ws.setdefault("alerts_fired", []).append(f"주가 {price.change_pct:+.1f}%")
+                ws.setdefault("alerts_fired", []).append(f"큰 폭 {label}")
 
     closes = fetch_price_history(60)
     technicals = TechnicalSignals()
@@ -2999,26 +3312,41 @@ def run_normal():
             blocks.extend(format_technicals_block(technicals))
         ws.setdefault("rsi_readings", []).append(technicals.rsi_14)
 
+    company_filings = fetch_company_filings()
+    new_filings = [filing for filing in company_filings
+                   if filing.hash not in state.get("last_company_filing_hashes", [])]
+    if new_filings:
+        blocks.extend(format_company_filings_block(new_filings))
+        remember_company_filings(state, new_filings)
+        for filing in new_filings:
+            ws.setdefault("company_filings", []).append(
+                f"{filing.form}: {filing.description} ({filing.filing_date})"
+            )
+            ws.setdefault("thesis_impacts", []).append("risk")
+
     news = fetch_news()
     new_news = [n for n in news if n["hash"] not in state.get("last_news_hashes", [])]
     if new_news:
         new_news = translate_news(new_news)
         blocks.extend(format_news_block(new_news))
-        state["last_news_hashes"] = [n["hash"] for n in news[:20]]
+        remember_analyzed_news(state, new_news)
         for n in new_news:
             if not n.get("skip") and n.get("summary"):
                 ws.setdefault("news_headlines", []).append(n["summary"])
+                ws.setdefault("thesis_impacts", []).append(n.get("thesis_impact", "neutral"))
 
     insider_trades = fetch_insider_trades()
-    new_insiders = [t for t in insider_trades
-                    if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
-                    not in state.get("last_insider_hashes", [])]
-    if new_insiders:
-        blocks.extend(format_insider_block(new_insiders))
+    new_insider_candidates = [t for t in insider_trades
+                              if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
+                              not in state.get("last_insider_hashes", [])]
+    new_insiders = material_insider_trades(new_insider_candidates)
+    if new_insider_candidates:
         state["last_insider_hashes"] = [
             hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
             for t in insider_trades[:30]
         ]
+    if new_insiders:
+        blocks.extend(format_insider_block(new_insiders))
         for t in new_insiders:
             ws.setdefault("insider_trades", []).append(
                 f"{t.trade_type}: {t.filer} {t.shares:,}주 "
@@ -3027,7 +3355,11 @@ def run_normal():
 
     if blocks:
         blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-            "text": f"📊 {DISPLAY_TICKER} — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
+            "text": f"🔔 {DISPLAY_TICKER} 중요 변화 — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
+        blocks.insert(1, _ctx(
+            "데이터 상태: "
+            + " · ".join(f"{name} {status}" for name, status in SOURCE_HEALTH.items())
+        ))
         blocks.extend(_footer())
         send_slack(blocks)
     else:
@@ -3039,46 +3371,31 @@ def run_normal():
 
 def run_close():
     """
-    장 마감 모드: 종가 확인 + 기술지표 + PCR + 공매도 + DCA
-    BUG 1 FIX: 4%+ 이면 state에 pending_morning_alert 저장
+    장 마감 모드: 핵심 판단을 먼저 보여주고 기존의 유용한 상세를 보존한다.
     """
     log.info("=== CLOSE ===")
+    SOURCE_HEALTH.clear()
     state = load_state()
     ws = load_weekly_state()
     blocks = []
+    benchmark_pct = None
+    new_filings = []
+    new_news = []
 
     price = fetch_price(realtime=False)
+    today_market = datetime.now(NY_TZ).strftime("%Y-%m-%d")
+    if price and price.market_date and price.market_date != today_market:
+        log.info(
+            f"No fresh market bar ({price.market_date} != {today_market}) — close alert skipped"
+        )
+        return
+    _set_source_health("Yahoo 시세", "정상" if price else "실패")
     if price and price.prev_close > 0:
-        abs_pct = abs(price.change_pct)
-        direction = "up" if price.change_pct > 0 else "down"
-
         # 로깅: 등락률 항상 기록
         log.info(f"종가 등락: {price.change_pct:+.2f}% (prev_close={price.prev_close}, current={price.current})")
 
-        # state 저장 (4%+ 시 morning 알림 예약)
-        if abs_pct >= 4:
-            state["pending_morning_alert"] = {
-                "change_pct": round(price.change_pct, 1),
-                "abs_pct": round(abs_pct, 1),
-                "direction": direction,
-                "date": datetime.now(KST).strftime("%Y-%m-%d"),
-            }
-            log.info(f"Morning alert queued: {price.change_pct:+.1f}%")
-            emoji_big = "🚀" if direction == "up" else "💥"
-            label = "상승" if direction == "up" else "하락"
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"{emoji_big} *{DISPLAY_TICKER} 종가 {abs_pct:.1f}% {label}* — 내일 08:00 KST 재알림 예정"}})
-
-            # 상대 강도 (β 기반) — 장 마감 후 run_close의 별도 beta 블록과 통합
-
-            # Volume Profile: 장 마감 후엔 1분봉 없으므로 스킵
-            # Safety Margin은 closes 계산 후 아래서 처리
-        else:
-            state["pending_morning_alert"] = None
-            emoji_dir = "🌤" if direction == "up" else "🌧"
-            mood = "양전 마감" if direction == "up" else "음전 마감"
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                f"{emoji_dir} 오늘 종가 {mood}"}})
+        # 반복 아침 알림은 제품 계약에서 제외한다.
+        state["pending_morning_alert"] = None
 
         # 거래량 context
         if price.volume > 0:
@@ -3101,11 +3418,13 @@ def run_close():
 
     # 베타 분석 (벤치마크 fetch 실패 시 전체 skip — 0 fallback 시 아웃퍼폼 오판 방지)
     beta = get_beta()
-    if beta and price and price.prev_close > 0:
-        qqq_pct = _fetch_ticker_change(BETA_BENCHMARK)
-        if qqq_pct is not None:
-            bd = calc_beta_divergence(beta, qqq_pct, price.change_pct)
-            blocks.extend(format_beta_block(bd))
+    if price and price.prev_close > 0:
+        benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
+        if benchmark_pct is not None:
+            blocks.extend(format_beta_block({
+                "actual_pct": price.change_pct,
+                "qqq_pct": benchmark_pct,
+            }))
         else:
             log.warning(f"{BETA_BENCHMARK} fetch 실패 — 베타 블록 스킵 (아웃퍼폼 오판 방지)")
 
@@ -3116,7 +3435,7 @@ def run_close():
             closes,
             price.current,
             actual_pct=price.change_pct,
-            beta=get_beta(),
+            beta=beta,
         )
         if sm:
             blocks.extend(format_safety_margin_block(sm))
@@ -3130,11 +3449,6 @@ def run_close():
     if short:
         blocks.extend(format_short_block(short))
         ws.setdefault("short_readings", []).append(short.short_pct)
-
-    # BTC 상관계수
-    btc_corr = calc_btc_correlation()
-    if btc_corr:
-        blocks.extend(format_btc_correlation_block(btc_corr))
 
     # App Store 순위 (전일 캐시 비교)
     prev_app_rank = None
@@ -3150,29 +3464,52 @@ def run_close():
     if curr_app_rank:
         blocks.extend(format_appstore_rank_block(prev_app_rank, curr_app_rank))
 
+    company_filings = fetch_company_filings()
+    new_filings = [filing for filing in company_filings
+                   if filing.hash not in state.get("last_company_filing_hashes", [])]
+    if new_filings:
+        blocks.extend(format_company_filings_block(new_filings))
+        remember_company_filings(state, new_filings)
+        for filing in new_filings:
+            ws.setdefault("company_filings", []).append(
+                f"{filing.form}: {filing.description} ({filing.filing_date})"
+            )
+            ws.setdefault("thesis_impacts", []).append("risk")
+
     insider_trades = fetch_insider_trades()
     log.info(f"내부자 거래 fetch 결과: 총 {len(insider_trades)}건")
-    new_insiders = [t for t in insider_trades
-                    if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
-                    not in state.get("last_insider_hashes", [])]
+    new_insider_candidates = [t for t in insider_trades
+                              if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
+                              not in state.get("last_insider_hashes", [])]
+    new_insiders = material_insider_trades(new_insider_candidates)
     log.info(f"내부자 거래 신규: {len(new_insiders)}건 (중복 제외)")
-    if new_insiders:
-        blocks.extend(format_insider_block(new_insiders))
+    if new_insider_candidates:
         state["last_insider_hashes"] = [
             hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
             for t in insider_trades[:30]
         ]
+    if new_insiders:
+        blocks.extend(format_insider_block(new_insiders))
         for t in new_insiders:
             ws.setdefault("insider_trades", []).append(
                 f"{t.trade_type}: {t.filer} {t.shares:,}주"
-                + (f" @ ${t.price:.2f}" if t.price > 0 else "")
             )
     news = fetch_news()
-    news = translate_news(news)
-    news_blocks = format_news_block(news)
+    new_news = [item for item in news
+                if item["hash"] not in state.get("last_news_hashes", [])]
+    if new_news:
+        new_news = translate_news(new_news)
+        remember_analyzed_news(state, new_news)
+    else:
+        _set_source_health("AI 뉴스", "새 뉴스 없음")
+    news_blocks = format_news_block(new_news)
     if news_blocks:
         blocks.extend(news_blocks)
         log.info(f"뉴스 블록 추가: {len(news_blocks)}개")
+        for item in new_news:
+            if not item.get("skip") and item.get("summary"):
+                ws.setdefault("news_headlines", []).append(item["summary"])
+                ws.setdefault("thesis_impacts", []).append(item.get("thesis_impact", "neutral"))
     else:
         log.info("표시할 관련 뉴스 없음")
 
@@ -3183,6 +3520,15 @@ def run_close():
 
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
         "text": f"🔔 {DISPLAY_TICKER} 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
+    summary_blocks = build_decision_summary_blocks(
+        price=price,
+        benchmark_pct=benchmark_pct,
+        news=new_news,
+        filings=new_filings,
+        insiders=new_insiders,
+    )
+    for block in reversed(summary_blocks):
+        blocks.insert(1, block)
     blocks.extend(_footer())
     send_slack(blocks)
 
@@ -3192,37 +3538,12 @@ def run_close():
 
 
 def run_morning():
-    """
-    08:00 KST 아침 알림
-    BUG 1 FIX: fetch_price() 직접 호출 대신 state의 pending_morning_alert 읽음
-    """
+    """호환성 명령. 반복 아침 알림은 제품 계약에 따라 발송하지 않는다."""
     log.info("=== MORNING ===")
     state = load_state()
-
-    alert = state.get("pending_morning_alert")
-    if not alert:
-        log.info("No pending morning alert — silent")
-        return
-
-    abs_pct = alert["abs_pct"]
-    direction = alert["direction"]
-    emoji = "🚀" if direction == "up" else "💥"
-    label = "상승" if direction == "up" else "하락"
-
-    blocks = [
-        {"type": "header", "text": {"type": "plain_text",
-            "text": f"☀️ {DISPLAY_TICKER} 아침 브리핑 — {datetime.now(KST).strftime('%m/%d')}"}},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text":
-            f"{emoji} *어제 종가 기준 {abs_pct:.1f}% {label}*"}},
-    ]
-    blocks.extend(_footer())
-    send_slack(blocks)
-
-    # 발송 후 초기화
     state["pending_morning_alert"] = None
     save_state(state)
-    log.info(f"Morning alert sent: {alert['change_pct']:+.1f}%")
+    log.info("Morning alert disabled — no new decision value")
 
 
 def run_13f():
@@ -3230,9 +3551,23 @@ def run_13f():
     log.info("=== 13F ===")
     state = load_state()
     filings = fetch_13f_filings()
+    previous_positions = state.get("last_13f_positions", {})
     new_filings = [f for f in filings
                    if hashlib.md5(f"{f.institution}{f.filing_date}".encode()).hexdigest()[:12]
                    not in state.get("last_13f_hashes", [])]
+
+    for filing in new_filings:
+        previous = previous_positions.get(filing.institution)
+        if filing.shares <= 0:
+            filing.change_type = "REPORTED"
+        elif previous is None:
+            filing.change_type = "BASELINE"
+        elif filing.shares > previous:
+            filing.change_type = "INCREASE"
+        elif filing.shares < previous:
+            filing.change_type = "DECREASE"
+        else:
+            filing.change_type = "UNCHANGED"
 
     if new_filings:
         blocks = [
@@ -3247,6 +3582,11 @@ def run_13f():
             hashlib.md5(f"{f.institution}{f.filing_date}".encode()).hexdigest()[:12]
             for f in filings[:30]
         ]
+        latest_positions = {}
+        for filing in sorted(filings, key=lambda item: item.filing_date, reverse=True):
+            if filing.shares > 0 and filing.institution not in latest_positions:
+                latest_positions[filing.institution] = filing.shares
+        state["last_13f_positions"] = latest_positions
         save_state(state)
 
     log.info(f"13F done — {len(new_filings)} new")
@@ -3258,24 +3598,35 @@ def run_weekly():
     BUG 4 FIX: 주가 숫자($) 완전 제거, DCA verdict 강조
     """
     log.info("=== WEEKLY ===")
+    SOURCE_HEALTH.clear()
     ws = load_weekly_state()
     closes = fetch_price_history(60)
+    _set_source_health("Yahoo 주간", "정상" if len(closes) >= 6 else "실패")
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     options = fetch_options_pcr()
     short = fetch_short_interest()
-    insider_trades = fetch_insider_trades()
-    news = fetch_news()
-    news = translate_news(news)
 
-    # 주간 변동률 (가격 숫자 없이 %)
-    price = fetch_price()
+    # 실제 5거래일 비교. Slack에는 방향만 표시한다.
+    weekly_pct = None
+    if len(closes) >= 6 and closes[-6]:
+        weekly_pct = (closes[-1] - closes[-6]) / closes[-6] * 100
+    price = PriceData(change_pct=weekly_pct or 0.0) if weekly_pct is not None else None
+    benchmark_closes = _fetch_yearly_closes(BETA_BENCHMARK)
+    benchmark_pct = None
+    if benchmark_closes and len(benchmark_closes) >= 6 and benchmark_closes[-6]:
+        benchmark_pct = (benchmark_closes[-1] - benchmark_closes[-6]) / benchmark_closes[-6] * 100
     weekly_change_str = ""
-    if price:
-        weekly_change_str = f"이번 주 마감 기준 {price.change_pct:+.1f}% ({('상승' if price.change_pct >= 0 else '하락')})"
+    if weekly_pct is not None:
+        weekly_change_str = (
+            f"이번 주 방향: {_direction_label(weekly_pct)} | "
+            f"{_relative_label(weekly_pct, benchmark_pct)}"
+        )
 
     alerts = ws.get("alerts_fired", [])
     insider_summary = ws.get("insider_trades", [])
     news_summary = ws.get("news_headlines", [])
+    company_filing_summary = ws.get("company_filings", [])
+    thesis_impacts = ws.get("thesis_impacts", [])
     rsi_readings = ws.get("rsi_readings", [])
     pcr_readings = ws.get("pcr_readings", [])
     short_readings = ws.get("short_readings", [])
@@ -3286,9 +3637,9 @@ def run_weekly():
         {"type": "divider"},
     ]
 
-    # 주간 변동 요약 (% 만, 가격 숫자 없음)
+    # 주간 변동 요약: 정확한 가격과 수익률은 숨기고 방향만 표시한다.
     if weekly_change_str:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 등락*\n{weekly_change_str}"}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 방향*\n{weekly_change_str}"}})
 
     blocks.extend(format_technicals_block(technicals))
 
@@ -3300,7 +3651,8 @@ def run_weekly():
     if short_readings:
         avg_short = sum(short_readings) / len(short_readings)
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            f"*🩳 주간 공매도 평균: {avg_short:.1f}%*" + (f" (최신 {short.short_pct:.1f}%)" if short else "")}})
+            f"*🩳 FINRA 일일 공매도 체결 비중 주간 평균: {avg_short:.1f}%*"
+            + (f" (최신 {short.short_pct:.1f}%)" if short else "")}})
 
     if alerts:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
@@ -3314,6 +3666,10 @@ def run_weekly():
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
             "*📰 주간 주요 뉴스*\n" + "\n".join(f"• {h}" for h in news_summary[-5:])}})
 
+    if company_filing_summary:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
+            "*🏛 주간 중요 SEC 공시*\n" + "\n".join(f"• {h}" for h in company_filing_summary[-5:])}})
+
     blocks.append({"type": "divider"})
     # 주간 기술지표 스코어
     weekly_ohlcv_w = fetch_weekly_ohlcv(weeks=40)
@@ -3322,6 +3678,18 @@ def run_weekly():
         dca_tech_w = calculate_dca_technical_score(ohlcv_w, weekly_ohlcv_w, sm=None)
         if dca_tech_w:
             blocks.extend(format_dca_technical_block(dca_tech_w))
+    synthetic_news = [
+        {"summary": "주간 누적 사건", "thesis_impact": impact}
+        for impact in thesis_impacts
+    ]
+    summary_blocks = build_decision_summary_blocks(
+        price=price,
+        benchmark_pct=benchmark_pct,
+        news=synthetic_news,
+        filings=company_filing_summary,
+    )
+    for block in reversed(summary_blocks):
+        blocks.insert(1, block)
     blocks.extend(_footer())
 
     send_slack(blocks)
@@ -3329,6 +3697,7 @@ def run_weekly():
     save_weekly_state({
         "week_start": datetime.now(KST).strftime("%Y-%m-%d"),
         "alerts_fired": [], "insider_trades": [], "news_headlines": [],
+        "company_filings": [], "thesis_impacts": [],
         "rsi_readings": [], "pcr_readings": [], "short_readings": [],
     })
     log.info("Weekly done")

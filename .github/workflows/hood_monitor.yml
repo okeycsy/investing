@@ -1,21 +1,20 @@
 name: Ticker Monitor
 
+concurrency:
+  group: ticker-monitor-state
+  cancel-in-progress: false
+
 on:
   schedule:
     # ── 장중 normal (프리+정규+애프터) ──────────────────────
-    # UTC 08~19 = KST 17~04 중 NYSE 관련 시간대
-    # PRE:     UTC 08:00~13:30 (KST 17:00~22:30)
-    # REGULAR: UTC 13:30~20:00 (KST 22:30~05:00)
-    # POST:    UTC 20:00~24:00 (KST 05:00~09:00)
+    # DST 양쪽 후보를 예약하고 아래 단계에서 NY 평일 04:00~19:59만 실행한다.
     - cron: '0 8-23 * * 1-5'    # UTC 월~금 관련 거래 시간대
+    - cron: '0 0-1 * * 2-6'     # UTC 자정 이후의 전일 NY 애프터마켓
 
-    # ── close: KST 06:00 = UTC 21:00 ────────────────────────
-    # NYSE 마감(UTC 20:00) 1시간 후, 확정 종가 기준
-    # 겨울(EST): NYSE 마감 UTC 21:00 → close는 UTC 22:00으로 수동 조정 필요
-    - cron: '0 21 * * 1-5'      # UTC 21:00 = KST 06:00
-
-    # ── morning: KST 06:30 = UTC 21:30 ──────────────────────
-    - cron: '30 21 * * 1-5'     # UTC 21:30 = KST 06:30
+    # ── close: New York 17:10, DST 자동 선택 ─────────────────
+    # 두 UTC 후보 중 실행 시점이 실제 17시인 작업만 진행한다.
+    - cron: '10 21 * * 1-5'
+    - cron: '10 22 * * 1-5'
 
     # ── weekly: 월요일 KST 08:00 = UTC 23:00 (일요일) ────────
     - cron: '0 23 * * 0'        # UTC 일요일 23:00 = KST 월요일 08:00
@@ -26,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'RUN_MODE (normal/close/morning/weekly/13f/dca_status/dca_update)'
+        description: 'RUN_MODE (normal/close/weekly/13f/dca_status/dca_update)'
         required: true
         default: 'normal'
       dca_shares:
@@ -65,24 +64,32 @@ jobs:
           fi
 
           # schedule이면 UTC 시간 기준으로 자동 판별
-          HOUR=$(date -u +%H)
-          MINUTE=$(date -u +%M)
-          DOW=$(date -u +%u)   # 1=월 ... 7=일
-          HM=$((HOUR * 60 + MINUTE))
-
-          if [ "$HOUR" = "21" ] && [ "$MINUTE" = "00" ]; then
-            echo "mode=close" >> $GITHUB_OUTPUT
-          elif [ "$HOUR" = "21" ] && [ "$MINUTE" = "30" ]; then
-            echo "mode=morning" >> $GITHUB_OUTPUT
-          elif [ "$DOW" = "7" ] && [ "$HOUR" = "23" ]; then
-            echo "mode=weekly" >> $GITHUB_OUTPUT
-          elif [ "$DOW" = "6" ] && [ "$HOUR" = "10" ]; then
-            echo "mode=13f" >> $GITHUB_OUTPUT
-          else
-            echo "mode=normal" >> $GITHUB_OUTPUT
-          fi
+          SCHEDULE="${{ github.event.schedule }}"
+          case "$SCHEDULE" in
+            "10 21 * * 1-5"|"10 22 * * 1-5")
+              NY_OFFSET=$(TZ=America/New_York date +%z)
+              if { [ "$SCHEDULE" = "10 21 * * 1-5" ] && [ "$NY_OFFSET" = "-0400" ]; } || \
+                 { [ "$SCHEDULE" = "10 22 * * 1-5" ] && [ "$NY_OFFSET" = "-0500" ]; }; then
+                echo "mode=close" >> $GITHUB_OUTPUT
+              else
+                echo "mode=skip" >> $GITHUB_OUTPUT
+              fi
+              ;;
+            "0 23 * * 0") echo "mode=weekly" >> $GITHUB_OUTPUT ;;
+            "0 10 * * 6") echo "mode=13f" >> $GITHUB_OUTPUT ;;
+            *)
+              NY_DOW=$(TZ=America/New_York date +%u)
+              NY_HOUR=$(TZ=America/New_York date +%H)
+              if [ "$NY_DOW" -le 5 ] && [ "$NY_HOUR" -ge 4 ] && [ "$NY_HOUR" -lt 20 ]; then
+                echo "mode=normal" >> $GITHUB_OUTPUT
+              else
+                echo "mode=skip" >> $GITHUB_OUTPUT
+              fi
+              ;;
+          esac
 
       - name: Run Ticker Monitor
+        if: steps.mode.outputs.mode != 'skip'
         env:
           SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
@@ -95,10 +102,11 @@ jobs:
         run: python hood_monitor.py
 
       - name: Commit state files
-        if: always()
+        if: success() && steps.mode.outputs.mode != 'skip'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f state.json weekly_state.json beta_cache.json app_rank_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json 2>/dev/null || true
           git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
-          git push || true
+          git pull --rebase
+          git push
