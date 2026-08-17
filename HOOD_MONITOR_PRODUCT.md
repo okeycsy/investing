@@ -16,10 +16,12 @@ Every visible alert must answer at least one question:
 ## Alert Contracts
 
 - `normal`: material news, issuer SEC filings, meaningful insider transactions,
-  or an abnormal company-specific move. Silent when nothing changed.
-- `close`: one daily decision summary followed by the existing useful detail.
+  an abnormal company-specific move, or intraday volume reaching at least 1.5x
+  the prior 20-session average. Each volume event is sent at most once per day.
+- `close`: one daily decision summary followed by the existing useful detail,
+  including the final volume-versus-20-session-average result.
 - `weekly`: the week's thesis changes, market direction, relative performance,
-  and next checks. It must use a real weekly comparison.
+  latest volume result, and next checks. It must use a real weekly comparison.
 - `13f`: only newly filed positions, with quarter-over-quarter direction when
   the previous position is available.
 - `morning`: retained only as a compatibility command; it must not be scheduled.
@@ -35,6 +37,8 @@ Every visible alert must answer at least one question:
 - Technical indicators are secondary context. They must not say `Strong Buy`,
   `Buy`, or `Avoid`, and must not prescribe a dollar purchase amount.
 - FINRA daily short volume must not be labeled as short interest.
+- Volume alerts must show the current session volume, prior 20-session average,
+  ratio, and an explicit `터짐` or `안 터짐` result. The threshold is 1.5x.
 
 ## Usability Guardrail
 

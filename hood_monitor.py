@@ -70,6 +70,8 @@ NY_TZ = ZoneInfo("America/New_York")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("hood_monitor")
 SOURCE_HEALTH: dict[str, str] = {}
+VOLUME_LOOKBACK_DAYS = 20
+VOLUME_EXPLOSION_RATIO = 1.5
 
 
 def _set_source_health(source: str, status: str):
@@ -97,9 +99,19 @@ class PriceData:
     low: float = 0.0
     volume: int = 0
     vol_avg_5d: int = 0
+    vol_avg_20d: int = 0
     market_state: str = ""    # "REGULAR" | "PRE" | "POST" | "CLOSED"
     timestamp: str = ""
     market_date: str = ""
+
+
+@dataclass
+class VolumeActivity:
+    current_volume: int = 0
+    average_volume: int = 0
+    ratio: float = 0.0
+    window: int = VOLUME_LOOKBACK_DAYS
+    exploded: bool = False
 
 
 @dataclass
@@ -207,6 +219,7 @@ def load_state() -> dict:
         "price_alert_max_pct": 0,
         "price_alert_direction": "",
         "price_alert_date": "",
+        "volume_alert_date": "",
         "pending_morning_alert": None,
         # ── DCA 포트폴리오 ──
         "dca_shares": 0.0,        # 총 보유 수량
@@ -415,7 +428,7 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
     """
     _yahoo_throttle()
     # ── 1. 일봉 (timestamps 포함하여 오늘 바 필터링) ──────────────
-    resp_1d = fetch_yahoo_chart(TICKER, {"interval": "1d", "range": "10d"})
+    resp_1d = fetch_yahoo_chart(TICKER, {"interval": "1d", "range": "3mo"})
     if not resp_1d:
         return None
     try:
@@ -468,8 +481,10 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
         all_closes = [float(c) for c in closes_raw if c is not None]
         if len(all_closes) < 2:
             return None
-        confirmed_closes  = all_closes
-        confirmed_volumes = [int(v) for v in volumes_raw if v is not None]
+        confirmed_closes = all_closes
+        if not confirmed_volumes:
+            all_volumes = [int(v) for v in volumes_raw if v is not None]
+            confirmed_volumes = all_volumes[:-1]
 
     # prev_close = 가장 최근 확정 종가 (= 전일 정규장 종가)
     prev_close = round(confirmed_closes[-1], 2)
@@ -509,17 +524,30 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
         # realtime=False(run_close)는 [-1] vs [-2] 사용
         if not realtime:
             # run_close 전용: 오늘 확정 종가(방금 마감) vs 전일 종가
-            all_c = [float(c) for c in closes_raw if c is not None]
-            current    = round(all_c[-1], 2)
-            prev_close = round(all_c[-2], 2)
+            valid_indices = [i for i, close in enumerate(closes_raw) if close is not None]
+            if len(valid_indices) < 2:
+                return None
+            latest_idx = valid_indices[-1]
+            previous_idx = valid_indices[-2]
+            current = round(float(closes_raw[latest_idx]), 2)
+            prev_close = round(float(closes_raw[previous_idx]), 2)
+            today_vol = (
+                int(volumes_raw[latest_idx])
+                if latest_idx < len(volumes_raw) and volumes_raw[latest_idx]
+                else 0
+            )
         else:
             current = prev_close  # CLOSED + realtime=True: 변동 없음
-        today_vol = int(confirmed_volumes[-1]) if confirmed_volumes else 0
+            today_vol = int(confirmed_volumes[-1]) if confirmed_volumes else 0
 
     change_pct = round((current - prev_close) / prev_close * 100, 2) if prev_close else 0
 
-    past_vols  = confirmed_volumes[:-1] if len(confirmed_volumes) > 1 else confirmed_volumes
+    past_vols = [volume for volume in confirmed_volumes if volume > 0]
     vol_avg_5d = int(sum(past_vols[-5:]) / len(past_vols[-5:])) if past_vols else 0
+    vol_avg_20d = (
+        int(sum(past_vols[-VOLUME_LOOKBACK_DAYS:]) / VOLUME_LOOKBACK_DAYS)
+        if len(past_vols) >= VOLUME_LOOKBACK_DAYS else 0
+    )
 
     log.info(
         f"fetch_price: state={market_state} "
@@ -540,6 +568,7 @@ def fetch_price(realtime: bool = True) -> Optional[PriceData]:
         low=round(meta.get("regularMarketDayLow", 0), 2),
         volume=today_vol,
         vol_avg_5d=vol_avg_5d,
+        vol_avg_20d=vol_avg_20d,
         market_state=market_state,
         timestamp=datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
         market_date=(
@@ -2905,6 +2934,75 @@ def _sec(text: str, fields: list = None) -> dict:
     return block
 
 
+def make_volume_activity(
+    current_volume: int,
+    average_volume: int,
+    *,
+    window: int = VOLUME_LOOKBACK_DAYS,
+    threshold: float = VOLUME_EXPLOSION_RATIO,
+) -> Optional[VolumeActivity]:
+    """현재 거래량과 과거 평균을 비교해 일관된 거래량 신호를 만든다."""
+    if current_volume <= 0 or average_volume <= 0:
+        return None
+    ratio = current_volume / average_volume
+    return VolumeActivity(
+        current_volume=current_volume,
+        average_volume=average_volume,
+        ratio=ratio,
+        window=window,
+        exploded=ratio >= threshold,
+    )
+
+
+def calculate_volume_activity(
+    volumes: list,
+    *,
+    window: int = VOLUME_LOOKBACK_DAYS,
+    threshold: float = VOLUME_EXPLOSION_RATIO,
+) -> Optional[VolumeActivity]:
+    """마지막 거래일을 직전 N개 거래일 평균과 비교한다."""
+    if len(volumes) < window + 1:
+        return None
+    current_volume = int(volumes[-1] or 0)
+    baseline = [int(volume) for volume in volumes[-window - 1:-1] if volume]
+    if current_volume <= 0 or len(baseline) != window:
+        return None
+    average_volume = int(sum(baseline) / window)
+    return make_volume_activity(
+        current_volume,
+        average_volume,
+        window=window,
+        threshold=threshold,
+    )
+
+
+def format_volume_activity_block(
+    activity: Optional[VolumeActivity],
+    *,
+    finalized: bool,
+) -> list:
+    if not activity:
+        return []
+    if activity.exploded:
+        headline = "🔥 거래량 터짐"
+    elif finalized:
+        headline = "⚪ 거래량 안 터짐"
+    else:
+        headline = "⏳ 장중 거래량 기준 미달"
+    volume_label = "당일 거래량" if finalized else "당일 누적 거래량"
+    return [
+        _sec(
+            f"*{headline}*\n"
+            f"{volume_label} *{activity.current_volume:,}주*"
+        ),
+        _ctx(
+            f"{activity.window}일 평균 {activity.average_volume:,}주 | "
+            f"평균 대비 *{activity.ratio:.2f}x* | "
+            f"터짐 기준 {VOLUME_EXPLOSION_RATIO:.2f}x"
+        ),
+    ]
+
+
 def _thesis_decision(news: list, filings: list, insiders: Optional[list] = None) -> tuple[str, str]:
     impacts = {item.get("thesis_impact", "neutral") for item in news}
     if "damage" in impacts:
@@ -2926,6 +3024,7 @@ def build_decision_summary_blocks(
     news: list,
     filings: list,
     insiders: Optional[list] = None,
+    volume_activity: Optional[VolumeActivity] = None,
     source_health: Optional[dict] = None,
 ) -> list:
     """가격 숫자 없이 하루의 핵심 의사결정을 먼저 보여준다."""
@@ -2937,7 +3036,12 @@ def build_decision_summary_blocks(
         trade for trade in (insiders or [])
         if trade.trade_type in {"Purchase", "Sale"}
     ]
-    event_count = len(material_news) + len(filings) + len(directional_insiders)
+    event_count = (
+        len(material_news)
+        + len(filings)
+        + len(directional_insiders)
+        + (1 if volume_activity and volume_activity.exploded else 0)
+    )
     event_text = f"중요 변화 {event_count}건" if event_count else "새로운 중요 사건 없음"
     health = source_health if source_health is not None else SOURCE_HEALTH
     has_source_failure = any(
@@ -3303,6 +3407,19 @@ def run_normal():
                 state["price_alert_direction"] = direction
                 ws.setdefault("alerts_fired", []).append(f"큰 폭 {label}")
 
+            volume_activity = make_volume_activity(price.volume, price.vol_avg_20d)
+            if (
+                volume_activity
+                and volume_activity.exploded
+                and state.get("volume_alert_date") != today
+            ):
+                blocks.extend(format_volume_activity_block(volume_activity, finalized=False))
+                state["volume_alert_date"] = today
+                ws.setdefault("alerts_fired", []).append(
+                    f"거래량 터짐 ({VOLUME_LOOKBACK_DAYS}일 평균 대비 "
+                    f"{volume_activity.ratio:.2f}배)"
+                )
+
     closes = fetch_price_history(60)
     technicals = TechnicalSignals()
     if closes:
@@ -3379,6 +3496,7 @@ def run_close():
     ws = load_weekly_state()
     blocks = []
     benchmark_pct = None
+    volume_activity = None
     new_filings = []
     new_news = []
 
@@ -3397,21 +3515,26 @@ def run_close():
         # 반복 아침 알림은 제품 계약에서 제외한다.
         state["pending_morning_alert"] = None
 
-        # 거래량 context
-        if price.volume > 0:
-            vol_ratio = round(price.volume / price.vol_avg_5d, 2) if price.vol_avg_5d > 0 else 0
-            vol_flag = "  🐋 거래량 폭증" if vol_ratio >= 1.5 else ""
-            vol_ctx = f"당일 거래량 {price.volume:,}"
-            if price.vol_avg_5d > 0:
-                vol_ctx += f" | 5일 평균 {price.vol_avg_5d:,} | *{vol_ratio:.1f}x*{vol_flag}"
-            blocks.append(_ctx(vol_ctx))
-
         state["price_alert_max_pct"] = 0
         state["price_alert_direction"] = ""
 
     # OHLCV fetch (closes + highs/lows/volumes, 210일 — EMA200 + DCA 기술지표용)
     ohlcv = fetch_ohlcv(days=210)
     closes = ohlcv.get("closes") or fetch_price_history(60)  # 빈 리스트도 fallback
+    volume_activity = calculate_volume_activity(ohlcv.get("volumes", []))
+    if not volume_activity and price:
+        volume_activity = make_volume_activity(price.volume, price.vol_avg_20d)
+    blocks.extend(format_volume_activity_block(volume_activity, finalized=True))
+    if (
+        volume_activity
+        and volume_activity.exploded
+        and state.get("volume_alert_date") != today_market
+    ):
+        state["volume_alert_date"] = today_market
+        ws.setdefault("alerts_fired", []).append(
+            f"거래량 터짐 ({VOLUME_LOOKBACK_DAYS}일 평균 대비 "
+            f"{volume_activity.ratio:.2f}배)"
+        )
     weekly_ohlcv = fetch_weekly_ohlcv(weeks=40)
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
@@ -3526,6 +3649,7 @@ def run_close():
         news=new_news,
         filings=new_filings,
         insiders=new_insiders,
+        volume_activity=volume_activity,
     )
     for block in reversed(summary_blocks):
         blocks.insert(1, block)
@@ -3601,6 +3725,8 @@ def run_weekly():
     SOURCE_HEALTH.clear()
     ws = load_weekly_state()
     closes = fetch_price_history(60)
+    ohlcv_w = fetch_ohlcv(days=210)
+    volume_activity = calculate_volume_activity(ohlcv_w.get("volumes", []))
     _set_source_health("Yahoo 주간", "정상" if len(closes) >= 6 else "실패")
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     options = fetch_options_pcr()
@@ -3642,6 +3768,7 @@ def run_weekly():
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 방향*\n{weekly_change_str}"}})
 
     blocks.extend(format_technicals_block(technicals))
+    blocks.extend(format_volume_activity_block(volume_activity, finalized=True))
 
     if pcr_readings:
         avg_pcr = sum(pcr_readings) / len(pcr_readings)
@@ -3673,7 +3800,6 @@ def run_weekly():
     blocks.append({"type": "divider"})
     # 주간 기술지표 스코어
     weekly_ohlcv_w = fetch_weekly_ohlcv(weeks=40)
-    ohlcv_w = fetch_ohlcv(days=210)
     if ohlcv_w:
         dca_tech_w = calculate_dca_technical_score(ohlcv_w, weekly_ohlcv_w, sm=None)
         if dca_tech_w:
@@ -3687,6 +3813,7 @@ def run_weekly():
         benchmark_pct=benchmark_pct,
         news=synthetic_news,
         filings=company_filing_summary,
+        volume_activity=volume_activity,
     )
     for block in reversed(summary_blocks):
         blocks.insert(1, block)

@@ -1,6 +1,6 @@
 import unittest
 import xml.etree.ElementTree as ET
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from unittest.mock import Mock, patch
 
 import hood_monitor as hm
@@ -151,6 +151,83 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn("기존 계획 유지", text)
         self.assertNotIn("-1.2", text)
         self.assertNotIn("-2.0", text)
+
+    def test_volume_activity_uses_prior_20_sessions(self):
+        activity = hm.calculate_volume_activity([100] * 20 + [160])
+
+        self.assertIsNotNone(activity)
+        self.assertEqual(activity.average_volume, 100)
+        self.assertAlmostEqual(activity.ratio, 1.6)
+        self.assertTrue(activity.exploded)
+
+    def test_volume_below_threshold_is_not_exploded(self):
+        activity = hm.calculate_volume_activity([100] * 20 + [149])
+
+        self.assertIsNotNone(activity)
+        self.assertFalse(activity.exploded)
+
+    def test_volume_activity_requires_full_baseline(self):
+        self.assertIsNone(hm.calculate_volume_activity([100] * 20))
+
+    def test_close_price_uses_latest_daily_volume_and_prior_20_day_average(self):
+        today = datetime.now(hm.NY_TZ).date()
+        days = [today - timedelta(days=21 - index) for index in range(22)]
+        timestamps = [
+            int(datetime.combine(day, time(12), tzinfo=hm.NY_TZ).timestamp())
+            for day in days
+        ]
+        response = Mock()
+        response.json.return_value = {
+            "chart": {
+                "result": [{
+                    "timestamp": timestamps,
+                    "meta": {},
+                    "indicators": {
+                        "quote": [{
+                            "close": [10.0] * 22,
+                            "volume": [100] * 21 + [160],
+                        }]
+                    },
+                }]
+            }
+        }
+
+        with (
+            patch.object(hm, "_yahoo_throttle"),
+            patch.object(hm, "fetch_yahoo_chart", return_value=response),
+        ):
+            price = hm.fetch_price(realtime=False)
+
+        self.assertEqual(price.volume, 160)
+        self.assertEqual(price.vol_avg_20d, 100)
+
+    def test_volume_block_shows_comparison_and_result(self):
+        activity = hm.calculate_volume_activity([100] * 20 + [160])
+        text = visible_text(hm.format_volume_activity_block(activity, finalized=True))
+
+        self.assertIn("거래량 터짐", text)
+        self.assertIn("당일 거래량", text)
+        self.assertIn("20일 평균", text)
+        self.assertIn("1.60x", text)
+
+    def test_intraday_volume_block_does_not_claim_final_result(self):
+        activity = hm.calculate_volume_activity([100] * 20 + [149])
+        text = visible_text(hm.format_volume_activity_block(activity, finalized=False))
+
+        self.assertIn("장중 거래량 기준 미달", text)
+        self.assertNotIn("거래량 안 터짐", text)
+
+    def test_volume_explosion_counts_as_important_change(self):
+        blocks = hm.build_decision_summary_blocks(
+            price=hm.PriceData(change_pct=0.2),
+            benchmark_pct=0.1,
+            news=[],
+            filings=[],
+            volume_activity=hm.calculate_volume_activity([100] * 20 + [160]),
+            source_health={"Yahoo": "정상"},
+        )
+
+        self.assertIn("중요 변화 1건", visible_text(blocks))
 
     def test_source_failure_prevents_false_no_change(self):
         blocks = hm.build_decision_summary_blocks(
