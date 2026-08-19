@@ -1,6 +1,8 @@
 {
   "week_start": "",
-  "alerts_fired": [],
+  "alerts_fired": [
+    "큰 폭 음전"
+  ],
   "insider_trades": [],
   "news_headlines": [],
   "company_filings": [],
@@ -10,7 +12,8 @@
     45.21,
     45.21,
     45.21,
-    45.21
+    45.21,
+    41.36
   ],
   "pcr_readings": [],
   "short_readings": []
