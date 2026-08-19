@@ -348,10 +348,14 @@ class ProductContractTest(unittest.TestCase):
 
     def test_preview_workflow_does_not_commit_state(self):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+        smoke_workflow = Path(".github/workflows/live_smoke.yml").read_text()
 
         self.assertIn("normal/preview/close/weekly/13f", workflow)
         self.assertIn("PREVIEW_CHANGE_PCT", workflow)
         self.assertIn("steps.mode.outputs.mode != 'preview'", workflow)
+        self.assertIn(".github/alert_preview_request", workflow)
+        self.assertIn("preview_change_pct=${PREVIEW_CHANGE:-4.0}", workflow)
+        self.assertIn("[alert-preview]", smoke_workflow)
 
     def test_primary_alert_blocks_use_clean_text_without_status_emoji(self):
         blocks = []

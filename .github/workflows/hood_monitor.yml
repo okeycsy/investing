@@ -5,6 +5,11 @@ concurrency:
   cancel-in-progress: false
 
 on:
+  push:
+    branches: ['main']
+    paths:
+      - '.github/alert_preview_request'
+
   schedule:
     # ── 장중 normal (프리+정규+애프터) ──────────────────────
     # DST 양쪽 후보를 예약하고 아래 단계에서 NY 평일 04:00~19:59만 실행한다.
@@ -55,9 +60,22 @@ jobs:
       - name: Determine RUN_MODE
         id: mode
         run: |
+          # 미리보기 요청 파일이 추가된 push는 운영 상태와 분리해 한 번만 발송한다.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ -f ".github/alert_preview_request" ]; then
+              PREVIEW_CHANGE=$(cat .github/alert_preview_request)
+              echo "mode=preview" >> $GITHUB_OUTPUT
+              echo "preview_change_pct=${PREVIEW_CHANGE:-4.0}" >> $GITHUB_OUTPUT
+            else
+              echo "mode=skip" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
+
           # workflow_dispatch이면 입력값 우선
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+            echo "preview_change_pct=${{ github.event.inputs.preview_change_pct }}" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -95,7 +113,7 @@ jobs:
           SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
           RUN_MODE:           ${{ steps.mode.outputs.mode }}
-          PREVIEW_CHANGE_PCT: ${{ github.event.inputs.preview_change_pct }}
+          PREVIEW_CHANGE_PCT: ${{ steps.mode.outputs.preview_change_pct }}
         run: python hood_monitor.py
 
       - name: Commit state files
