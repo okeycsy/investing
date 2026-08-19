@@ -1,3 +1,4 @@
+import inspect
 import unittest
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, time, timedelta
@@ -110,13 +111,6 @@ class ProductContractTest(unittest.TestCase):
         self.assertEqual(analyzed[0]["analysis_status"], "failed")
         self.assertEqual(hm.analyzed_news_hashes(analyzed), [])
 
-    def test_dca_block_is_secondary_context(self):
-        score = hm.DCATechnicalScore(total=82, grade="Strong Buy", layers=[])
-        text = visible_text(hm.format_dca_technical_block(score))
-        self.assertIn("DCA 보조", text)
-        self.assertNotIn("Strong Buy", text)
-        self.assertNotIn("Avoid", text)
-
     def test_market_detail_blocks_hide_price_levels(self):
         volume = hm.VolumeProfile(
             poc_price=123.45,
@@ -152,9 +146,63 @@ class ProductContractTest(unittest.TestCase):
         text = visible_text(blocks)
         self.assertIn("음전", text)
         self.assertIn("아웃퍼폼", text)
-        self.assertIn("기존 계획 유지", text)
+        self.assertIn("투자 논지", text)
+        self.assertIn("변화 없음", text)
+        self.assertNotIn("DCA", text)
         self.assertNotIn("-1.2", text)
         self.assertNotIn("-2.0", text)
+
+    def test_thesis_damage_requires_and_displays_strong_evidence(self):
+        blocks = hm.build_decision_summary_blocks(
+            price=hm.PriceData(change_pct=-1.2),
+            benchmark_pct=-0.5,
+            news=[{
+                "summary": "연간 가이던스 하향",
+                "translation": "회사가 연간 매출과 영업이익 전망을 낮췄습니다.",
+                "thesis_impact": "damage",
+                "impact_reason": "수요와 수익성 기대가 동시에 약화됐습니다.",
+                "confidence": "high",
+            }],
+            filings=[],
+            source_health={"Yahoo": "정상", "AI": "정상"},
+        )
+
+        text = visible_text(blocks)
+        self.assertIn("훼손 가능성", text)
+        self.assertIn("투자 논지 훼손 근거", text)
+        self.assertIn("연간 가이던스 하향", text)
+        self.assertIn("수요와 수익성 기대가 동시에 약화", text)
+
+    def test_medium_confidence_damage_is_downgraded_to_review(self):
+        blocks = hm.build_decision_summary_blocks(
+            price=hm.PriceData(change_pct=-1.2),
+            benchmark_pct=-0.5,
+            news=[{
+                "summary": "확인되지 않은 우려",
+                "translation": "기사에서 우려를 제기했습니다.",
+                "thesis_impact": "damage",
+                "impact_reason": "추가 확인이 필요합니다.",
+                "confidence": "medium",
+            }],
+            filings=[],
+            source_health={"AI": "정상"},
+        )
+
+        text = visible_text(blocks)
+        self.assertIn("확인 필요", text)
+        self.assertNotIn("훼손 가능성", text)
+
+    def test_valuation_and_law_firm_news_is_prefiltered(self):
+        news = [
+            {"title": "VRT Seen 11% Overvalued After Investigation", "link": "", "hash": "a"},
+            {"title": "Shareholder Alert: Law Firm Investigation on Behalf of VRT Investors", "link": "", "hash": "b"},
+        ]
+        with patch.object(hm.requests, "post") as post:
+            analyzed = hm.translate_news(news)
+
+        post.assert_not_called()
+        self.assertTrue(all(item["skip"] for item in analyzed))
+        self.assertEqual(hm.analyzed_news_hashes(analyzed), ["a", "b"])
 
     def test_volume_activity_uses_prior_20_sessions(self):
         activity = hm.calculate_volume_activity([100] * 20 + [160])
@@ -247,6 +295,43 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn('if [ -f "$file" ]', workflow)
         self.assertIn('git add -f -- "$file"', workflow)
 
+    def test_workflow_has_no_dca_modes_or_inputs(self):
+        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+
+        self.assertNotIn("dca_status", workflow)
+        self.assertNotIn("dca_update", workflow)
+        self.assertNotIn("DCA_SHARES", workflow)
+        self.assertNotIn("DCA_PRICE", workflow)
+
+    def test_scheduled_alert_paths_do_not_build_dca_outputs(self):
+        source = inspect.getsource(hm.run_close) + inspect.getsource(hm.run_weekly)
+
+        self.assertNotIn("dca", source.lower())
+
+    def test_primary_alert_blocks_use_clean_text_without_status_emoji(self):
+        blocks = []
+        blocks += hm.format_beta_block({
+            "actual_pct": -1.0,
+            "benchmark_pct": -0.5,
+            "peer_changes": {"ETN": -0.2},
+        })
+        blocks += hm.format_volume_activity_block(
+            hm.make_volume_activity(160, 100), finalized=True
+        )
+        blocks += hm.format_technicals_block(hm.TechnicalSignals(rsi_14=45.0))
+        blocks += hm.format_options_block(hm.OptionsData(pcr=1.2, pcr_signal="neutral"))
+        blocks += hm.format_short_block(hm.ShortInterestData(short_pct=50.0))
+        blocks += hm.format_news_block([{
+            "summary": "가이던스 유지",
+            "translation": "회사가 기존 가이던스를 유지했습니다.",
+            "thesis_impact": "neutral",
+            "impact_reason": "장기 전망 변화는 없습니다.",
+        }])
+        text = visible_text(blocks)
+
+        for emoji in "🔔📊📐🏛📰🧮🛡📈🩳🔥⚪🔴🟢🟡🚀💥🐋⚠":
+            self.assertNotIn(emoji, text)
+
     def test_volume_below_threshold_is_not_exploded(self):
         activity = hm.calculate_volume_activity([100] * 20 + [149])
 
@@ -292,7 +377,7 @@ class ProductContractTest(unittest.TestCase):
         activity = hm.calculate_volume_activity([100] * 20 + [160])
         text = visible_text(hm.format_volume_activity_block(activity, finalized=True))
 
-        self.assertIn("거래량 터짐", text)
+        self.assertIn("평균 대비 급증", text)
         self.assertIn("당일 거래량", text)
         self.assertIn("20일 평균", text)
         self.assertIn("1.60x", text)
@@ -301,8 +386,8 @@ class ProductContractTest(unittest.TestCase):
         activity = hm.calculate_volume_activity([100] * 20 + [149])
         text = visible_text(hm.format_volume_activity_block(activity, finalized=False))
 
-        self.assertIn("장중 거래량 기준 미달", text)
-        self.assertNotIn("거래량 안 터짐", text)
+        self.assertIn("장중 기준 미달", text)
+        self.assertNotIn("평균 범위", text)
 
     def test_volume_explosion_counts_as_important_change(self):
         blocks = hm.build_decision_summary_blocks(
@@ -326,7 +411,8 @@ class ProductContractTest(unittest.TestCase):
         )
         text = visible_text(blocks)
         self.assertIn("판정 보류", text)
-        self.assertIn("점검 필요", text)
+        self.assertIn("확인 불가", text)
+        self.assertNotIn("DCA", text)
         self.assertNotIn("새로운 중요 사건 없음", text)
 
     def test_open_market_sale_requires_review(self):
@@ -339,7 +425,8 @@ class ProductContractTest(unittest.TestCase):
             source_health={"Yahoo": "정상", "SEC": "정상"},
         )
         text = visible_text(blocks)
-        self.assertIn("점검 필요", text)
+        self.assertIn("확인 필요", text)
+        self.assertIn("내부자 장내 매도", text)
 
     def test_form4_disposition_is_not_labeled_open_market_sale(self):
         transaction = ET.fromstring("""

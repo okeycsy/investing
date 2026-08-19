@@ -7,7 +7,7 @@ v3.2 fixes:
   2. FINRA short interest → 당일 제외, float 파싱 수정
   3. Yahoo Options 401 → graceful skip
   4. run_close() 에 등락률 로깅 추가
-  5. 4% 미만일 때도 종가 방향 이모지 표시
+  5. 4% 미만일 때도 종가 방향 표시
 """
 
 import os
@@ -78,6 +78,29 @@ PEER_DISPLAY_NAMES = {
     "NVT": "nVent",
     "GEV": "GE 버노바",
 }
+LOW_VALUE_NEWS_TITLE_PATTERNS = (
+    "overvalued",
+    "undervalued",
+    "fair value",
+    "price target",
+    "better buy",
+    "should you buy",
+    "stock comparison",
+    "top stock",
+    "stocks to buy",
+    "investigation on behalf",
+    "shareholder alert",
+    "shareholder investigation",
+    "investors who lost money",
+    "law firm investigation",
+    "과대평가",
+    "저평가",
+    "적정가치",
+    "목표주가",
+    "종목 비교",
+    "주식 비교",
+    "매수해야",
+)
 
 
 def _set_source_health(source: str, status: str):
@@ -234,10 +257,6 @@ def load_state() -> dict:
         "price_alert_date": "",
         "volume_alert_date": "",
         "pending_morning_alert": None,
-        # ── DCA 포트폴리오 ──
-        "dca_shares": 0.0,        # 총 보유 수량
-        "dca_avg_price": 0.0,     # 평균 매수가
-        "dca_history": [],        # 매수 이력
     }
 
 
@@ -259,6 +278,7 @@ def load_weekly_state() -> dict:
         "news_headlines": [],
         "company_filings": [],
         "thesis_impacts": [],
+        "thesis_events": [],
         "rsi_readings": [],
         "pcr_readings": [],
         "short_readings": [],
@@ -763,14 +783,6 @@ def _peer_group_name(peer_changes: dict) -> str:
     return " · ".join(names) or "피어"
 
 
-def _relative_icon(outcome: str) -> str:
-    if outcome == "아웃퍼폼":
-        return "🟢"
-    if outcome == "언더퍼폼":
-        return "🔴"
-    return "⚪"
-
-
 def fetch_relative_performance(actual_pct: float) -> dict:
     benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
     peer_changes = {
@@ -803,15 +815,15 @@ def format_beta_block(bd: dict) -> list:
     lines = [f"{DISPLAY_TICKER}: *{direction}*"]
     if benchmark_pct is not None:
         lines.append(
-            f"{_relative_icon(benchmark_outcome)} 반도체 지수({BETA_BENCHMARK}) 대비 "
+            f"반도체 지수({BETA_BENCHMARK}) 대비 "
             f"*{benchmark_outcome}*"
         )
     if peer_avg is not None:
         lines.append(
-            f"{_relative_icon(peer_outcome)} 피어 평균(동일가중: {_peer_group_name(peer_changes)}) 대비 "
+            f"피어 평균(동일가중: {_peer_group_name(peer_changes)}) 대비 "
             f"*{peer_outcome}*"
         )
-    return [_sec("*📐 방향 / 상대 흐름*\n" + "\n".join(lines))]
+    return [_sec("*방향 / 상대 흐름*\n" + "\n".join(lines))]
 
 
 def next_price_alert_level(
@@ -1066,7 +1078,7 @@ def format_appstore_rank_block(prev: Optional[dict], curr: dict) -> list:
     rank_o = curr.get("rank_overall")
 
     if rank_f is None:
-        return [_sec("*📱 App Store*  금융 카테고리 200위권 밖")]
+        return [_sec("*App Store*\n금융 카테고리 200위권 밖")]
 
     def trend(prev_r, curr_r):
         if prev_r is None or curr_r is None:
@@ -1084,16 +1096,16 @@ def format_appstore_rank_block(prev: Optional[dict], curr: dict) -> list:
     # FOMO 경고: 금융 top 5 진입
     fomo_warn = ""
     if rank_f is not None and rank_f <= 5:
-        fomo_warn = "\n⚡ *FOMO 경보* — 금융 카테고리 Top 5 진입! 리테일 수급 유입 가능"
+        fomo_warn = "\n*과열 경보* · 금융 카테고리 Top 5 진입, 리테일 수급 유입 가능"
 
     lines = []
     if rank_f is not None:
-        lines.append(f"💰 금융 카테고리: *#{rank_f}*{trend(prev_f, rank_f)}")
+        lines.append(f"금융 카테고리: *#{rank_f}*{trend(prev_f, rank_f)}")
     if rank_o is not None:
-        lines.append(f"📊 전체 무료 앱: *#{rank_o}*{trend(prev_o, rank_o)}")
+        lines.append(f"전체 무료 앱: *#{rank_o}*{trend(prev_o, rank_o)}")
 
     return [
-        _sec(f"*📱 App Store 순위 (미국)*\n" + "  |  ".join(lines) + fomo_warn),
+        _sec(f"*App Store 순위 (미국)*\n" + "  |  ".join(lines) + fomo_warn),
         _ctx("Apple RSS 기준 | 전일 대비 ▲상승 ▼하락"),
     ]
 @dataclass
@@ -1229,7 +1241,6 @@ class SafetyMargin:
     peer_coin_pct: float = 0.0
     peer_mstr_pct: float = 0.0
     peer_changes: dict = field(default_factory=dict)
-    dca_attraction: int = 0            # DCA 매력도 1~10
 
 
 def check_safety_margin(
@@ -1240,7 +1251,7 @@ def check_safety_margin(
     relative_performance: Optional[dict] = None,
 ) -> Optional[SafetyMargin]:
     """
-    볼린저 밴드 + 모멘텀 + 베타 초과 이탈 + 피어 분기 + DCA 매력도 통합 분석
+    볼린저 밴드 + 모멘텀 + 베타 초과 이탈 + 피어 분기를 분석한다.
     """
     log.info("Safety Margin 분석 시작...")
 
@@ -1339,50 +1350,6 @@ def check_safety_margin(
         peer_log = " / ".join(f"{p} {v:+.2f}%" for p, v in peer_changes.items())
         log.info(f"Divergence Warning: {TICKER} {actual_pct:+.2f}% 하락 가속 | {peer_log} 반등")
 
-    # ── 5. DCA 매력도 점수 1~10 ─────────────────────
-    # 3가지 요소 합산: RSI(0~4점) + BB 이탈(0~3점) + 베타 초과 이탈(0~3점)
-    score = 0
-
-    # RSI 계산 (closes_daily 재사용)
-    rsi = 50.0
-    if len(closes_daily) >= 15:
-        from types import SimpleNamespace
-        ts_tmp = get_technical_signals(closes_daily)
-        rsi = ts_tmp.rsi_14
-
-    if rsi <= 25:
-        score += 4
-    elif rsi <= 30:
-        score += 3
-    elif rsi <= 40:
-        score += 2
-    elif rsi <= 50:
-        score += 1
-
-    if bb_signal == "extreme_oversold":
-        score += 3
-    elif bb_signal == "oversold":
-        score += 2
-    elif pct_from_lower < 5:
-        score += 1
-
-    # 베타 초과 이탈: 기대보다 더 빠졌을수록 통계적 반등 가능성
-    if beta_excess_pct <= -5:
-        score += 3
-    elif beta_excess_pct <= -3:
-        score += 2
-    elif beta_excess_pct <= -1:
-        score += 1
-
-    # 하락 가속 중이면 감점
-    if momentum_signal == "accelerating":
-        score = max(0, score - 1)
-    if divergence_warning:
-        score = max(0, score - 1)
-
-    dca_attraction = max(1, min(10, score))
-    log.info(f"DCA 매력도: {dca_attraction}/10 (RSI={rsi:.1f}, BB={bb_signal}, β초과={beta_excess_pct:+.2f}%)")
-
     return SafetyMargin(
         sma20=round(sma20, 2),
         bb_upper=bb_upper,
@@ -1399,7 +1366,6 @@ def check_safety_margin(
         peer_coin_pct=peer_coin_pct,
         peer_mstr_pct=peer_mstr_pct,
         peer_changes=peer_changes,
-        dca_attraction=dca_attraction,
     )
 
 
@@ -1473,6 +1439,12 @@ def _fetch_article_body(url: str, max_chars: int = 600) -> str:
         return ""
 
 
+def is_low_value_news_title(title: str) -> bool:
+    """투자 논지 변화로 오인하기 쉬운 평가·홍보성 제목을 거른다."""
+    normalized = re.sub(r"\s+", " ", (title or "").lower()).strip()
+    return any(pattern in normalized for pattern in LOW_VALUE_NEWS_TITLE_PATTERNS)
+
+
 def translate_news(news: list) -> list:
     """
     설정 종목 관련 뉴스 필터링 + 한국어 요약(15자) + 기사 핵심 번역(2~3문장)
@@ -1481,20 +1453,38 @@ def translate_news(news: list) -> list:
         return news
     for item in news:
         item["analysis_status"] = "pending"
+        item["skip"] = False
+
+    prefiltered_indices = {
+        index
+        for index, item in enumerate(news)
+        if is_low_value_news_title(item.get("title", ""))
+    }
+    for index in prefiltered_indices:
+        news[index]["analysis_status"] = "success"
+        news[index]["skip"] = True
+    if len(prefiltered_indices) == len(news):
+        _set_source_health("AI 뉴스", "평가성 기사 제외")
+        return news
+
     if not ANTHROPIC_API_KEY:
         log.info("translate_news skip — ANTHROPIC_API_KEY 없음")
-        for item in news:
-            item["analysis_status"] = "unavailable"
+        for index, item in enumerate(news):
+            if index not in prefiltered_indices:
+                item["analysis_status"] = "unavailable"
         _set_source_health("AI 뉴스", "키 없음")
         return news
 
     # 기사 본문 발췌 (관련성 판단 전 미리 fetch)
-    for n in news:
-        n["body"] = _fetch_article_body(n.get("link", ""))
+    for index, item in enumerate(news):
+        if index not in prefiltered_indices:
+            item["body"] = _fetch_article_body(item.get("link", ""))
 
     # 제목 + 본문 발췌 함께 전달
     articles = []
     for i, n in enumerate(news):
+        if i in prefiltered_indices:
+            continue
         entry = f"{i+1}. [제목] {n['title']}"
         if n.get("body"):
             entry += f"\n   [본문] {n['body']}"
@@ -1518,11 +1508,13 @@ def translate_news(news: list) -> list:
 
 규칙:
 1. {COMPANY_NAME or TICKER} / {DISPLAY_TICKER} 주가에 직접 영향을 주는 뉴스만 포함
-2. 포함 기준: 실적, 가이던스, 수주, backlog, 마진, 현금흐름, 생산능력, 규제, 경쟁, 경영진, 주요 제품, 소송
-3. 제외 기준: 업종 일반 뉴스, 금리 일반론, 다른 회사 뉴스에 {TICKER}가 언급만 된 경우
+2. 포함 기준: 실적, 가이던스, 수주, backlog, 마진, 현금흐름, 생산능력, 규제, 경쟁, 경영진, 주요 제품, 확인된 중대 소송·규제 사건
+3. 제외 기준: 업종 일반 뉴스, 금리 일반론, 다른 회사 뉴스에 {TICKER}가 언급만 된 경우, 목표주가·적정가치·고평가/저평가 의견, 종목 비교·추천 목록, 로펌의 주주 모집성 조사 홍보
 4. 기사에 없는 사실을 추정하지 말고 사실과 해석을 분리
 5. 반드시 한국어로만 출력
 6. 현재 주가, 목표주가, 정확한 일일 등락률은 출력하지 말 것
+7. damage는 회사가 확인한 가이던스 하향, 수주·backlog 악화, 구조적 마진/현금흐름 훼손, 주요 고객 상실, 회계 문제, 규제기관의 확인된 중대 조치처럼 장기 논지를 직접 훼손하는 고확신 사실에만 사용
+8. 단순 주가 하락, 밸류에이션 의견, 애널리스트 평가, 확인되지 않은 의혹은 damage로 분류하지 말 것
 
 각 뉴스에 대해 JSON 배열로만 응답 (다른 텍스트 없이):
 [
@@ -1559,8 +1551,9 @@ def translate_news(news: list) -> list:
         )
         if resp.status_code != 200:
             log.error(f"Claude API 오류 (뉴스 번역): HTTP {resp.status_code} — {resp.text[:200]}")
-            for item in news:
-                item["analysis_status"] = "failed"
+            for index, item in enumerate(news):
+                if index not in prefiltered_indices:
+                    item["analysis_status"] = "failed"
             _set_source_health("AI 뉴스", "실패")
             return news
 
@@ -1574,11 +1567,12 @@ def translate_news(news: list) -> list:
         if not isinstance(results, list):
             raise ValueError("뉴스 분석 응답이 JSON 배열이 아님")
 
-        for item in news:
-            item["analysis_status"] = "failed"
-            item["skip"] = True
+        for index, item in enumerate(news):
+            if index not in prefiltered_indices:
+                item["analysis_status"] = "failed"
+                item["skip"] = True
 
-        analyzed_indices = set()
+        analyzed_indices = set(prefiltered_indices)
         relevant_count = 0
         for item in results:
             try:
@@ -1586,6 +1580,8 @@ def translate_news(news: list) -> list:
             except (TypeError, ValueError):
                 continue
             if not (0 <= idx < len(news)):
+                continue
+            if idx in prefiltered_indices:
                 continue
             is_relevant = item.get("relevant")
             if not isinstance(is_relevant, bool):
@@ -1612,9 +1608,12 @@ def translate_news(news: list) -> list:
                 news[idx]["summary"]     = summary
                 news[idx]["translation"] = translation
                 news[idx]["sentiment"]   = item.get("sentiment", "neutral")
-                news[idx]["thesis_impact"] = thesis_impact
                 news[idx]["impact_reason"] = impact_reason
-                news[idx]["confidence"] = item.get("confidence", "medium")
+                confidence = item.get("confidence", "medium")
+                if thesis_impact == "damage" and confidence != "high":
+                    thesis_impact = "risk"
+                news[idx]["thesis_impact"] = thesis_impact
+                news[idx]["confidence"] = confidence
         log.info(
             f"뉴스 번역 완료: 응답 {len(results)}건 — "
             f"관련 {relevant_count}건 / 분석 완료 {len(analyzed_indices)}건"
@@ -1627,8 +1626,9 @@ def translate_news(news: list) -> list:
             _set_source_health("AI 뉴스", "정상")
     except Exception as e:
         log.warning(f"뉴스 번역 예외: {e}")
-        for item in news:
-            item["analysis_status"] = "failed"
+        for index, item in enumerate(news):
+            if index not in prefiltered_indices:
+                item["analysis_status"] = "failed"
         _set_source_health("AI 뉴스", "실패")
 
     return news
@@ -2224,41 +2224,6 @@ def calculate_dca_technical_score(
     log.info(f"DCA 기술지표 점수: {total}/100 ({grade})")
     return DCATechnicalScore(layers=layers, total=total,
                              grade=grade, grade_emoji=grade_emoji)
-
-
-def format_dca_technical_block(score: DCATechnicalScore) -> list:
-    """
-    5-Layer DCA 기술지표 점수 Slack 블록.
-    각 레이어별로 분리, 항목마다 (점수/최대) 형식 표기.
-    """
-    layer_emoji = {"A": "📊", "B": "📈", "C": "⚡", "D": "🎯", "E": "🔭"}
-    fill = int(score.total / 100 * 10)
-    bar = "█" * fill + "░" * (10 - fill)
-
-    if score.total >= 80:
-        condition = "눌림 신호 강함"
-    elif score.total >= 60:
-        condition = "눌림 신호 있음"
-    elif score.total >= 40:
-        condition = "기술 신호 혼재"
-    elif score.total >= 20:
-        condition = "진입 신호 약함"
-    else:
-        condition = "기술 위험 우세"
-
-    blocks = [_sec(
-        f"*🧮 DCA 보조 기술환경: {score.total}/100*  {condition}\n`{bar}`"
-    )]
-
-    for layer in score.layers:
-        emoji = layer_emoji.get(layer.layer_id, "•")
-        lines = [f"*{emoji} {layer.layer_id}. {layer.name}  —  {layer.pts}/{layer.max_pts}pts*"]
-        for item in layer.items:
-            lines.append(f"({item.score}/{item.max_pts}) *{item.label}*: {item.desc}")
-        blocks.append(_ctx("\n".join(lines)))
-
-    blocks.append(_ctx("기술지표는 기존 DCA 계획을 변경하는 단독 근거가 아닙니다."))
-    return blocks
 
 
 # ─────────────────────────────────────────────
@@ -3292,16 +3257,6 @@ def _extract_hood_from_infotable(xml_text: str) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# 8. DCA 시그널 (BUG 4 FIX: 결론 명확화, 가격 숫자 제거)
-# ─────────────────────────────────────────────
-def _is_recent(date_str: str, days: int) -> bool:
-    try:
-        return (datetime.now() - datetime.strptime(date_str, "%Y-%m-%d")).days <= days
-    except Exception:
-        return False
-
-
-# ─────────────────────────────────────────────
 # Slack 포맷터 (Section + Context 구조)
 # ─────────────────────────────────────────────
 def _ctx(text: str) -> dict:
@@ -3367,15 +3322,16 @@ def format_volume_activity_block(
     if not activity:
         return []
     if activity.exploded:
-        headline = "🔥 거래량 터짐"
+        result = "평균 대비 급증"
     elif finalized:
-        headline = "⚪ 거래량 안 터짐"
+        result = "평균 범위"
     else:
-        headline = "⏳ 장중 거래량 기준 미달"
+        result = "장중 기준 미달"
     volume_label = "당일 거래량" if finalized else "당일 누적 거래량"
     return [
         _sec(
-            f"*{headline}*\n"
+            f"*거래량*\n"
+            f"판정: *{result}*\n"
             f"{volume_label} *{activity.current_volume:,}주*"
         ),
         _ctx(
@@ -3386,22 +3342,119 @@ def format_volume_activity_block(
     ]
 
 
-def _thesis_decision(news: list, filings: list, insiders: Optional[list] = None) -> tuple[str, str]:
-    impacts = {item.get("thesis_impact", "neutral") for item in news}
-    impacts.update(
-        getattr(filing, "thesis_impact", "neutral")
-        for filing in filings
-    )
+def _thesis_evidence(
+    news: list,
+    filings: list,
+    insiders: Optional[list] = None,
+) -> list[dict]:
+    evidence = []
+    for item in news:
+        if item.get("impact") in {"strengthen", "risk", "damage"} and item.get("title") and item.get("detail"):
+            evidence.append({
+                "impact": item["impact"],
+                "title": str(item["title"]).strip(),
+                "detail": str(item["detail"]).strip(),
+            })
+            continue
+        if item.get("skip") or not item.get("summary") or not item.get("impact_reason"):
+            continue
+        impact = item.get("thesis_impact", "neutral")
+        confidence = item.get("confidence", "medium")
+        if impact == "damage" and confidence != "high":
+            impact = "risk"
+        if impact == "risk" and confidence == "low":
+            impact = "neutral"
+        if impact not in {"strengthen", "risk", "damage"}:
+            continue
+        facts = str(item.get("translation", "")).strip()
+        reason = str(item.get("impact_reason", "")).strip()
+        detail = facts
+        if reason and reason not in facts:
+            detail = f"{facts}\n판단 근거: {reason}" if facts else reason
+        evidence.append({
+            "impact": impact,
+            "title": str(item["summary"]).strip(),
+            "detail": detail,
+        })
+
+    for filing in filings:
+        if isinstance(filing, str) or getattr(filing, "skip", False):
+            continue
+        impact = getattr(filing, "thesis_impact", "neutral")
+        title = str(getattr(filing, "summary", "")).strip()
+        reason = str(getattr(filing, "impact_reason", "")).strip()
+        if impact not in {"strengthen", "risk", "damage"} or not title or not reason:
+            continue
+        facts = [str(fact).strip() for fact in getattr(filing, "key_facts", []) if str(fact).strip()]
+        detail_parts = facts[:2]
+        if reason not in detail_parts:
+            detail_parts.append(f"판단 근거: {reason}")
+        evidence.append({
+            "impact": impact,
+            "title": f"{getattr(filing, 'form', 'SEC')} · {title}",
+            "detail": "\n".join(detail_parts),
+        })
+
+    for trade in insiders or []:
+        if trade.trade_type != "Sale":
+            continue
+        scale = "대규모" if trade.total_value >= 1_000_000 else "주요"
+        evidence.append({
+            "impact": "risk",
+            "title": f"{scale} 내부자 장내 매도",
+            "detail": f"{trade.filer or '내부자'}가 {trade.shares:,}주를 장내 매도했습니다. 단독으로 논지 훼손을 뜻하지는 않지만 배경 확인이 필요합니다.",
+        })
+    return evidence
+
+
+def remember_weekly_thesis_events(
+    weekly_state: dict,
+    *,
+    news: Optional[list] = None,
+    filings: Optional[list] = None,
+    insiders: Optional[list] = None,
+):
+    events = _thesis_evidence(news or [], filings or [], insiders or [])
+    if not events:
+        return
+    existing = weekly_state.setdefault("thesis_events", [])
+    keys = {(item.get("impact"), item.get("title"), item.get("detail")) for item in existing}
+    for event in events:
+        key = (event["impact"], event["title"], event["detail"])
+        if key not in keys:
+            existing.append(event)
+            keys.add(key)
+    weekly_state["thesis_events"] = existing[-20:]
+
+
+def _thesis_decision(news: list, filings: list, insiders: Optional[list] = None) -> str:
+    impacts = {item["impact"] for item in _thesis_evidence(news, filings, insiders)}
     if "damage" in impacts:
-        return "훼손 가능성", "중단 검토"
-    has_open_market_sale = any(
-        trade.trade_type == "Sale" for trade in (insiders or [])
-    )
-    if "risk" in impacts or has_open_market_sale:
-        return "확인 필요", "점검 필요"
+        return "훼손 가능성"
+    if "risk" in impacts:
+        return "확인 필요"
     if "strengthen" in impacts:
-        return "강화 근거 확인", "기존 계획 유지"
-    return "변화 없음", "기존 계획 유지"
+        return "강화 근거 확인"
+    return "변화 없음"
+
+
+def _format_thesis_evidence_blocks(thesis: str, evidence: list[dict]) -> list:
+    impact_by_thesis = {
+        "훼손 가능성": ("damage", "투자 논지 훼손 근거"),
+        "확인 필요": ("risk", "투자 논지 위험 근거"),
+        "강화 근거 확인": ("strengthen", "투자 논지 강화 근거"),
+    }
+    target = impact_by_thesis.get(thesis)
+    if not target:
+        return []
+    impact, heading = target
+    selected = [item for item in evidence if item["impact"] == impact][:3]
+    if not selected:
+        return []
+    lines = [f"*{heading}*"]
+    for item in selected:
+        lines.append(f"\n*{item['title']}*\n{item['detail']}")
+    return [_sec("\n".join(lines))]
 
 
 def build_decision_summary_blocks(
@@ -3434,7 +3487,8 @@ def build_decision_summary_blocks(
     if peer_avg is not None:
         relative_parts.append(f"피어 평균 {peer_outcome}")
     relative = " · ".join(relative_parts) or "비교 불가"
-    thesis, dca = _thesis_decision(news, filings, insiders)
+    evidence = _thesis_evidence(news, filings, insiders)
+    thesis = _thesis_decision(news, filings, insiders)
     material_news = [item for item in news if not item.get("skip") and item.get("summary")]
     directional_insiders = [
         trade for trade in (insiders or [])
@@ -3454,60 +3508,62 @@ def build_decision_summary_blocks(
     )
     if has_source_failure and not event_count:
         event_text = "판정 보류 (일부 데이터 실패)"
-        thesis, dca = "확인 불가", "점검 필요"
+        thesis = "확인 불가"
     health_text = " · ".join(f"{name} {status}" for name, status in health.items()) or "수집 상태 확인 불가"
-    icon = "🔴" if dca == "중단 검토" else "🟡" if dca == "점검 필요" else "🟢"
-    return [
+    blocks = [
         _sec(
-            f"*{icon} 오늘의 판단*\n"
+            f"*오늘의 판단*\n"
             f"시장 방향: *{direction}*\n"
-            f"상대 성과: *{relative}*\n"
+            f"상대 흐름: *{relative}*\n"
             f"핵심 변화: *{event_text}*\n"
-            f"투자 논지: *{thesis}*\n"
-            f"DCA 계획: *{dca}*"
+            f"투자 논지: *{thesis}*"
         ),
+    ]
+    blocks.extend(_format_thesis_evidence_blocks(thesis, evidence))
+    blocks.extend([
         _ctx(f"데이터 상태: {health_text}"),
         {"type": "divider"},
-    ]
+    ])
+    return blocks
 
 
 def format_technicals_block(ts: TechnicalSignals) -> list:
     if ts.rsi_14 <= 30:
-        rsi_line = f"🟢 *RSI {ts.rsi_14}* — 기술적 과매도"
+        rsi_line = f"RSI *{ts.rsi_14}* · 기술적 과매도"
     elif ts.rsi_14 <= 40:
-        rsi_line = f"🟡 *RSI {ts.rsi_14}* — 약세 구간"
+        rsi_line = f"RSI *{ts.rsi_14}* · 약세 구간"
     elif ts.rsi_14 >= 70:
-        rsi_line = f"🔴 *RSI {ts.rsi_14}* — 기술적 과열"
+        rsi_line = f"RSI *{ts.rsi_14}* · 기술적 과열"
     else:
-        rsi_line = f"⚪ *RSI {ts.rsi_14}* — 중립"
+        rsi_line = f"RSI *{ts.rsi_14}* · 중립"
 
     macd_line = ""
     if ts.macd_alert == "bullish_cross":
-        macd_line = "  🟢 MACD 골든크로스"
+        macd_line = "\nMACD · 골든크로스"
     elif ts.macd_alert == "bearish_cross":
-        macd_line = "  🔴 MACD 데드크로스"
+        macd_line = "\nMACD · 데드크로스"
 
     return [
-        _sec(f"*📊 기술 지표*\n{rsi_line}{macd_line}"),
+        _sec(f"*기술 지표*\n{rsi_line}{macd_line}"),
         _ctx(f"MACD {ts.macd_line:+.4f} | Signal {ts.macd_signal:+.4f} | Hist {ts.macd_histogram:+.4f}"),
     ]
 
 
 def format_options_block(od: OptionsData) -> list:
     sig = {
-        "heavy_hedging": "🟡 과도한 풋 헤징",
-        "bullish": "🟢 콜 우세",
-        "neutral": "⚪ 중립",
+        "heavy_hedging": "풋 헤징 강함",
+        "bullish": "콜 우세",
+        "neutral": "중립",
     }
     return [
-        _sec(f"*📈 옵션 시장*  PCR: *{od.pcr:.3f}* — {sig.get(od.pcr_signal, '')}"),
+        _sec(f"*옵션 시장*\nPCR *{od.pcr:.3f}* · {sig.get(od.pcr_signal, '')}"),
         _ctx(f"풋 OI {od.total_puts:,} | 콜 OI {od.total_calls:,}"),
     ]
 
 
 def format_short_block(si: ShortInterestData) -> list:
     return [
-        _sec(f"*🩳 FINRA 일일 공매도 체결 비중*  *{si.short_pct:.1f}%*"),
+        _sec(f"*FINRA 일일 공매도 체결 비중*\n*{si.short_pct:.1f}%*"),
         _ctx(
             f"기준일 {si.date} | 공매도 체결 {si.short_volume:,} / 보고 거래량 {si.total_volume:,} | "
             "미결제 공매도 잔고(short interest)가 아닙니다."
@@ -3519,12 +3575,11 @@ def format_insider_block(trades: list) -> list:
     if not trades:
         return []
 
-    # 거래 유형별 표시 맵
     TYPE_MAP = {
-        "Purchase": ("🟢", "장내 매수"),
-        "Sale":     ("🔴", "장내 매도"),
-        "Award":    ("🔵", "RSU 귀속"),
-        "Disposition": ("⚪", "비시장 처분 가능"),
+        "Purchase": "장내 매수",
+        "Sale": "장내 매도",
+        "Award": "RSU 귀속",
+        "Disposition": "비시장 처분 가능",
     }
     # txn_code 보조 레이블 (Purchase/Sale 내에서 세분화)
     CODE_LABEL = {
@@ -3536,7 +3591,7 @@ def format_insider_block(trades: list) -> list:
 
     lines = []
     for t in trades[:6]:
-        emoji, type_label = TYPE_MAP.get(t.trade_type, ("⚪", t.trade_type))
+        type_label = TYPE_MAP.get(t.trade_type, t.trade_type)
         # txn_code로 세분화된 레이블 우선 사용
         if t.txn_code in CODE_LABEL:
             type_label = CODE_LABEL[t.txn_code]
@@ -3558,13 +3613,13 @@ def format_insider_block(trades: list) -> list:
         source_link = f"  <{t.url}|원문>" if t.url else ""
 
         lines.append(
-            f"{emoji} *{t.filer}*{title_str}\n"
-            f"   {type_label}  {t.shares:,}주  {scale}  _{t.date}_{source_link}"
+            f"*{type_label} · {t.filer}*{title_str}\n"
+            f"{t.shares:,}주 · {scale} · _{t.date}_{source_link}"
         )
 
     return [
-        _sec("*🕴 내부자 거래*\n" + "\n".join(lines)),
-        _ctx("🟢 장내 매수  🔴 장내 매도  🔵 보상  ⚪ 비시장 처분 가능(방향성 판단 제외)"),
+        _sec("*내부자 거래*\n" + "\n".join(lines)),
+        _ctx("비시장 처분과 보상 귀속은 방향성 판단에서 제외합니다."),
     ]
 
 
@@ -3597,26 +3652,26 @@ def format_company_filings_block(filings: list) -> list:
     filings = alertable_company_filings(filings)
     if not filings:
         return []
-    blocks = [_sec("*🏛 발행사 중요 SEC 공시*")]
+    blocks = [_sec("*발행사 중요 SEC 공시*")]
     impact_labels = {
-        "strengthen": ("🟢", "논지 강화"),
-        "neutral": ("⚪", "중립"),
-        "risk": ("🟡", "위험 증가"),
-        "damage": ("🔴", "논지 훼손"),
+        "strengthen": "논지 강화",
+        "neutral": "중립",
+        "risk": "위험 증가",
+        "damage": "논지 훼손",
     }
     for filing in filings[:6]:
-        icon, impact = impact_labels.get(
+        impact = impact_labels.get(
             filing.thesis_impact,
-            ("⚪", "중립"),
+            "중립",
         )
         facts = "\n".join(f"• {fact}" for fact in filing.key_facts)
         report = f" · 보고기간 {filing.report_date}" if filing.report_date else ""
         blocks.append(_sec(
-            f"📄 *{filing.form} · {filing.summary}*{report}\n{facts}"
+            f"*{filing.form} · {filing.summary}*{report}\n{facts}"
         ))
         link = f"<{filing.url}|SEC 원문>" if filing.url else "SEC 제출정보"
         blocks.append(_ctx(
-            f"{icon} 해석: *{impact}* — {filing.impact_reason} | "
+            f"해석: *{impact}* · {filing.impact_reason} | "
             f"제출 {filing.filing_date} | {link}"
         ))
     return blocks
@@ -3640,9 +3695,9 @@ def format_13f_block(filings: list) -> list:
             "UNCHANGED": "유지",
         }.get(f.change_type, "보고")
         link = f"  <{f.url}|원문>" if f.url else ""
-        lines.append(f"📋 *{f.institution}* · {change}{detail}  _{f.filing_date}_{link}")
+        lines.append(f"*{f.institution}* · {change}{detail}  _{f.filing_date}_{link}")
     return [
-        _sec("*🏛 13F 기관 포지션*\n" + "\n".join(lines)),
+        _sec("*13F 기관 포지션*\n" + "\n".join(lines)),
     ]
 
 
@@ -3650,7 +3705,7 @@ def format_news_block(news: list) -> list:
     relevant = [n for n in news if not n.get("skip") and n.get("summary")]
     if not relevant:
         return []
-    blocks = []
+    blocks = [_sec("*주요 뉴스*")]
     impact_labels = {
         "strengthen": "논지 강화",
         "neutral": "논지 중립",
@@ -3658,8 +3713,7 @@ def format_news_block(news: list) -> list:
         "damage": "논지 훼손",
     }
     for n in relevant[:5]:
-        tag = "🟢" if n.get("sentiment") == "positive" else "🔴" if n.get("sentiment") == "negative" else "⚪"
-        blocks.append(_sec(f"*📰 {tag} {n['summary']}*"))
+        blocks.append(_sec(f"*{n['summary']}*"))
         if n.get("translation"):
             blocks.append(_ctx(f"사실: {n['translation']}"))
         impact = impact_labels.get(n.get("thesis_impact", "neutral"), "논지 중립")
@@ -3677,11 +3731,10 @@ def format_news_block(news: list) -> list:
 
 
 def format_volume_profile_block(vp: VolumeProfile) -> list:
-    poc_emoji = "🔴" if vp.poc_signal == "resistance" else "🟢"
     poc_desc = "매물대 상단 (저항)" if vp.poc_signal == "resistance" else "지지선 확보"
-    whale = "  🐋 *Whale Activity Detected*" if vp.whale_detected else ""
+    whale = " · 대규모 거래 감지" if vp.whale_detected else ""
     return [
-        _sec(f"*📊 수급 구조 (30분 POC)*  {poc_emoji} *{poc_desc}*{whale}"),
+        _sec(f"*수급 구조 (30분 POC)*\n*{poc_desc}*{whale}"),
         _ctx(f"30분 거래량 {vp.vol_30m:,} | 동시간대 5일평균 {vp.vol_avg_30m:,} | *{vp.vol_ratio:.1f}x*"),
     ]
 
@@ -3691,36 +3744,36 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
 
     # ── 볼린저 밴드 ──
     bb_map = {
-        "extreme_oversold": "🟢 *Extreme Oversold* — 밴드 하단 이탈, 통계적 반등 구간",
-        "oversold":         "🟡 *밴드 하단 근접* — 과매도 경계",
-        "overbought":       "🔴 *밴드 상단 돌파* — 과매수",
-        "normal":           "⚪ *밴드 내 정상*",
+        "extreme_oversold": "*극단적 과매도* · 밴드 하단 이탈, 통계적 반등 구간",
+        "oversold": "*밴드 하단 근접* · 과매도 경계",
+        "overbought": "*밴드 상단 돌파* · 과매수",
+        "normal": "*밴드 내 정상*",
     }
     mom_map = {
-        "accelerating":  "📉 하락 가속 — 추가 하락 주의",
-        "decelerating":  "📈 하락 둔화 — 저점 탐색 중",
-        "stable":        "➡️ 모멘텀 안정",
+        "accelerating": "하락 가속 · 추가 하락 주의",
+        "decelerating": "하락 둔화 · 저점 탐색 중",
+        "stable": "모멘텀 안정",
     }
     blocks.append(_sec(
-        f"*🛡 안전 마진*  {bb_map.get(sm.bb_signal, '')}  |  {mom_map.get(sm.momentum_signal, '')}"
+        f"*가격 위치와 모멘텀*\n{bb_map.get(sm.bb_signal, '')} · {mom_map.get(sm.momentum_signal, '')}"
     ))
 
     # ── 베타 초과 이탈 ──
     if sm.beta_excess_pct != 0:
         if sm.beta_excess_pct <= -3:
-            beta_line = "🟢 *벤치마크 기대보다 과도한 하락* — 원인 확인 필요"
+            beta_line = "*벤치마크 기대보다 과도한 하락* · 원인 확인 필요"
         elif sm.beta_excess_pct <= -1:
-            beta_line = "🟡 *벤치마크 기대보다 소폭 약세*"
+            beta_line = "*벤치마크 기대보다 소폭 약세*"
         elif sm.beta_excess_pct >= 3:
-            beta_line = "🟢 *벤치마크 기대보다 강한 상승*"
+            beta_line = "*벤치마크 기대보다 강한 상승*"
         else:
-            beta_line = "⚪ *벤치마크 기대 범위 내*"
+            beta_line = "*벤치마크 기대 범위 내*"
         blocks.append(_ctx(f"{BETA_BENCHMARK} 기준 상대 흐름: {beta_line}"))
 
     # ── 피어 분기 경고 (Divergence Warning만 유지, 일반 피어 수치는 상대강도 블록에서 표시) ──
     if sm.divergence_warning:
         blocks.append(_sec(
-            f"⚠️ *Divergence Warning*\n"
+            f"*개별 종목 이탈 경고*\n"
             f"{TICKER} 하락 가속 중인데 피어 그룹 반등 중 — 개별 악재 가능성"
         ))
         peer_text = "/".join(sm.peer_changes) or "피어 그룹"
@@ -3738,7 +3791,7 @@ def _footer() -> list:
     kst = datetime.now(KST).strftime("%m/%d %H:%M KST")
     return [
         {"type": "divider"},
-        _ctx(f"🤖 {TICKER} Monitor  |  {kst}"),
+        _ctx(f"{TICKER} Monitor | {kst}"),
     ]
 
 
@@ -3796,10 +3849,9 @@ def run_normal():
                 sent_direction=prev_dir,
             )
             if alert_level is not None:
-                emoji = "🚀" if direction == "up" else "💥"
                 label = _direction_label(price.change_pct)
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                    f"{emoji} *{DISPLAY_TICKER} 큰 폭 {label} 감지*"}})
+                    f"*{DISPLAY_TICKER} 큰 폭 {label} 감지*"}})
 
                 relative_performance = fetch_relative_performance(price.change_pct)
                 blocks.extend(format_beta_block(relative_performance))
@@ -3851,6 +3903,7 @@ def run_normal():
                 f"{filing.form}: {filing.summary} ({filing.filing_date})"
             )
             ws.setdefault("thesis_impacts", []).append(filing.thesis_impact)
+        remember_weekly_thesis_events(ws, filings=alert_filings)
 
     news = fetch_news()
     if initial_state:
@@ -3870,6 +3923,7 @@ def run_normal():
             if not n.get("skip") and n.get("summary"):
                 ws.setdefault("news_headlines", []).append(n["summary"])
                 ws.setdefault("thesis_impacts", []).append(n.get("thesis_impact", "neutral"))
+        remember_weekly_thesis_events(ws, news=new_news)
 
     insider_trades = fetch_insider_trades()
     if initial_state:
@@ -3896,12 +3950,13 @@ def run_normal():
                 f"{t.trade_type}: {t.filer} {t.shares:,}주 "
                 + ("대규모" if t.total_value >= 1_000_000 else "중규모" if t.total_value >= 100_000 else "소규모")
             )
+        remember_weekly_thesis_events(ws, insiders=new_insiders)
 
     if blocks:
         if technicals.rsi_alert or technicals.macd_alert:
             blocks.extend(format_technicals_block(technicals))
         blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-            "text": f"🔔 {DISPLAY_TICKER} 중요 변화 — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
+            "text": f"{DISPLAY_TICKER} 중요 변화 | {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
         blocks.insert(1, _ctx(
             "데이터 상태: "
             + " · ".join(f"{name} {status}" for name, status in SOURCE_HEALTH.items())
@@ -3947,7 +4002,7 @@ def run_close():
         # 반복 아침 알림은 제품 계약에서 제외한다.
         state["pending_morning_alert"] = None
 
-    # OHLCV fetch (closes + highs/lows/volumes, 210일 — EMA200 + DCA 기술지표용)
+    # OHLCV fetch (closes + highs/lows/volumes, 210일)
     ohlcv = fetch_ohlcv(days=210)
     closes = ohlcv.get("closes") or fetch_price_history(60)  # 빈 리스트도 fallback
     volume_activity = calculate_volume_activity(ohlcv.get("volumes", []))
@@ -3964,7 +4019,6 @@ def run_close():
             f"거래량 터짐 ({VOLUME_LOOKBACK_DAYS}일 평균 대비 "
             f"{volume_activity.ratio:.2f}배)"
         )
-    weekly_ohlcv = fetch_weekly_ohlcv(weeks=40)
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
 
@@ -4032,6 +4086,7 @@ def run_close():
                 f"{filing.form}: {filing.summary} ({filing.filing_date})"
             )
             ws.setdefault("thesis_impacts", []).append(filing.thesis_impact)
+        remember_weekly_thesis_events(ws, filings=alert_filings)
 
     insider_trades = fetch_insider_trades()
     log.info(f"내부자 거래 fetch 결과: 총 {len(insider_trades)}건")
@@ -4059,6 +4114,7 @@ def run_close():
             ws.setdefault("insider_trades", []).append(
                 f"{t.trade_type}: {t.filer} {t.shares:,}주"
             )
+        remember_weekly_thesis_events(ws, insiders=new_insiders)
     news = fetch_news()
     if initial_state:
         state["last_news_hashes"] = _merge_hashes(
@@ -4083,16 +4139,12 @@ def run_close():
             if not item.get("skip") and item.get("summary"):
                 ws.setdefault("news_headlines", []).append(item["summary"])
                 ws.setdefault("thesis_impacts", []).append(item.get("thesis_impact", "neutral"))
+        remember_weekly_thesis_events(ws, news=new_news)
     else:
         log.info("표시할 관련 뉴스 없음")
 
-    # DCA 기술지표 점수 (5-Layer, 100pts)
-    dca_tech = calculate_dca_technical_score(ohlcv, weekly_ohlcv, sm=sm)
-    if dca_tech:
-        blocks.extend(format_dca_technical_block(dca_tech))
-
     blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-        "text": f"🔔 {DISPLAY_TICKER} 장 마감 — {datetime.now(KST).strftime('%m/%d')}"}})
+        "text": f"{DISPLAY_TICKER} 장 마감 | {datetime.now(KST).strftime('%m/%d')}"}})
     summary_blocks = build_decision_summary_blocks(
         price=price,
         benchmark_pct=benchmark_pct,
@@ -4146,7 +4198,7 @@ def run_13f():
 
     if new_filings:
         blocks = [
-            {"type": "header", "text": {"type": "plain_text", "text": f"🏛 {DISPLAY_TICKER} 13F 기관 포지션 업데이트"}},
+            {"type": "header", "text": {"type": "plain_text", "text": f"{DISPLAY_TICKER} 13F 기관 포지션 업데이트"}},
             {"type": "divider"},
         ]
         blocks.extend(format_13f_block(new_filings))
@@ -4170,7 +4222,7 @@ def run_13f():
 def run_weekly():
     """
     주간 브리핑 (매주 월 08:00 KST)
-    BUG 4 FIX: 주가 숫자($) 완전 제거, DCA verdict 강조
+    주가 숫자 없이 주간 방향과 확인된 논지 변화만 요약한다.
     """
     log.info("=== WEEKLY ===")
     SOURCE_HEALTH.clear()
@@ -4207,20 +4259,20 @@ def run_weekly():
     insider_summary = ws.get("insider_trades", [])
     news_summary = ws.get("news_headlines", [])
     company_filing_summary = ws.get("company_filings", [])
-    thesis_impacts = ws.get("thesis_impacts", [])
+    thesis_events = ws.get("thesis_events", [])
     rsi_readings = ws.get("rsi_readings", [])
     pcr_readings = ws.get("pcr_readings", [])
     short_readings = ws.get("short_readings", [])
 
     blocks = [
         {"type": "header", "text": {"type": "plain_text",
-            "text": f"📋 {DISPLAY_TICKER} 주간 브리핑 — {datetime.now(KST).strftime('%m/%d')} 월"}},
+            "text": f"{DISPLAY_TICKER} 주간 브리핑 | {datetime.now(KST).strftime('%m/%d')} 월"}},
         {"type": "divider"},
     ]
 
     # 주간 변동 요약: 정확한 가격과 수익률은 숨기고 방향만 표시한다.
     if weekly_change_str:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 방향*\n{weekly_change_str}"}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*주간 방향*\n{weekly_change_str}"}})
         blocks.extend(format_beta_block({
             "actual_pct": weekly_pct,
             "benchmark_pct": benchmark_pct,
@@ -4233,46 +4285,36 @@ def run_weekly():
     if pcr_readings:
         avg_pcr = sum(pcr_readings) / len(pcr_readings)
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            f"*📈 주간 PCR 평균: {avg_pcr:.3f}*" + (f" (현재 {options.pcr:.3f})" if options else "")}})
+            f"*주간 PCR 평균*\n{avg_pcr:.3f}" + (f" · 현재 {options.pcr:.3f}" if options else "")}})
 
     if short_readings:
         avg_short = sum(short_readings) / len(short_readings)
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            f"*🩳 FINRA 일일 공매도 체결 비중 주간 평균: {avg_short:.1f}%*"
-            + (f" (최신 {short.short_pct:.1f}%)" if short else "")}})
+            f"*FINRA 일일 공매도 체결 비중 주간 평균*\n{avg_short:.1f}%"
+            + (f" · 최신 {short.short_pct:.1f}%" if short else "")}})
 
     if alerts:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            "*🚨 주간 알림*\n" + "\n".join(f"• {a}" for a in alerts[-8:])}})
+            "*주간 알림*\n" + "\n".join(f"• {a}" for a in alerts[-8:])}})
 
     if insider_summary:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            "*🕴 주간 내부자 거래*\n" + "\n".join(f"• {t}" for t in insider_summary[-5:])}})
+            "*주간 내부자 거래*\n" + "\n".join(f"• {t}" for t in insider_summary[-5:])}})
 
     if news_summary:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            "*📰 주간 주요 뉴스*\n" + "\n".join(f"• {h}" for h in news_summary[-5:])}})
+            "*주간 주요 뉴스*\n" + "\n".join(f"• {h}" for h in news_summary[-5:])}})
 
     if company_filing_summary:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-            "*🏛 주간 중요 SEC 공시*\n" + "\n".join(f"• {h}" for h in company_filing_summary[-5:])}})
+            "*주간 중요 SEC 공시*\n" + "\n".join(f"• {h}" for h in company_filing_summary[-5:])}})
 
     blocks.append({"type": "divider"})
-    # 주간 기술지표 스코어
-    weekly_ohlcv_w = fetch_weekly_ohlcv(weeks=40)
-    if ohlcv_w:
-        dca_tech_w = calculate_dca_technical_score(ohlcv_w, weekly_ohlcv_w, sm=None)
-        if dca_tech_w:
-            blocks.extend(format_dca_technical_block(dca_tech_w))
-    synthetic_news = [
-        {"summary": "주간 누적 사건", "thesis_impact": impact}
-        for impact in thesis_impacts
-    ]
     summary_blocks = build_decision_summary_blocks(
         price=price,
         benchmark_pct=benchmark_pct,
-        news=synthetic_news,
-        filings=company_filing_summary,
+        news=thesis_events,
+        filings=[],
         peer_changes=peer_changes,
         volume_activity=volume_activity,
     )
@@ -4285,139 +4327,10 @@ def run_weekly():
     save_weekly_state({
         "week_start": datetime.now(KST).strftime("%Y-%m-%d"),
         "alerts_fired": [], "insider_trades": [], "news_headlines": [],
-        "company_filings": [], "thesis_impacts": [],
+        "company_filings": [], "thesis_impacts": [], "thesis_events": [],
         "rsi_readings": [], "pcr_readings": [], "short_readings": [],
     })
     log.info("Weekly done")
-
-
-def run_dca_status():
-    """
-    DCA 현황 조회 — 현재 보유 수량 / 평단가 / 평가손익 Slack 전송
-    workflow_dispatch: mode=dca_status
-    """
-    log.info("=== DCA STATUS ===")
-    state = load_state()
-
-    shares = state.get("dca_shares", 0.0)
-    avg_price = state.get("dca_avg_price", 0.0)
-    history = state.get("dca_history", [])
-
-    if shares == 0 or avg_price == 0:
-        send_slack([{"type": "section", "text": {"type": "mrkdwn", "text":
-            "📭 아직 등록된 DCA 포지션이 없어요.\n"
-            "Actions → Run workflow → mode: `dca_update` → 수량/가격 입력으로 추가하세요."}}])
-        return
-
-    lines = [
-        f"*💼 {DISPLAY_TICKER} DCA 포지션 현황*",
-        f"보유 수량: *{shares:,.1f}주*",
-        f"평균 매수가: *${avg_price:.2f}*",
-    ]
-
-    if history:
-        lines.append(f"\n*📋 매수 이력 (최근 5건)*")
-        for h in history[-5:]:
-            lines.append(f"• {h['date']} — {h['shares']:.1f}주 @ ${h['price']:.2f}")
-
-    blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"💼 {DISPLAY_TICKER} DCA 현황"}},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
-        {"type": "divider"},
-    ]
-    send_slack(blocks)
-    log.info(f"DCA status sent: {shares:.1f}주 @ ${avg_price:.2f}")
-
-
-def run_dca_update():
-    """
-    DCA 추가매수 등록 — 새 매수 수량/가격 입력 시 평단가 재계산 후 Slack 전송
-    workflow_dispatch inputs:
-      DCA_SHARES: 매수 수량 (예: 10.5)
-      DCA_PRICE:  매수가격 (예: 64.50)
-    """
-    log.info("=== DCA UPDATE ===")
-
-    new_shares_str = os.environ.get("DCA_SHARES", "").strip()
-    new_price_str = os.environ.get("DCA_PRICE", "").strip()
-
-    if not new_shares_str or not new_price_str:
-        log.error("DCA_SHARES 또는 DCA_PRICE 환경변수 없음")
-        send_slack([{"type": "section", "text": {"type": "mrkdwn", "text":
-            "❌ 입력값 오류 — DCA_SHARES와 DCA_PRICE를 모두 입력해주세요."}}])
-        return
-
-    try:
-        new_shares = float(new_shares_str)
-        new_price = float(new_price_str)
-    except ValueError:
-        send_slack([{"type": "section", "text": {"type": "mrkdwn", "text":
-            f"❌ 숫자 변환 실패 — shares: `{new_shares_str}`, price: `{new_price_str}`\n"
-            "숫자만 입력해주세요 (예: 10.5 / 64.50)"}}])
-        return
-
-    state = load_state()
-    prev_shares = state.get("dca_shares", 0.0)
-    prev_avg = state.get("dca_avg_price", 0.0)
-    history = state.get("dca_history", [])
-
-    # 가중평균 재계산
-    if prev_shares == 0 or prev_avg == 0:
-        new_avg = new_price
-        total_shares = new_shares
-        is_first = True
-    else:
-        total_shares = prev_shares + new_shares
-        new_avg = (prev_shares * prev_avg + new_shares * new_price) / total_shares
-        is_first = False
-
-    # 물타기 / 불타기 판단
-    if not is_first:
-        if new_price < prev_avg:
-            action = "🧊 물타기"
-        elif new_price > prev_avg:
-            action = "🔥 불타기"
-        else:
-            action = "➡️ 동일가 매수"
-    else:
-        action = "🆕 최초 등록"
-
-    # 이력 추가
-    history.append({
-        "date": datetime.now(KST).strftime("%Y-%m-%d"),
-        "shares": new_shares,
-        "price": new_price,
-        "action": action,
-    })
-
-    state["dca_shares"] = round(total_shares, 4)
-    state["dca_avg_price"] = round(new_avg, 4)
-    state["dca_history"] = history
-    save_state(state)
-
-    lines = [
-        f"*{action}* 등록 완료!",
-        f"",
-        f"이번 매수: {new_shares:.1f}주 @ ${new_price:.2f}",
-        f"",
-        f"*업데이트된 포지션*",
-        f"총 보유: *{total_shares:.1f}주*",
-        f"새 평단가: *${new_avg:.2f}*",
-    ]
-
-    if not is_first:
-        avg_change = new_avg - prev_avg
-        lines.append(f"평단 변화: ${prev_avg:.2f} → ${new_avg:.2f} ({avg_change:+.2f})")
-
-    blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": "✅ DCA 포지션 업데이트"}},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
-        {"type": "divider"},
-    ]
-    send_slack(blocks)
-    log.info(f"DCA updated: {total_shares:.1f}주 @ ${new_avg:.2f} ({action})")
 
 
 # ─────────────────────────────────────────────
@@ -4432,8 +4345,6 @@ def main():
         "morning": run_morning,
         "13f": run_13f,
         "weekly": run_weekly,
-        "dca_status": run_dca_status,
-        "dca_update": run_dca_update,
     }.get(mode, lambda: log.error(f"Unknown mode: {mode}"))()
 
 
