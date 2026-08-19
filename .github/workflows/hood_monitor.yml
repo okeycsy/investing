@@ -106,7 +106,15 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f state.json weekly_state.json beta_cache.json app_rank_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
+          for file in state.json weekly_state.json beta_cache.json app_rank_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json; do
+            if [ -f "$file" ]; then
+              git add -f -- "$file"
+            fi
+          done
+          if git diff --cached --quiet; then
+            echo "No state changes"
+            exit 0
+          fi
+          git commit -m "chore: update state [skip ci]"
           git pull --rebase
           git push

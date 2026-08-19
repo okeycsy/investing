@@ -16,7 +16,7 @@ class MonitorConfig:
     company_name: str = "Vertiv Holdings Co"
     cik: str = "0001674101"
     benchmark: str = "SOXX"
-    peer_tickers: tuple[str, ...] = ("ETN", "NVT", "PWR", "SMCI")
+    peer_tickers: tuple[str, ...] = ("ETN", "NVT", "GEV")
     app_store_id: str = ""
     state_dir: str = "."
     market_scan_focus: str = ""
@@ -159,7 +159,7 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
     raw = _read_markdown_config(config_file)
 
     ticker = normalize_ticker(_env_or_default("MONITOR_TICKER", raw.get("ticker", "VRT")))
-    peer_source = _env_or_default("MONITOR_PEER_TICKERS", raw.get("peer_tickers", "ETN,NVT,PWR,SMCI"))
+    peer_source = _env_or_default("MONITOR_PEER_TICKERS", raw.get("peer_tickers", "ETN,NVT,GEV"))
 
     def text_list(env_name: str, key: str, default: str) -> tuple[str, ...]:
         return _parse_text_list(_env_or_default(env_name, raw.get(key, default)))

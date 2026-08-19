@@ -6,7 +6,7 @@ ticker: $VRT
 company_name: Vertiv Holdings Co
 cik: 0001674101
 benchmark: $SOXX
-peer_tickers: $ETN, $NVT, $PWR, $SMCI
+peer_tickers: $ETN, $NVT, $GEV
 app_store_id:
 state_dir: .
 market_scan_focus: $VRT

@@ -72,6 +72,12 @@ log = logging.getLogger("hood_monitor")
 SOURCE_HEALTH: dict[str, str] = {}
 VOLUME_LOOKBACK_DAYS = 20
 VOLUME_EXPLOSION_RATIO = 1.5
+PRICE_ALERT_START_LEVEL = 4
+PEER_DISPLAY_NAMES = {
+    "ETN": "이튼",
+    "NVT": "nVent",
+    "GEV": "GE 버노바",
+}
 
 
 def _set_source_health(source: str, status: str):
@@ -173,6 +179,13 @@ class CompanyFiling:
     accession: str = ""
     url: str = ""
     hash: str = ""
+    items: str = ""
+    summary: str = ""
+    key_facts: list = field(default_factory=list)
+    thesis_impact: str = "neutral"
+    impact_reason: str = ""
+    analysis_status: str = "pending"
+    skip: bool = False
 
 
 @dataclass
@@ -270,6 +283,17 @@ def remember_analyzed_news(state: dict, news: list):
 
 
 def remember_company_filings(state: dict, filings: list):
+    hashes = [
+        filing.hash for filing in filings
+        if filing.hash and filing.analysis_status == "success"
+    ]
+    if hashes:
+        state["last_company_filing_hashes"] = _merge_hashes(
+            state.get("last_company_filing_hashes", []), hashes
+        )
+
+
+def remember_company_filing_baseline(state: dict, filings: list):
     hashes = [filing.hash for filing in filings if filing.hash]
     if hashes:
         state["last_company_filing_hashes"] = _merge_hashes(
@@ -690,15 +714,16 @@ def calc_beta_divergence(beta: float, market_pct: float, actual_pct: float) -> d
     divergence = round(actual_pct - expected, 2)
 
     # 피어 데이터 fetch (상대 강도 블록에 통합 표시)
-    peer_changes = {
-        peer: (_fetch_ticker_change(peer) or 0.0)
-        for peer in PEER_TICKERS
-    }
+    peer_changes = {}
+    for peer in PEER_TICKERS:
+        change = _fetch_ticker_change(peer)
+        if change is not None:
+            peer_changes[peer] = change
 
     # 피어 평균 대비 모니터링 종목 이격
     peer_values = list(peer_changes.values())
-    peer_avg = round(sum(peer_values) / len(peer_values), 2) if peer_values else 0.0
-    peer_diff = round(actual_pct - peer_avg, 2)
+    peer_avg = round(sum(peer_values) / len(peer_values), 2) if peer_values else None
+    peer_diff = round(actual_pct - peer_avg, 2) if peer_avg is not None else None
 
     return {
         "beta": beta,
@@ -720,30 +745,90 @@ def _direction_label(change_pct: Optional[float]) -> str:
 
 def _relative_label(actual_pct: Optional[float], benchmark_pct: Optional[float]) -> str:
     if actual_pct is None or benchmark_pct is None:
-        return f"{BETA_BENCHMARK} 비교 불가"
+        return "비교 불가"
     diff = actual_pct - benchmark_pct
     if diff > 0.15:
-        return f"{BETA_BENCHMARK} 대비 아웃퍼폼"
+        return "아웃퍼폼"
     if diff < -0.15:
-        return f"{BETA_BENCHMARK} 대비 언더퍼폼"
-    return f"{BETA_BENCHMARK}와 동조"
+        return "언더퍼폼"
+    return "동조"
+
+
+def _peer_group_name(peer_changes: dict) -> str:
+    names = [
+        PEER_DISPLAY_NAMES.get(ticker, ticker)
+        for ticker, change in peer_changes.items()
+        if change is not None
+    ]
+    return " · ".join(names) or "피어"
+
+
+def _relative_icon(outcome: str) -> str:
+    if outcome == "아웃퍼폼":
+        return "🟢"
+    if outcome == "언더퍼폼":
+        return "🔴"
+    return "⚪"
+
+
+def fetch_relative_performance(actual_pct: float) -> dict:
+    benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
+    peer_changes = {
+        peer: _fetch_ticker_change(peer)
+        for peer in PEER_TICKERS
+    }
+    return {
+        "actual_pct": actual_pct,
+        "benchmark_pct": benchmark_pct,
+        "qqq_pct": benchmark_pct,
+        "peer_changes": peer_changes,
+    }
 
 
 def format_beta_block(bd: dict) -> list:
-    """가격과 등락률 숫자 없이 방향과 벤치마크 상대 성과만 표시."""
+    """방향과 반도체 지수·동일가중 피어 평균 상대 성과를 표시."""
     actual = bd.get("actual_pct")
-    benchmark_pct = bd.get("qqq_pct")
+    benchmark_pct = bd.get("benchmark_pct", bd.get("qqq_pct"))
+    peer_changes = {
+        ticker: change for ticker, change in bd.get("peer_changes", {}).items()
+        if change is not None
+    }
+    peer_avg = (
+        sum(peer_changes.values()) / len(peer_changes)
+        if peer_changes else None
+    )
     direction = _direction_label(actual)
-    relative = _relative_label(actual, benchmark_pct)
-    icon = "🟢" if "아웃퍼폼" in relative else "🔴" if "언더퍼폼" in relative else "⚪"
-    return [
-        _sec(
-            f"*📐 방향 / {BETA_BENCHMARK} 상대 성과*\n"
-            f"{DISPLAY_TICKER}: *{direction}*\n"
-            f"{icon} *{relative}*"
-        ),
-        _ctx("가격과 정확한 일일 등락률은 표시하지 않습니다."),
-    ]
+    benchmark_outcome = _relative_label(actual, benchmark_pct)
+    peer_outcome = _relative_label(actual, peer_avg)
+    lines = [f"{DISPLAY_TICKER}: *{direction}*"]
+    if benchmark_pct is not None:
+        lines.append(
+            f"{_relative_icon(benchmark_outcome)} 반도체 지수({BETA_BENCHMARK}) 대비 "
+            f"*{benchmark_outcome}*"
+        )
+    if peer_avg is not None:
+        lines.append(
+            f"{_relative_icon(peer_outcome)} 피어 평균(동일가중: {_peer_group_name(peer_changes)}) 대비 "
+            f"*{peer_outcome}*"
+        )
+    return [_sec("*📐 방향 / 상대 흐름*\n" + "\n".join(lines))]
+
+
+def next_price_alert_level(
+    change_pct: float,
+    sent_level: int = 0,
+    sent_direction: str = "",
+) -> Optional[int]:
+    """4%부터 같은 방향의 새 정수 구간에 진입할 때만 알린다."""
+    direction = "up" if change_pct > 0 else "down" if change_pct < 0 else ""
+    level = int(abs(change_pct))
+    if not direction or level < PRICE_ALERT_START_LEVEL:
+        return None
+    if sent_direction and direction != sent_direction:
+        return None
+    if level <= int(sent_level or 0):
+        return None
+    return level
 
 
 # ─────────────────────────────────────────────
@@ -1152,6 +1237,7 @@ def check_safety_margin(
     current_price: float,
     actual_pct: float = 0.0,   # 모니터링 종목 당일 등락률
     beta: Optional[float] = None,
+    relative_performance: Optional[dict] = None,
 ) -> Optional[SafetyMargin]:
     """
     볼린저 밴드 + 모멘텀 + 베타 초과 이탈 + 피어 분기 + DCA 매력도 통합 분석
@@ -1217,16 +1303,27 @@ def check_safety_margin(
     beta_expected_pct = 0.0
     beta_excess_pct = 0.0
     if beta and actual_pct != 0:
-        qqq_pct = _fetch_ticker_change(BETA_BENCHMARK) or 0.0
-        beta_expected_pct = round(beta * qqq_pct, 2)
-        beta_excess_pct = round(actual_pct - beta_expected_pct, 2)
-        log.info(f"베타 초과 이탈: 기대 {beta_expected_pct:+.2f}% vs 실제 {actual_pct:+.2f}% → 초과 {beta_excess_pct:+.2f}%")
+        benchmark_change = (relative_performance or {}).get("benchmark_pct")
+        if benchmark_change is None and relative_performance is None:
+            benchmark_change = _fetch_ticker_change(BETA_BENCHMARK)
+        if benchmark_change is not None:
+            beta_expected_pct = round(beta * benchmark_change, 2)
+            beta_excess_pct = round(actual_pct - beta_expected_pct, 2)
+            log.info(f"베타 초과 이탈: 기대 {beta_expected_pct:+.2f}% vs 실제 {actual_pct:+.2f}% → 초과 {beta_excess_pct:+.2f}%")
 
     # ── 4. 피어 그룹 분기 감지 ──────
-    peer_changes = {
-        peer: (_fetch_ticker_change(peer) or 0.0)
-        for peer in PEER_TICKERS
-    }
+    if relative_performance is not None:
+        peer_changes = {
+            peer: change
+            for peer, change in relative_performance.get("peer_changes", {}).items()
+            if change is not None
+        }
+    else:
+        peer_changes = {}
+        for peer in PEER_TICKERS:
+            change = _fetch_ticker_change(peer)
+            if change is not None:
+                peer_changes[peer] = change
     peer_values = list(peer_changes.values())
     peer_coin_pct = peer_values[0] if len(peer_values) >= 1 else 0.0
     peer_mstr_pct = peer_values[1] if len(peer_values) >= 2 else 0.0
@@ -2299,6 +2396,27 @@ MATERIAL_COMPANY_FORMS = {
     "8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A",
     "6-K", "6-K/A", "20-F", "20-F/A",
 }
+PERIODIC_COMPANY_FORMS = {
+    "10-Q", "10-Q/A", "10-K", "10-K/A", "20-F", "20-F/A",
+}
+SEC_METRIC_TAGS = (
+    ("매출", ("RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet")),
+    ("영업이익", ("OperatingIncomeLoss",)),
+    ("순이익", ("NetIncomeLoss", "ProfitLoss")),
+    ("희석 EPS", ("EarningsPerShareDiluted",)),
+)
+SEC_ITEM_LABELS = {
+    "1.01": "중요 계약 체결",
+    "1.02": "중요 계약 종료",
+    "2.02": "실적 및 재무상태 발표",
+    "2.05": "구조조정 계획",
+    "2.06": "중요 자산 손상",
+    "3.01": "상장 유지 관련 통지",
+    "4.01": "외부감사인 변경",
+    "4.02": "기존 재무제표 신뢰 불가",
+    "5.02": "경영진·이사회 변경",
+}
+RISK_SEC_ITEMS = {"1.02", "2.05", "2.06", "3.01", "4.01", "4.02"}
 
 
 def fetch_company_filings(limit: int = 20, lookback_days: int = 21) -> list:
@@ -2350,6 +2468,7 @@ def fetch_company_filings(limit: int = 20, lookback_days: int = 21) -> list:
                 accession=accession,
                 url=url,
                 hash=hashlib.md5(f"{accession}:{form}".encode()).hexdigest()[:12],
+                items=value("items", idx),
             ))
             if len(filings) >= limit:
                 break
@@ -2359,6 +2478,270 @@ def fetch_company_filings(limit: int = 20, lookback_days: int = 21) -> list:
         log.warning(f"Company filings parse error: {e}")
         _set_source_health("SEC 공시", "실패")
         return []
+
+
+def fetch_company_facts() -> dict:
+    """SEC Company Facts에서 원문 HTML 없이 공시 수치를 조회한다."""
+    if not CIK_PADDED:
+        return {}
+    resp = safe_get(
+        f"https://data.sec.gov/api/xbrl/companyfacts/CIK{CIK_PADDED}.json",
+        headers=SEC_HEADERS,
+    )
+    if not resp:
+        _set_source_health("SEC XBRL", "실패")
+        return {}
+    try:
+        data = resp.json()
+        _set_source_health("SEC XBRL", "정상")
+        return data
+    except Exception as e:
+        log.warning(f"SEC Company Facts parse error: {e}")
+        _set_source_health("SEC XBRL", "실패")
+        return {}
+
+
+def _fact_rows(company_facts: dict, accession: str, tags: tuple[str, ...]) -> list:
+    rows = []
+    for namespace in company_facts.get("facts", {}).values():
+        for tag in tags:
+            fact = namespace.get(tag)
+            if not fact:
+                continue
+            for unit, entries in fact.get("units", {}).items():
+                for entry in entries:
+                    if entry.get("accn") != accession:
+                        continue
+                    try:
+                        value = float(entry.get("val"))
+                    except (TypeError, ValueError):
+                        continue
+                    rows.append({
+                        "start": entry.get("start"),
+                        "end": entry.get("end"),
+                        "value": value,
+                        "unit": unit,
+                    })
+    return rows
+
+
+def _parse_iso_date(value: str):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _select_period_pair(rows: list, report_date: str, *, quarterly: bool) -> tuple:
+    dated = []
+    for row in rows:
+        start = _parse_iso_date(row.get("start"))
+        end = _parse_iso_date(row.get("end"))
+        if not start or not end or end < start:
+            continue
+        dated.append((row, start, end, (end - start).days))
+    if not dated:
+        return None, None
+
+    report = _parse_iso_date(report_date)
+    current_candidates = [item for item in dated if not report or item[2] == report]
+    if not current_candidates:
+        latest_end = max(item[2] for item in dated)
+        current_candidates = [item for item in dated if item[2] == latest_end]
+    if quarterly:
+        quarter_candidates = [item for item in current_candidates if 60 <= item[3] <= 120]
+        if quarter_candidates:
+            current_candidates = quarter_candidates
+        current = min(current_candidates, key=lambda item: item[3])
+    else:
+        annual_candidates = [item for item in current_candidates if item[3] >= 300]
+        current = max(annual_candidates or current_candidates, key=lambda item: item[3])
+
+    prior_candidates = [
+        item for item in dated
+        if item[2] < current[2] and abs(item[3] - current[3]) <= 10
+    ]
+    if not prior_candidates:
+        return current[0], None
+    prior = min(
+        prior_candidates,
+        key=lambda item: (abs((current[2] - item[2]).days - 365), -item[2].toordinal()),
+    )
+    return current[0], prior[0]
+
+
+def _format_sec_value(value: float, unit: str) -> str:
+    sign = "-" if value < 0 else ""
+    absolute = abs(value)
+    if unit == "USD":
+        if absolute >= 1_000_000_000:
+            return f"{sign}${absolute / 1_000_000_000:.2f}B"
+        if absolute >= 1_000_000:
+            return f"{sign}${absolute / 1_000_000:.1f}M"
+        return f"{sign}${absolute:,.0f}"
+    if unit == "USD/shares":
+        return f"{sign}${absolute:.2f}"
+    return f"{value:,.2f}"
+
+
+def _metric_comparison(
+    company_facts: dict,
+    filing: CompanyFiling,
+    label: str,
+    tags: tuple[str, ...],
+) -> tuple[Optional[str], Optional[float]]:
+    rows = _fact_rows(company_facts, filing.accession, tags)
+    current, prior = _select_period_pair(
+        rows,
+        filing.report_date,
+        quarterly=filing.form.startswith("10-Q"),
+    )
+    if not current:
+        return None, None
+    value_text = _format_sec_value(current["value"], current["unit"])
+    if not prior or not prior["value"]:
+        return f"{label} {value_text}", None
+    change = (current["value"] - prior["value"]) / abs(prior["value"]) * 100
+    return f"{label} {value_text} (전년 동기 대비 {change:+.1f}%)", change
+
+
+def _contract_liability_comparison(
+    company_facts: dict,
+    filing: CompanyFiling,
+) -> Optional[str]:
+    rows = _fact_rows(
+        company_facts,
+        filing.accession,
+        ("ContractWithCustomerLiabilityCurrent", "ContractWithCustomerLiabilityNoncurrent"),
+    )
+    totals = {}
+    for row in rows:
+        if row.get("start") or not row.get("end") or row.get("unit") != "USD":
+            continue
+        totals[row["end"]] = totals.get(row["end"], 0) + row["value"]
+    current = totals.get(filing.report_date)
+    prior_dates = [date for date in totals if date < filing.report_date]
+    if not current or not prior_dates:
+        return None
+    prior_date = max(prior_dates)
+    prior = totals[prior_date]
+    if not prior:
+        return None
+    change = (current - prior) / abs(prior) * 100
+    return (
+        f"계약부채 {_format_sec_value(current, 'USD')} "
+        f"({prior_date} 대비 {change:+.1f}%, backlog와는 별도 지표)"
+    )
+
+
+def _summarize_periodic_filing(
+    filing: CompanyFiling,
+    company_facts: dict,
+) -> CompanyFiling:
+    changes = {}
+    facts = []
+    for label, tags in SEC_METRIC_TAGS:
+        line, change = _metric_comparison(company_facts, filing, label, tags)
+        if line:
+            facts.append(line)
+        if change is not None:
+            changes[label] = change
+    contract_line = _contract_liability_comparison(company_facts, filing)
+    if contract_line:
+        facts.append(contract_line)
+    if not facts:
+        filing.analysis_status = "failed"
+        return filing
+
+    revenue_change = changes.get("매출")
+    operating_change = changes.get("영업이익")
+    period = "분기" if filing.form.startswith("10-Q") else "연간"
+    if revenue_change is not None and operating_change is not None:
+        if revenue_change > 0 and operating_change > 0:
+            filing.summary = f"{period} 매출·영업이익 동반 증가"
+        elif revenue_change < 0 and operating_change < 0:
+            filing.summary = f"{period} 매출·영업이익 동반 감소"
+        else:
+            filing.summary = f"{period} 매출·이익 흐름 엇갈림"
+    else:
+        filing.summary = f"{period} 핵심 재무 수치 공시"
+
+    if (
+        revenue_change is not None and operating_change is not None
+        and revenue_change >= 5 and operating_change >= 5
+    ):
+        filing.thesis_impact = "strengthen"
+        filing.impact_reason = "매출과 영업이익이 전년 동기 대비 함께 증가했습니다."
+    elif (
+        revenue_change is not None and revenue_change <= -5
+    ) or (
+        operating_change is not None and operating_change <= -10
+    ):
+        filing.thesis_impact = "risk"
+        filing.impact_reason = "매출 또는 영업이익의 유의미한 둔화가 확인됐습니다."
+    else:
+        filing.thesis_impact = "neutral"
+        filing.impact_reason = "핵심 수치가 혼재해 기존 논지의 추가 확인이 필요합니다."
+    filing.key_facts = facts[:5]
+    filing.analysis_status = "success"
+    return filing
+
+
+def analyze_company_filings(
+    filings: list,
+    company_facts: Optional[dict] = None,
+) -> list:
+    """SEC 구조화 수치와 Item 번호로 공시를 투자자용 사건으로 변환한다."""
+    if not filings:
+        return filings
+    periodic_dates = {
+        filing.filing_date for filing in filings
+        if filing.form in PERIODIC_COMPANY_FORMS
+    }
+    needs_facts = any(filing.form in PERIODIC_COMPANY_FORMS for filing in filings)
+    if company_facts is None:
+        company_facts = fetch_company_facts() if needs_facts else {}
+
+    for filing in filings:
+        if filing.form in PERIODIC_COMPANY_FORMS:
+            _summarize_periodic_filing(filing, company_facts or {})
+            continue
+        if filing.form.startswith(("8-K", "6-K")):
+            item_codes = [item.strip() for item in filing.items.split(",") if item.strip()]
+            if "2.02" in item_codes and filing.filing_date in periodic_dates:
+                filing.summary = "동일 실적 사건의 중복 공시"
+                filing.analysis_status = "success"
+                filing.skip = True
+                continue
+            material_items = [item for item in item_codes if item in SEC_ITEM_LABELS]
+            if not material_items:
+                filing.analysis_status = "success"
+                filing.skip = True
+                continue
+            labels = [SEC_ITEM_LABELS[item] for item in material_items]
+            filing.summary = labels[0]
+            filing.key_facts = [
+                f"SEC Item {item}: {SEC_ITEM_LABELS[item]}"
+                for item in material_items
+            ]
+            if any(item in RISK_SEC_ITEMS for item in material_items):
+                filing.thesis_impact = "risk"
+                filing.impact_reason = "투자 논지에 영향을 줄 수 있는 위험성 사건 유형입니다."
+            else:
+                filing.thesis_impact = "neutral"
+                filing.impact_reason = "사건 유형은 확인됐으며 방향성은 후속 수치와 설명으로 판단합니다."
+            filing.analysis_status = "success"
+            continue
+        filing.analysis_status = "success"
+        filing.skip = True
+    return filings
+
+
+def alertable_company_filings(filings: list) -> list:
+    return [
+        filing for filing in filings
+        if filing.analysis_status == "success" and not filing.skip and filing.summary
+    ]
 
 
 def fetch_insider_trades() -> list:
@@ -3005,12 +3388,16 @@ def format_volume_activity_block(
 
 def _thesis_decision(news: list, filings: list, insiders: Optional[list] = None) -> tuple[str, str]:
     impacts = {item.get("thesis_impact", "neutral") for item in news}
+    impacts.update(
+        getattr(filing, "thesis_impact", "neutral")
+        for filing in filings
+    )
     if "damage" in impacts:
         return "훼손 가능성", "중단 검토"
     has_open_market_sale = any(
         trade.trade_type == "Sale" for trade in (insiders or [])
     )
-    if "risk" in impacts or filings or has_open_market_sale:
+    if "risk" in impacts or has_open_market_sale:
         return "확인 필요", "점검 필요"
     if "strengthen" in impacts:
         return "강화 근거 확인", "기존 계획 유지"
@@ -3024,12 +3411,29 @@ def build_decision_summary_blocks(
     news: list,
     filings: list,
     insiders: Optional[list] = None,
+    peer_changes: Optional[dict] = None,
     volume_activity: Optional[VolumeActivity] = None,
     source_health: Optional[dict] = None,
 ) -> list:
     """가격 숫자 없이 하루의 핵심 의사결정을 먼저 보여준다."""
     direction = _direction_label(price.change_pct if price else None)
-    relative = _relative_label(price.change_pct if price else None, benchmark_pct)
+    actual_pct = price.change_pct if price else None
+    benchmark_outcome = _relative_label(actual_pct, benchmark_pct)
+    valid_peer_changes = {
+        ticker: change for ticker, change in (peer_changes or {}).items()
+        if change is not None
+    }
+    peer_avg = (
+        sum(valid_peer_changes.values()) / len(valid_peer_changes)
+        if valid_peer_changes else None
+    )
+    peer_outcome = _relative_label(actual_pct, peer_avg)
+    relative_parts = []
+    if benchmark_pct is not None:
+        relative_parts.append(f"반도체 지수 {benchmark_outcome}")
+    if peer_avg is not None:
+        relative_parts.append(f"피어 평균 {peer_outcome}")
+    relative = " · ".join(relative_parts) or "비교 불가"
     thesis, dca = _thesis_decision(news, filings, insiders)
     material_news = [item for item in news if not item.get("skip") and item.get("summary")]
     directional_insiders = [
@@ -3190,20 +3594,32 @@ def material_insider_trades(
 
 
 def format_company_filings_block(filings: list) -> list:
+    filings = alertable_company_filings(filings)
     if not filings:
         return []
-    lines = []
+    blocks = [_sec("*🏛 발행사 중요 SEC 공시*")]
+    impact_labels = {
+        "strengthen": ("🟢", "논지 강화"),
+        "neutral": ("⚪", "중립"),
+        "risk": ("🟡", "위험 증가"),
+        "damage": ("🔴", "논지 훼손"),
+    }
     for filing in filings[:6]:
-        report = f" · 보고기간 {filing.report_date}" if filing.report_date else ""
-        link = f"<{filing.url}|SEC 원문>" if filing.url else "SEC 원문 없음"
-        lines.append(
-            f"📄 *{filing.form}* — {filing.description}{report}\n"
-            f"   _제출 {filing.filing_date}_ · {link} · 내용 확인 필요"
+        icon, impact = impact_labels.get(
+            filing.thesis_impact,
+            ("⚪", "중립"),
         )
-    return [
-        _sec("*🏛 발행사 중요 SEC 공시*\n" + "\n".join(lines)),
-        _ctx("공시 제출 사실과 투자 논지 해석을 분리합니다. 원문 확인 전 방향을 단정하지 않습니다."),
-    ]
+        facts = "\n".join(f"• {fact}" for fact in filing.key_facts)
+        report = f" · 보고기간 {filing.report_date}" if filing.report_date else ""
+        blocks.append(_sec(
+            f"📄 *{filing.form} · {filing.summary}*{report}\n{facts}"
+        ))
+        link = f"<{filing.url}|SEC 원문>" if filing.url else "SEC 제출정보"
+        blocks.append(_ctx(
+            f"{icon} 해석: *{impact}* — {filing.impact_reason} | "
+            f"제출 {filing.filing_date} | {link}"
+        ))
+    return blocks
 
 
 def format_13f_block(filings: list) -> list:
@@ -3288,9 +3704,6 @@ def format_safety_margin_block(sm: SafetyMargin) -> list:
     blocks.append(_sec(
         f"*🛡 안전 마진*  {bb_map.get(sm.bb_signal, '')}  |  {mom_map.get(sm.momentum_signal, '')}"
     ))
-    blocks.append(_ctx(
-        "가격 레벨과 정확한 일일 등락률은 표시하지 않습니다."
-    ))
 
     # ── 베타 초과 이탈 ──
     if sm.beta_excess_pct != 0:
@@ -3354,6 +3767,7 @@ def run_normal():
     """장중 모드: 새 사실과 의미 있는 이상 움직임만 알린다."""
     log.info("=== NORMAL ===")
     SOURCE_HEALTH.clear()
+    initial_state = not STATE_FILE.exists()
     state = load_state()
     ws = load_weekly_state()
     blocks = []
@@ -3373,38 +3787,30 @@ def run_normal():
         if price.market_state == "CLOSED":
             log.info("CLOSED 상태 — 가격 알림 스킵")
         else:
-            abs_pct = abs(price.change_pct)
             direction = "up" if price.change_pct > 0 else "down"
-            prev_max = state.get("price_alert_max_pct", 0)
+            prev_level = state.get("price_alert_max_pct", 0)
             prev_dir = state.get("price_alert_direction", "")
-
-            should_alert = (
-                abs_pct >= 4 and (
-                    prev_max == 0
-                    or (direction == prev_dir and abs_pct >= prev_max + 1)
-                    or (direction != prev_dir and abs_pct >= 4)
-                )
+            alert_level = next_price_alert_level(
+                price.change_pct,
+                sent_level=prev_level,
+                sent_direction=prev_dir,
             )
-            if should_alert:
+            if alert_level is not None:
                 emoji = "🚀" if direction == "up" else "💥"
                 label = _direction_label(price.change_pct)
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                    f"{emoji} *{DISPLAY_TICKER} 큰 폭 {label} 감지*\n정확한 가격과 일일 등락률은 표시하지 않습니다."}})
+                    f"{emoji} *{DISPLAY_TICKER} 큰 폭 {label} 감지*"}})
 
-                benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
-                if benchmark_pct is not None:
-                    blocks.extend(format_beta_block({
-                        "actual_pct": price.change_pct,
-                        "qqq_pct": benchmark_pct,
-                    }))
+                relative_performance = fetch_relative_performance(price.change_pct)
+                blocks.extend(format_beta_block(relative_performance))
 
                 # Volume Profile
                 vp = analyze_volume_profile(price.current)
                 if vp:
                     blocks.extend(format_volume_profile_block(vp))
 
-                state["price_alert_max_pct"] = abs_pct if direction != prev_dir else max(prev_max, abs_pct)
-                state["price_alert_direction"] = direction
+                state["price_alert_max_pct"] = alert_level
+                state["price_alert_direction"] = prev_dir or direction
                 ws.setdefault("alerts_fired", []).append(f"큰 폭 {label}")
 
             volume_activity = make_volume_activity(price.volume, price.vol_avg_20d)
@@ -3425,24 +3831,37 @@ def run_normal():
     if closes:
         state["price_history"] = closes[-60:]
         technicals = get_technical_signals(closes)
-        if technicals.rsi_alert or technicals.macd_alert:
-            blocks.extend(format_technicals_block(technicals))
         ws.setdefault("rsi_readings", []).append(technicals.rsi_14)
 
     company_filings = fetch_company_filings()
-    new_filings = [filing for filing in company_filings
-                   if filing.hash not in state.get("last_company_filing_hashes", [])]
+    if initial_state:
+        remember_company_filing_baseline(state, company_filings)
+        new_filings = []
+        _set_source_health("SEC 공시", "초기 기준선 설정")
+    else:
+        new_filings = [filing for filing in company_filings
+                       if filing.hash not in state.get("last_company_filing_hashes", [])]
     if new_filings:
-        blocks.extend(format_company_filings_block(new_filings))
+        new_filings = analyze_company_filings(new_filings)
+        alert_filings = alertable_company_filings(new_filings)
+        blocks.extend(format_company_filings_block(alert_filings))
         remember_company_filings(state, new_filings)
-        for filing in new_filings:
+        for filing in alert_filings:
             ws.setdefault("company_filings", []).append(
-                f"{filing.form}: {filing.description} ({filing.filing_date})"
+                f"{filing.form}: {filing.summary} ({filing.filing_date})"
             )
-            ws.setdefault("thesis_impacts", []).append("risk")
+            ws.setdefault("thesis_impacts", []).append(filing.thesis_impact)
 
     news = fetch_news()
-    new_news = [n for n in news if n["hash"] not in state.get("last_news_hashes", [])]
+    if initial_state:
+        state["last_news_hashes"] = _merge_hashes(
+            state.get("last_news_hashes", []),
+            [item["hash"] for item in news if item.get("hash")],
+        )
+        new_news = []
+        _set_source_health("AI 뉴스", "초기 기준선 설정")
+    else:
+        new_news = [n for n in news if n["hash"] not in state.get("last_news_hashes", [])]
     if new_news:
         new_news = translate_news(new_news)
         blocks.extend(format_news_block(new_news))
@@ -3453,10 +3872,18 @@ def run_normal():
                 ws.setdefault("thesis_impacts", []).append(n.get("thesis_impact", "neutral"))
 
     insider_trades = fetch_insider_trades()
-    new_insider_candidates = [t for t in insider_trades
-                              if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
-                              not in state.get("last_insider_hashes", [])]
-    new_insiders = material_insider_trades(new_insider_candidates)
+    if initial_state:
+        state["last_insider_hashes"] = [
+            hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
+            for t in insider_trades[:30]
+        ]
+        new_insider_candidates = []
+        new_insiders = []
+    else:
+        new_insider_candidates = [t for t in insider_trades
+                                  if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
+                                  not in state.get("last_insider_hashes", [])]
+        new_insiders = material_insider_trades(new_insider_candidates)
     if new_insider_candidates:
         state["last_insider_hashes"] = [
             hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
@@ -3471,6 +3898,8 @@ def run_normal():
             )
 
     if blocks:
+        if technicals.rsi_alert or technicals.macd_alert:
+            blocks.extend(format_technicals_block(technicals))
         blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
             "text": f"🔔 {DISPLAY_TICKER} 중요 변화 — {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
         blocks.insert(1, _ctx(
@@ -3492,10 +3921,13 @@ def run_close():
     """
     log.info("=== CLOSE ===")
     SOURCE_HEALTH.clear()
+    initial_state = not STATE_FILE.exists()
     state = load_state()
     ws = load_weekly_state()
     blocks = []
     benchmark_pct = None
+    peer_changes = {}
+    relative_performance = {}
     volume_activity = None
     new_filings = []
     new_news = []
@@ -3514,9 +3946,6 @@ def run_close():
 
         # 반복 아침 알림은 제품 계약에서 제외한다.
         state["pending_morning_alert"] = None
-
-        state["price_alert_max_pct"] = 0
-        state["price_alert_direction"] = ""
 
     # OHLCV fetch (closes + highs/lows/volumes, 210일 — EMA200 + DCA 기술지표용)
     ohlcv = fetch_ohlcv(days=210)
@@ -3539,17 +3968,13 @@ def run_close():
     technicals = get_technical_signals(closes) if closes else TechnicalSignals()
     blocks.extend(format_technicals_block(technicals))
 
-    # 베타 분석 (벤치마크 fetch 실패 시 전체 skip — 0 fallback 시 아웃퍼폼 오판 방지)
+    # 반도체 지수와 동일가중 피어 그룹 상대 흐름
     beta = get_beta()
     if price and price.prev_close > 0:
-        benchmark_pct = _fetch_ticker_change(BETA_BENCHMARK)
-        if benchmark_pct is not None:
-            blocks.extend(format_beta_block({
-                "actual_pct": price.change_pct,
-                "qqq_pct": benchmark_pct,
-            }))
-        else:
-            log.warning(f"{BETA_BENCHMARK} fetch 실패 — 베타 블록 스킵 (아웃퍼폼 오판 방지)")
+        relative_performance = fetch_relative_performance(price.change_pct)
+        benchmark_pct = relative_performance.get("benchmark_pct")
+        peer_changes = relative_performance.get("peer_changes", {})
+        blocks.extend(format_beta_block(relative_performance))
 
     # Safety Margin: close 모드에서 항상 실행 (4% 조건 제거)
     sm = None
@@ -3559,6 +3984,7 @@ def run_close():
             price.current,
             actual_pct=price.change_pct,
             beta=beta,
+            relative_performance=relative_performance,
         )
         if sm:
             blocks.extend(format_safety_margin_block(sm))
@@ -3588,23 +4014,39 @@ def run_close():
         blocks.extend(format_appstore_rank_block(prev_app_rank, curr_app_rank))
 
     company_filings = fetch_company_filings()
-    new_filings = [filing for filing in company_filings
-                   if filing.hash not in state.get("last_company_filing_hashes", [])]
+    if initial_state:
+        remember_company_filing_baseline(state, company_filings)
+        new_filings = []
+        _set_source_health("SEC 공시", "초기 기준선 설정")
+    else:
+        new_filings = [filing for filing in company_filings
+                       if filing.hash not in state.get("last_company_filing_hashes", [])]
+    alert_filings = []
     if new_filings:
-        blocks.extend(format_company_filings_block(new_filings))
+        new_filings = analyze_company_filings(new_filings)
+        alert_filings = alertable_company_filings(new_filings)
+        blocks.extend(format_company_filings_block(alert_filings))
         remember_company_filings(state, new_filings)
-        for filing in new_filings:
+        for filing in alert_filings:
             ws.setdefault("company_filings", []).append(
-                f"{filing.form}: {filing.description} ({filing.filing_date})"
+                f"{filing.form}: {filing.summary} ({filing.filing_date})"
             )
-            ws.setdefault("thesis_impacts", []).append("risk")
+            ws.setdefault("thesis_impacts", []).append(filing.thesis_impact)
 
     insider_trades = fetch_insider_trades()
     log.info(f"내부자 거래 fetch 결과: 총 {len(insider_trades)}건")
-    new_insider_candidates = [t for t in insider_trades
-                              if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
-                              not in state.get("last_insider_hashes", [])]
-    new_insiders = material_insider_trades(new_insider_candidates)
+    if initial_state:
+        state["last_insider_hashes"] = [
+            hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
+            for t in insider_trades[:30]
+        ]
+        new_insider_candidates = []
+        new_insiders = []
+    else:
+        new_insider_candidates = [t for t in insider_trades
+                                  if hashlib.md5(f"{t.filer}{t.date}{t.shares}".encode()).hexdigest()[:12]
+                                  not in state.get("last_insider_hashes", [])]
+        new_insiders = material_insider_trades(new_insider_candidates)
     log.info(f"내부자 거래 신규: {len(new_insiders)}건 (중복 제외)")
     if new_insider_candidates:
         state["last_insider_hashes"] = [
@@ -3618,8 +4060,16 @@ def run_close():
                 f"{t.trade_type}: {t.filer} {t.shares:,}주"
             )
     news = fetch_news()
-    new_news = [item for item in news
-                if item["hash"] not in state.get("last_news_hashes", [])]
+    if initial_state:
+        state["last_news_hashes"] = _merge_hashes(
+            state.get("last_news_hashes", []),
+            [item["hash"] for item in news if item.get("hash")],
+        )
+        new_news = []
+        _set_source_health("AI 뉴스", "초기 기준선 설정")
+    else:
+        new_news = [item for item in news
+                    if item["hash"] not in state.get("last_news_hashes", [])]
     if new_news:
         new_news = translate_news(new_news)
         remember_analyzed_news(state, new_news)
@@ -3647,8 +4097,9 @@ def run_close():
         price=price,
         benchmark_pct=benchmark_pct,
         news=new_news,
-        filings=new_filings,
+        filings=alert_filings,
         insiders=new_insiders,
+        peer_changes=peer_changes,
         volume_activity=volume_activity,
     )
     for block in reversed(summary_blocks):
@@ -3741,12 +4192,16 @@ def run_weekly():
     benchmark_pct = None
     if benchmark_closes and len(benchmark_closes) >= 6 and benchmark_closes[-6]:
         benchmark_pct = (benchmark_closes[-1] - benchmark_closes[-6]) / benchmark_closes[-6] * 100
+    peer_changes = {}
+    for peer in PEER_TICKERS:
+        peer_closes = _fetch_yearly_closes(peer)
+        if peer_closes and len(peer_closes) >= 6 and peer_closes[-6]:
+            peer_changes[peer] = (
+                (peer_closes[-1] - peer_closes[-6]) / peer_closes[-6] * 100
+            )
     weekly_change_str = ""
     if weekly_pct is not None:
-        weekly_change_str = (
-            f"이번 주 방향: {_direction_label(weekly_pct)} | "
-            f"{_relative_label(weekly_pct, benchmark_pct)}"
-        )
+        weekly_change_str = f"이번 주 방향: {_direction_label(weekly_pct)}"
 
     alerts = ws.get("alerts_fired", [])
     insider_summary = ws.get("insider_trades", [])
@@ -3766,6 +4221,11 @@ def run_weekly():
     # 주간 변동 요약: 정확한 가격과 수익률은 숨기고 방향만 표시한다.
     if weekly_change_str:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*📅 주간 방향*\n{weekly_change_str}"}})
+        blocks.extend(format_beta_block({
+            "actual_pct": weekly_pct,
+            "benchmark_pct": benchmark_pct,
+            "peer_changes": peer_changes,
+        }))
 
     blocks.extend(format_technicals_block(technicals))
     blocks.extend(format_volume_activity_block(volume_activity, finalized=True))
@@ -3813,6 +4273,7 @@ def run_weekly():
         benchmark_pct=benchmark_pct,
         news=synthetic_news,
         filings=company_filing_summary,
+        peer_changes=peer_changes,
         volume_activity=volume_activity,
     )
     for block in reversed(summary_blocks):

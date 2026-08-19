@@ -1,6 +1,7 @@
 import unittest
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import hood_monitor as hm
@@ -38,6 +39,9 @@ class ProductContractTest(unittest.TestCase):
         text = visible_text(blocks)
         self.assertIn("양전", text)
         self.assertIn("아웃퍼폼", text)
+        self.assertIn("반도체 지수(SOXX)", text)
+        self.assertIn("피어 평균(동일가중: 이튼)", text)
+        self.assertNotIn("표시하지 않습니다", text)
         self.assertNotIn("2.50", text)
         self.assertNotIn("1.25", text)
         self.assertNotIn("$123.45", text)
@@ -159,6 +163,89 @@ class ProductContractTest(unittest.TestCase):
         self.assertEqual(activity.average_volume, 100)
         self.assertAlmostEqual(activity.ratio, 1.6)
         self.assertTrue(activity.exploded)
+
+    def test_price_alerts_follow_integer_bands_in_one_direction(self):
+        self.assertEqual(hm.next_price_alert_level(-4.4), 4)
+        self.assertIsNone(hm.next_price_alert_level(-4.7, 4, "down"))
+        self.assertEqual(hm.next_price_alert_level(-5.0, 4, "down"), 5)
+        self.assertEqual(hm.next_price_alert_level(-7.2, 5, "down"), 7)
+
+    def test_price_alert_does_not_rearm_on_reversal_or_retracement(self):
+        self.assertEqual(hm.next_price_alert_level(8.1), 8)
+        self.assertIsNone(hm.next_price_alert_level(5.2, 8, "up"))
+        self.assertIsNone(hm.next_price_alert_level(-9.1, 8, "up"))
+
+    def test_periodic_sec_filing_is_summarized_and_related_8k_is_deduped(self):
+        accession = "0000000000-26-000001"
+
+        def metric(tag, unit, prior, current):
+            return tag, {
+                "units": {unit: [
+                    {
+                        "accn": accession,
+                        "start": "2025-04-01",
+                        "end": "2025-06-30",
+                        "val": prior,
+                    },
+                    {
+                        "accn": accession,
+                        "start": "2026-04-01",
+                        "end": "2026-06-30",
+                        "val": current,
+                    },
+                ]}
+            }
+
+        facts = dict([
+            metric("RevenueFromContractWithCustomerExcludingAssessedTax", "USD", 2_600, 3_250),
+            metric("OperatingIncomeLoss", "USD", 400, 600),
+            metric("NetIncomeLoss", "USD", 300, 450),
+            metric("EarningsPerShareDiluted", "USD/shares", 0.80, 1.20),
+        ])
+        company_facts = {"facts": {"us-gaap": facts}}
+        ten_q = hm.CompanyFiling(
+            form="10-Q",
+            filing_date="2026-07-29",
+            report_date="2026-06-30",
+            accession=accession,
+            hash="tenq",
+            url="https://sec.example/10q",
+        )
+        eight_k = hm.CompanyFiling(
+            form="8-K",
+            filing_date="2026-07-29",
+            report_date="2026-07-29",
+            accession="0000000000-26-000002",
+            hash="eightk",
+            items="2.02,7.01,9.01",
+            url="https://sec.example/8k",
+        )
+
+        analyzed = hm.analyze_company_filings([ten_q, eight_k], company_facts)
+        alertable = hm.alertable_company_filings(analyzed)
+        text = visible_text(hm.format_company_filings_block(alertable))
+
+        self.assertEqual(alertable, [ten_q])
+        self.assertTrue(eight_k.skip)
+        self.assertIn("매출", text)
+        self.assertIn("전년 동기 대비 +25.0%", text)
+        self.assertIn("논지 강화", text)
+        self.assertIn("SEC 원문", text)
+        self.assertNotIn("내용 확인 필요", text)
+
+    def test_failed_sec_analysis_is_not_marked_seen(self):
+        state = {"last_company_filing_hashes": []}
+        filing = hm.CompanyFiling(hash="retry", analysis_status="failed")
+
+        hm.remember_company_filings(state, [filing])
+
+        self.assertEqual(state["last_company_filing_hashes"], [])
+
+    def test_workflow_stages_only_existing_state_files(self):
+        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+
+        self.assertIn('if [ -f "$file" ]', workflow)
+        self.assertIn('git add -f -- "$file"', workflow)
 
     def test_volume_below_threshold_is_not_exploded(self):
         activity = hm.calculate_volume_activity([100] * 20 + [149])
