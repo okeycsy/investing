@@ -3970,6 +3970,82 @@ def run_normal():
     save_weekly_state(ws)
 
 
+def run_preview():
+    """최신 데이터를 사용하되 운영 상태를 변경하지 않는 정규장 알림 미리보기."""
+    log.info("=== PREVIEW ===")
+    SOURCE_HEALTH.clear()
+    try:
+        assumed_change_pct = float(os.environ.get("PREVIEW_CHANGE_PCT", "4.0"))
+    except ValueError:
+        assumed_change_pct = 4.0
+
+    price = fetch_price()
+    _set_source_health("Yahoo 시세", "정상" if price else "실패")
+    if price:
+        price.change_pct = assumed_change_pct
+    else:
+        price = PriceData(change_pct=assumed_change_pct)
+
+    direction = _direction_label(assumed_change_pct)
+    blocks = [
+        _sec(f"*{DISPLAY_TICKER} 큰 폭 {direction} 감지*"),
+    ]
+
+    relative_performance = fetch_relative_performance(assumed_change_pct)
+    blocks.extend(format_beta_block(relative_performance))
+
+    volume_activity = make_volume_activity(price.volume, price.vol_avg_20d)
+    blocks.extend(format_volume_activity_block(volume_activity, finalized=False))
+
+    if price.current > 0:
+        volume_profile = analyze_volume_profile(price.current)
+        if volume_profile:
+            blocks.extend(format_volume_profile_block(volume_profile))
+
+    closes = fetch_price_history(60)
+    if closes:
+        technicals = get_technical_signals(closes)
+        if technicals.rsi_alert or technicals.macd_alert:
+            blocks.extend(format_technicals_block(technicals))
+
+    filings = fetch_company_filings()
+    _set_source_health("SEC 공시", "정상" if filings else "새 공시 없음")
+    if filings:
+        analyzed_filings = analyze_company_filings(filings)
+        blocks.extend(format_company_filings_block(analyzed_filings))
+
+    news = fetch_news()
+    if news:
+        analyzed_news = translate_news(news)
+        blocks.extend(format_news_block(analyzed_news))
+    else:
+        _set_source_health("AI 뉴스", "새 뉴스 없음")
+
+    insiders = material_insider_trades(fetch_insider_trades())
+    if insiders:
+        blocks.extend(format_insider_block(insiders))
+
+    blocks.insert(0, {
+        "type": "header",
+        "text": {
+            "type": "plain_text",
+            "text": (
+                f"{DISPLAY_TICKER} 정규장 알림 미리보기 | "
+                f"{assumed_change_pct:+.1f}% 가정"
+            ),
+        },
+    })
+    blocks.insert(1, _ctx(
+        "실제 최신 데이터 사용 · 종목 등락률만 가정 · 운영 알림 상태 변경 없음"
+    ))
+    blocks.insert(2, _ctx(
+        "데이터 상태: "
+        + " · ".join(f"{name} {status}" for name, status in SOURCE_HEALTH.items())
+    ))
+    blocks.extend(_footer())
+    send_slack(blocks)
+
+
 def run_close():
     """
     장 마감 모드: 핵심 판단을 먼저 보여주고 기존의 유용한 상세를 보존한다.
@@ -4341,6 +4417,7 @@ def main():
     log.info(f"{TICKER} Monitor v3.2 — mode: {mode} | {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}")
     {
         "normal": run_normal,
+        "preview": run_preview,
         "close": run_close,
         "morning": run_morning,
         "13f": run_13f,

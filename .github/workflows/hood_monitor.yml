@@ -25,9 +25,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'RUN_MODE (normal/close/weekly/13f)'
+        description: 'RUN_MODE (normal/preview/close/weekly/13f)'
         required: true
         default: 'normal'
+      preview_change_pct:
+        description: 'preview 모드 가정 등락률'
+        required: false
+        default: '4.0'
 
 jobs:
   run:
@@ -91,10 +95,11 @@ jobs:
           SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
           RUN_MODE:           ${{ steps.mode.outputs.mode }}
+          PREVIEW_CHANGE_PCT: ${{ github.event.inputs.preview_change_pct }}
         run: python hood_monitor.py
 
       - name: Commit state files
-        if: success() && steps.mode.outputs.mode != 'skip'
+        if: success() && steps.mode.outputs.mode != 'skip' && steps.mode.outputs.mode != 'preview'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

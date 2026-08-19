@@ -308,6 +308,51 @@ class ProductContractTest(unittest.TestCase):
 
         self.assertNotIn("dca", source.lower())
 
+    def test_preview_uses_assumed_move_without_mutating_state(self):
+        price = hm.PriceData(
+            current=272.54,
+            prev_close=270.0,
+            change_pct=0.94,
+            volume=160,
+            vol_avg_20d=100,
+        )
+        with (
+            patch.dict("os.environ", {"PREVIEW_CHANGE_PCT": "4.0"}),
+            patch.object(hm, "fetch_price", return_value=price),
+            patch.object(hm, "fetch_relative_performance", return_value={
+                "actual_pct": 4.0,
+                "benchmark_pct": 1.0,
+                "peer_changes": {"ETN": 0.5, "NVT": 0.7, "GEV": 0.9},
+            }),
+            patch.object(hm, "analyze_volume_profile", return_value=None),
+            patch.object(hm, "fetch_price_history", return_value=[]),
+            patch.object(hm, "fetch_company_filings", return_value=[]),
+            patch.object(hm, "fetch_news", return_value=[]),
+            patch.object(hm, "fetch_insider_trades", return_value=[]),
+            patch.object(hm, "save_state") as save_state,
+            patch.object(hm, "save_weekly_state") as save_weekly_state,
+            patch.object(hm, "send_slack") as send_slack,
+        ):
+            hm.run_preview()
+
+        blocks = send_slack.call_args.args[0]
+        text = visible_text(blocks)
+        self.assertIn("+4.0% 가정", text)
+        self.assertIn("큰 폭 양전 감지", text)
+        self.assertIn("반도체 지수(SOXX) 대비 *아웃퍼폼*", text)
+        self.assertIn("피어 평균", text)
+        self.assertIn("평균 대비 급증", text)
+        self.assertNotIn("272.54", text)
+        save_state.assert_not_called()
+        save_weekly_state.assert_not_called()
+
+    def test_preview_workflow_does_not_commit_state(self):
+        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+
+        self.assertIn("normal/preview/close/weekly/13f", workflow)
+        self.assertIn("PREVIEW_CHANGE_PCT", workflow)
+        self.assertIn("steps.mode.outputs.mode != 'preview'", workflow)
+
     def test_primary_alert_blocks_use_clean_text_without_status_emoji(self):
         blocks = []
         blocks += hm.format_beta_block({
