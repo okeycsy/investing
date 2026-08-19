@@ -1,4 +1,5 @@
 import inspect
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, time, timedelta
@@ -223,6 +224,16 @@ class ProductContractTest(unittest.TestCase):
         self.assertIsNone(hm.next_price_alert_level(5.2, 8, "up"))
         self.assertIsNone(hm.next_price_alert_level(-9.1, 8, "up"))
 
+    def test_price_move_headline_has_direction_emoji_and_threshold(self):
+        self.assertEqual(
+            hm.format_price_move_headline(4.2, level=4),
+            "📈 $VRT +4% 상승 구간 진입",
+        )
+        self.assertEqual(
+            hm.format_price_move_headline(-5.1, level=5),
+            "📉 $VRT -5% 하락 구간 진입",
+        )
+
     def test_periodic_sec_filing_is_summarized_and_related_8k_is_deduped(self):
         accession = "0000000000-26-000001"
 
@@ -289,11 +300,55 @@ class ProductContractTest(unittest.TestCase):
 
         self.assertEqual(state["last_company_filing_hashes"], [])
 
+    def test_sec_cache_migrates_legacy_hashes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "sec_alert_cache.json"
+            with patch.object(hm, "SEC_ALERT_CACHE_FILE", cache_path):
+                cache = hm.load_sec_alert_cache({
+                    "last_company_filing_hashes": ["legacy-a", "legacy-b"],
+                })
+
+        self.assertTrue(cache["initialized"])
+        self.assertEqual(
+            cache["processed_filing_hashes"],
+            ["legacy-a", "legacy-b"],
+        )
+
+    def test_sec_cache_baselines_existing_filings_and_allows_only_new_ones(self):
+        cache = {
+            "initialized": False,
+            "processed_filing_hashes": [],
+        }
+        old_filings = [
+            hm.CompanyFiling(hash="old-a"),
+            hm.CompanyFiling(hash="old-b"),
+        ]
+        hm.remember_sec_filings(cache, old_filings, baseline=True)
+
+        self.assertEqual(hm.unseen_company_filings(cache, old_filings), [])
+        new_filing = hm.CompanyFiling(hash="new", analysis_status="success")
+        self.assertEqual(hm.unseen_company_filings(cache, [new_filing]), [new_filing])
+
+        hm.remember_sec_filings(cache, [new_filing])
+        self.assertEqual(hm.unseen_company_filings(cache, [new_filing]), [])
+
+    def test_failed_sec_analysis_is_not_written_to_dedicated_cache(self):
+        cache = {
+            "initialized": True,
+            "processed_filing_hashes": [],
+        }
+        filing = hm.CompanyFiling(hash="retry", analysis_status="failed")
+
+        hm.remember_sec_filings(cache, [filing])
+
+        self.assertEqual(cache["processed_filing_hashes"], [])
+
     def test_workflow_stages_only_existing_state_files(self):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()
 
         self.assertIn('if [ -f "$file" ]', workflow)
         self.assertIn('git add -f -- "$file"', workflow)
+        self.assertIn("*_sec_alert_cache.json", workflow)
 
     def test_workflow_has_no_dca_modes_or_inputs(self):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()
@@ -337,8 +392,8 @@ class ProductContractTest(unittest.TestCase):
 
         blocks = send_slack.call_args.args[0]
         text = visible_text(blocks)
-        self.assertIn("+4.0% 가정", text)
-        self.assertIn("큰 폭 양전 감지", text)
+        self.assertIn("📈 +4.0% 상승", text)
+        self.assertIn("📈 $VRT +4.0% 상승 가정", text)
         self.assertIn("반도체 지수(SOXX) 대비 *아웃퍼폼*", text)
         self.assertIn("피어 평균", text)
         self.assertIn("평균 대비 급증", text)
@@ -357,7 +412,7 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn("preview_change_pct=${PREVIEW_CHANGE:-4.0}", workflow)
         self.assertIn("[alert-preview]", smoke_workflow)
 
-    def test_primary_alert_blocks_use_clean_text_without_status_emoji(self):
+    def test_primary_alert_uses_emoji_only_for_key_information(self):
         blocks = []
         blocks += hm.format_beta_block({
             "actual_pct": -1.0,
@@ -378,7 +433,11 @@ class ProductContractTest(unittest.TestCase):
         }])
         text = visible_text(blocks)
 
-        for emoji in "🔔📊📐🏛📰🧮🛡📈🩳🔥⚪🔴🟢🟡🚀💥🐋⚠":
+        self.assertIn("📉 $VRT", text)
+        self.assertIn("↘️ 반도체 지수", text)
+        self.assertIn("↘️ 피어 평균", text)
+        self.assertIn("📰 주요 뉴스", text)
+        for emoji in "🔔📊📐🏛🧮🛡🩳🔥⚪🔴🟢🟡🚀💥🐋⚠":
             self.assertNotIn(emoji, text)
 
     def test_volume_below_threshold_is_not_exploded(self):

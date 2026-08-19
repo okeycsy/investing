@@ -121,7 +121,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          for file in state.json weekly_state.json beta_cache.json app_rank_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json; do
+          for file in state.json weekly_state.json beta_cache.json app_rank_cache.json sec_alert_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json *_sec_alert_cache.json; do
             if [ -f "$file" ]; then
               git add -f -- "$file"
             fi

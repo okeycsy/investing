@@ -51,6 +51,11 @@ SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 STATE_FILE = resolve_runtime_file(CONFIG, "state.json", "MONITOR_STATE_FILE")
 WEEKLY_STATE_FILE = resolve_runtime_file(CONFIG, "weekly_state.json", "MONITOR_WEEKLY_STATE_FILE")
+SEC_ALERT_CACHE_FILE = resolve_runtime_file(
+    CONFIG,
+    "sec_alert_cache.json",
+    "MONITOR_SEC_ALERT_CACHE_FILE",
+)
 
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 YAHOO_QUOTE_URLS = [
@@ -288,6 +293,60 @@ def load_weekly_state() -> dict:
 def save_weekly_state(ws: dict):
     WEEKLY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     WEEKLY_STATE_FILE.write_text(json.dumps(ws, indent=2, ensure_ascii=False))
+
+
+def load_sec_alert_cache(state: Optional[dict] = None) -> dict:
+    """SEC 전용 처리 캐시를 읽고 기존 통합 상태의 해시를 마이그레이션한다."""
+    cache = {
+        "version": 1,
+        "initialized": False,
+        "processed_filing_hashes": [],
+        "updated_at": "",
+    }
+    if SEC_ALERT_CACHE_FILE.exists():
+        try:
+            stored = json.loads(SEC_ALERT_CACHE_FILE.read_text())
+            if isinstance(stored, dict):
+                cache.update(stored)
+        except Exception:
+            log.warning("SEC alert cache parse failed; rebuilding from legacy state")
+
+    legacy_hashes = (state or {}).get("last_company_filing_hashes", [])
+    if legacy_hashes:
+        cache["processed_filing_hashes"] = _merge_hashes(
+            cache.get("processed_filing_hashes", []),
+            legacy_hashes,
+        )
+        cache["initialized"] = True
+    return cache
+
+
+def save_sec_alert_cache(cache: dict):
+    SEC_ALERT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    cache["updated_at"] = datetime.now(UTC).isoformat()
+    SEC_ALERT_CACHE_FILE.write_text(
+        json.dumps(cache, indent=2, ensure_ascii=False)
+    )
+
+
+def unseen_company_filings(cache: dict, filings: list) -> list:
+    processed = set(cache.get("processed_filing_hashes", []))
+    return [filing for filing in filings if filing.hash and filing.hash not in processed]
+
+
+def remember_sec_filings(cache: dict, filings: list, *, baseline: bool = False):
+    hashes = [
+        filing.hash
+        for filing in filings
+        if filing.hash and (baseline or filing.analysis_status == "success")
+    ]
+    if not hashes:
+        return
+    cache["processed_filing_hashes"] = _merge_hashes(
+        cache.get("processed_filing_hashes", []),
+        hashes,
+    )
+    cache["initialized"] = True
 
 
 def _merge_hashes(existing: list, new_hashes: list, limit: int = 60) -> list:
@@ -763,6 +822,12 @@ def _direction_label(change_pct: Optional[float]) -> str:
     return "양전" if change_pct > 0 else "음전"
 
 
+def _direction_icon(change_pct: Optional[float]) -> str:
+    if change_pct is None or abs(change_pct) < 0.01:
+        return "↔️"
+    return "📈" if change_pct > 0 else "📉"
+
+
 def _relative_label(actual_pct: Optional[float], benchmark_pct: Optional[float]) -> str:
     if actual_pct is None or benchmark_pct is None:
         return "비교 불가"
@@ -772,6 +837,30 @@ def _relative_label(actual_pct: Optional[float], benchmark_pct: Optional[float])
     if diff < -0.15:
         return "언더퍼폼"
     return "동조"
+
+
+def _relative_icon(outcome: str) -> str:
+    return {
+        "아웃퍼폼": "↗️",
+        "언더퍼폼": "↘️",
+        "동조": "↔️",
+    }.get(outcome, "")
+
+
+def format_price_move_headline(
+    change_pct: float,
+    *,
+    level: Optional[int] = None,
+    preview: bool = False,
+) -> str:
+    movement = "상승" if change_pct > 0 else "하락" if change_pct < 0 else "보합"
+    if level is None:
+        percent = f"{change_pct:+.1f}%"
+    else:
+        signed_level = level if change_pct > 0 else -level
+        percent = f"{signed_level:+d}%"
+    suffix = "가정" if preview else "구간 진입"
+    return f"{_direction_icon(change_pct)} {DISPLAY_TICKER} {percent} {movement} {suffix}"
 
 
 def _peer_group_name(peer_changes: dict) -> str:
@@ -812,15 +901,15 @@ def format_beta_block(bd: dict) -> list:
     direction = _direction_label(actual)
     benchmark_outcome = _relative_label(actual, benchmark_pct)
     peer_outcome = _relative_label(actual, peer_avg)
-    lines = [f"{DISPLAY_TICKER}: *{direction}*"]
+    lines = [f"{_direction_icon(actual)} {DISPLAY_TICKER}: *{direction}*"]
     if benchmark_pct is not None:
         lines.append(
-            f"반도체 지수({BETA_BENCHMARK}) 대비 "
+            f"{_relative_icon(benchmark_outcome)} 반도체 지수({BETA_BENCHMARK}) 대비 "
             f"*{benchmark_outcome}*"
         )
     if peer_avg is not None:
         lines.append(
-            f"피어 평균(동일가중: {_peer_group_name(peer_changes)}) 대비 "
+            f"{_relative_icon(peer_outcome)} 피어 평균(동일가중: {_peer_group_name(peer_changes)}) 대비 "
             f"*{peer_outcome}*"
         )
     return [_sec("*방향 / 상대 흐름*\n" + "\n".join(lines))]
@@ -3483,9 +3572,13 @@ def build_decision_summary_blocks(
     peer_outcome = _relative_label(actual_pct, peer_avg)
     relative_parts = []
     if benchmark_pct is not None:
-        relative_parts.append(f"반도체 지수 {benchmark_outcome}")
+        relative_parts.append(
+            f"{_relative_icon(benchmark_outcome)} 반도체 지수 {benchmark_outcome}"
+        )
     if peer_avg is not None:
-        relative_parts.append(f"피어 평균 {peer_outcome}")
+        relative_parts.append(
+            f"{_relative_icon(peer_outcome)} 피어 평균 {peer_outcome}"
+        )
     relative = " · ".join(relative_parts) or "비교 불가"
     evidence = _thesis_evidence(news, filings, insiders)
     thesis = _thesis_decision(news, filings, insiders)
@@ -3513,7 +3606,7 @@ def build_decision_summary_blocks(
     blocks = [
         _sec(
             f"*오늘의 판단*\n"
-            f"시장 방향: *{direction}*\n"
+            f"시장 방향: {_direction_icon(actual_pct)} *{direction}*\n"
             f"상대 흐름: *{relative}*\n"
             f"핵심 변화: *{event_text}*\n"
             f"투자 논지: *{thesis}*"
@@ -3652,7 +3745,7 @@ def format_company_filings_block(filings: list) -> list:
     filings = alertable_company_filings(filings)
     if not filings:
         return []
-    blocks = [_sec("*발행사 중요 SEC 공시*")]
+    blocks = [_sec("*📄 발행사 중요 SEC 공시*")]
     impact_labels = {
         "strengthen": "논지 강화",
         "neutral": "중립",
@@ -3705,7 +3798,7 @@ def format_news_block(news: list) -> list:
     relevant = [n for n in news if not n.get("skip") and n.get("summary")]
     if not relevant:
         return []
-    blocks = [_sec("*주요 뉴스*")]
+    blocks = [_sec("*📰 주요 뉴스*")]
     impact_labels = {
         "strengthen": "논지 강화",
         "neutral": "논지 중립",
@@ -3822,6 +3915,7 @@ def run_normal():
     SOURCE_HEALTH.clear()
     initial_state = not STATE_FILE.exists()
     state = load_state()
+    sec_cache = load_sec_alert_cache(state)
     ws = load_weekly_state()
     blocks = []
     today = datetime.now(NY_TZ).strftime("%Y-%m-%d")
@@ -3851,7 +3945,7 @@ def run_normal():
             if alert_level is not None:
                 label = _direction_label(price.change_pct)
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text":
-                    f"*{DISPLAY_TICKER} 큰 폭 {label} 감지*"}})
+                    f"*{format_price_move_headline(price.change_pct, level=alert_level)}*"}})
 
                 relative_performance = fetch_relative_performance(price.change_pct)
                 blocks.extend(format_beta_block(relative_performance))
@@ -3886,18 +3980,20 @@ def run_normal():
         ws.setdefault("rsi_readings", []).append(technicals.rsi_14)
 
     company_filings = fetch_company_filings()
-    if initial_state:
-        remember_company_filing_baseline(state, company_filings)
+    if not sec_cache.get("initialized"):
+        if company_filings:
+            remember_company_filing_baseline(state, company_filings)
+            remember_sec_filings(sec_cache, company_filings, baseline=True)
         new_filings = []
-        _set_source_health("SEC 공시", "초기 기준선 설정")
+        _set_source_health("SEC 공시", "전용 캐시 기준선 설정")
     else:
-        new_filings = [filing for filing in company_filings
-                       if filing.hash not in state.get("last_company_filing_hashes", [])]
+        new_filings = unseen_company_filings(sec_cache, company_filings)
     if new_filings:
         new_filings = analyze_company_filings(new_filings)
         alert_filings = alertable_company_filings(new_filings)
         blocks.extend(format_company_filings_block(alert_filings))
         remember_company_filings(state, new_filings)
+        remember_sec_filings(sec_cache, new_filings)
         for filing in alert_filings:
             ws.setdefault("company_filings", []).append(
                 f"{filing.form}: {filing.summary} ({filing.filing_date})"
@@ -3967,6 +4063,7 @@ def run_normal():
         log.info("No alerts — quiet")
 
     save_state(state)
+    save_sec_alert_cache(sec_cache)
     save_weekly_state(ws)
 
 
@@ -3986,9 +4083,9 @@ def run_preview():
     else:
         price = PriceData(change_pct=assumed_change_pct)
 
-    direction = _direction_label(assumed_change_pct)
+    movement = "상승" if assumed_change_pct > 0 else "하락" if assumed_change_pct < 0 else "보합"
     blocks = [
-        _sec(f"*{DISPLAY_TICKER} 큰 폭 {direction} 감지*"),
+        _sec(f"*{format_price_move_headline(assumed_change_pct, preview=True)}*"),
     ]
 
     relative_performance = fetch_relative_performance(assumed_change_pct)
@@ -4008,8 +4105,16 @@ def run_preview():
         if technicals.rsi_alert or technicals.macd_alert:
             blocks.extend(format_technicals_block(technicals))
 
-    filings = fetch_company_filings()
-    _set_source_health("SEC 공시", "정상" if filings else "새 공시 없음")
+    sec_cache = load_sec_alert_cache(load_state())
+    fetched_filings = fetch_company_filings()
+    filings = (
+        unseen_company_filings(sec_cache, fetched_filings)
+        if sec_cache.get("initialized") else []
+    )
+    if not sec_cache.get("initialized"):
+        _set_source_health("SEC 공시", "전용 캐시 기준선 대기")
+    else:
+        _set_source_health("SEC 공시", "신규 공시 있음" if filings else "새 공시 없음")
     if filings:
         analyzed_filings = analyze_company_filings(filings)
         blocks.extend(format_company_filings_block(analyzed_filings))
@@ -4030,8 +4135,9 @@ def run_preview():
         "text": {
             "type": "plain_text",
             "text": (
-                f"{DISPLAY_TICKER} 정규장 알림 미리보기 | "
-                f"{assumed_change_pct:+.1f}% 가정"
+                f"{DISPLAY_TICKER} 정규장 미리보기 | "
+                f"{_direction_icon(assumed_change_pct)} "
+                f"{assumed_change_pct:+.1f}% {movement}"
             ),
         },
     })
@@ -4054,6 +4160,7 @@ def run_close():
     SOURCE_HEALTH.clear()
     initial_state = not STATE_FILE.exists()
     state = load_state()
+    sec_cache = load_sec_alert_cache(state)
     ws = load_weekly_state()
     blocks = []
     benchmark_pct = None
@@ -4144,19 +4251,21 @@ def run_close():
         blocks.extend(format_appstore_rank_block(prev_app_rank, curr_app_rank))
 
     company_filings = fetch_company_filings()
-    if initial_state:
-        remember_company_filing_baseline(state, company_filings)
+    if not sec_cache.get("initialized"):
+        if company_filings:
+            remember_company_filing_baseline(state, company_filings)
+            remember_sec_filings(sec_cache, company_filings, baseline=True)
         new_filings = []
-        _set_source_health("SEC 공시", "초기 기준선 설정")
+        _set_source_health("SEC 공시", "전용 캐시 기준선 설정")
     else:
-        new_filings = [filing for filing in company_filings
-                       if filing.hash not in state.get("last_company_filing_hashes", [])]
+        new_filings = unseen_company_filings(sec_cache, company_filings)
     alert_filings = []
     if new_filings:
         new_filings = analyze_company_filings(new_filings)
         alert_filings = alertable_company_filings(new_filings)
         blocks.extend(format_company_filings_block(alert_filings))
         remember_company_filings(state, new_filings)
+        remember_sec_filings(sec_cache, new_filings)
         for filing in alert_filings:
             ws.setdefault("company_filings", []).append(
                 f"{filing.form}: {filing.summary} ({filing.filing_date})"
@@ -4236,6 +4345,7 @@ def run_close():
     send_slack(blocks)
 
     save_state(state)
+    save_sec_alert_cache(sec_cache)
     save_weekly_state(ws)
     log.info("Close done")
 
@@ -4329,7 +4439,10 @@ def run_weekly():
             )
     weekly_change_str = ""
     if weekly_pct is not None:
-        weekly_change_str = f"이번 주 방향: {_direction_label(weekly_pct)}"
+        weekly_change_str = (
+            f"{_direction_icon(weekly_pct)} 이번 주 방향: "
+            f"{_direction_label(weekly_pct)}"
+        )
 
     alerts = ws.get("alerts_fired", [])
     insider_summary = ws.get("insider_trades", [])
