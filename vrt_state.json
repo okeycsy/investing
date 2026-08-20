@@ -109,9 +109,9 @@
     272.54,
     261.0
   ],
-  "price_alert_max_pct": 4,
-  "price_alert_direction": "down",
-  "price_alert_date": "2026-08-19",
+  "price_alert_max_pct": 0,
+  "price_alert_direction": "",
+  "price_alert_date": "2026-08-20",
   "volume_alert_date": "",
   "pending_morning_alert": null
 }
