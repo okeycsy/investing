@@ -53,7 +53,6 @@
   ],
   "last_13f_positions": {},
   "price_history": [
-    319.78,
     314.18,
     315.71,
     323.39,
@@ -112,7 +111,8 @@
     292.43,
     272.54,
     261.0,
-    264.63
+    264.63,
+    262.5
   ],
   "price_alert_max_pct": 0,
   "price_alert_direction": "",
