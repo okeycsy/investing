@@ -36,29 +36,29 @@
     "4151a9ff1a64"
   ],
   "last_insider_hashes": [
-    "0f2000fce3f8",
     "33531b699601",
     "44568575f517",
     "fb8d93a46b18",
-    "154d5f52b4f5",
-    "4b458fbc68a3",
     "f76f2de69f87",
     "19ceae218474",
-    "d3c86ba3121e",
+    "154d5f52b4f5",
+    "0f2000fce3f8",
+    "4b458fbc68a3",
     "12da0f4c40cb",
     "8703729c4f1c",
+    "d3c86ba3121e",
+    "199cf92e49a3",
     "f16b802b3254",
     "d0f885f2540e",
     "0609c53ee110",
-    "199cf92e49a3",
     "1a632c50ecb0",
     "434d363f5893",
     "b601e2d8498a",
+    "98e66715e063",
     "ddb4e5f6e67c",
     "732e649b8a05",
     "9826e0bec7d2",
-    "98e66715e063",
-    "ea9092190069"
+    "76450d8da8ff"
   ],
   "last_13f_hashes": [],
   "last_company_filing_hashes": [
@@ -126,7 +126,7 @@
     264.63,
     261.95,
     254.97,
-    259.6
+    259.45
   ],
   "price_alert_max_pct": 0,
   "price_alert_direction": "",
