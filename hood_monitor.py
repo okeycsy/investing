@@ -389,6 +389,28 @@ BROWSER_UA = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 _last_yahoo_call = 0.0
+_sec_archive_bypass_logged = False
+
+
+def use_direct_sec_archives() -> bool:
+    """Return whether raw SEC Archives documents should be requested directly."""
+    mode = os.environ.get("SEC_ARCHIVE_MODE", "auto").strip().lower()
+    if mode in {"direct", "sec", "1", "true", "on"}:
+        return True
+    if mode in {"yahoo", "fallback", "0", "false", "off"}:
+        return False
+    if os.environ.get("RUNNER_ENVIRONMENT", "").strip().lower() == "self-hosted":
+        return True
+    return os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true"
+
+
+def log_sec_archive_bypass():
+    global _sec_archive_bypass_logged
+    if not _sec_archive_bypass_logged:
+        log.info(
+            "SEC raw Archives 직접 요청 생략 — GitHub-hosted IP 차단 회피"
+        )
+        _sec_archive_bypass_logged = True
 
 
 def _yahoo_throttle():
@@ -2808,6 +2830,9 @@ def fetch_insider_trades() -> list:
         log.info("Form 4 스킵: monitor_config.md에 cik 미설정")
         _set_source_health("SEC Form4", "CIK 없음")
         return trades
+    if not use_direct_sec_archives():
+        log_sec_archive_bypass()
+        return _fetch_insider_trades_from_yahoo()
     try:
         candidates = _form4_candidates_from_submissions(limit=10)
         if candidates:
@@ -3265,6 +3290,9 @@ def _parse_13f_position(entity_cik: str, acc_clean: str) -> tuple:
     Returns: (shares, value_usd, change_type)
     """
     if not entity_cik:
+        return 0, 0.0, ""
+    if not use_direct_sec_archives():
+        log_sec_archive_bypass()
         return 0, 0.0, ""
 
     cik_num = entity_cik.lstrip("0") or "0"

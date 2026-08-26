@@ -77,8 +77,10 @@ class MonitorConfig:
         override = os.environ.get("SEC_USER_AGENT", "").strip()
         if override:
             return override
-        company = self.company_name.strip() or self.ticker
-        return f"TickerMonitor/1.0 ({company}; ticker={self.ticker})"
+        identity = "okeycsy TickerMonitor/1.0"
+        if "@" in self.sec_contact:
+            return f"{identity} {self.sec_contact}"
+        return identity
 
     @property
     def sec_headers(self) -> dict[str, str]:

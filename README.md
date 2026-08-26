@@ -42,8 +42,9 @@ market_scan_focus: $VRT
 - `SEC_CONTACT`
 - `SEC_USER_AGENT`
 - `SEC_LEGACY_USER_AGENT`
+- `SEC_ARCHIVE_MODE` (`auto`, `direct`, `yahoo`)
 
-`SEC_CONTACT`는 SEC 요청의 `From` 헤더에 들어갈 연락처입니다. SEC가 특정 이메일 도메인을 `User-Agent` 안에서 차단할 수 있어 연락처는 별도 헤더로 보냅니다. 필요하면 `SEC_USER_AGENT`, legacy EDGAR/Archives 경로는 `SEC_LEGACY_USER_AGENT` 환경 변수로 앱 식별자를 직접 지정할 수 있습니다.
+`SEC_CONTACT`는 SEC 공식 지침에 맞춰 `User-Agent`와 `From` 헤더에 함께 들어갑니다. GitHub-hosted runner는 공유 IP가 SEC raw Archives에서 차단될 수 있어 운영 워크플로는 `SEC_ARCHIVE_MODE=yahoo`로 Form 4 원문 직접 호출을 생략합니다. 발행사 공시와 XBRL은 공식 `data.sec.gov` API를 계속 사용합니다. 로컬 또는 self-hosted runner에서 raw Archives를 직접 읽으려면 `SEC_ARCHIVE_MODE=direct`로 지정할 수 있습니다.
 
 ## 수동 실행
 

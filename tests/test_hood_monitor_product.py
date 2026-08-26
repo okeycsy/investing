@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import hood_monitor as hm
+from monitor_config import MonitorConfig
 
 
 def visible_text(blocks):
@@ -357,6 +358,39 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn("git pull --rebase origin main && git push origin main", workflow)
         self.assertIn('sleep "$WAIT_SECONDS"', workflow)
         self.assertIn("State push failed after $MAX_ATTEMPTS attempts", workflow)
+
+    def test_sec_user_agent_declares_contact_inline(self):
+        config = MonitorConfig(sec_contact="owner@example.com")
+
+        self.assertIn("okeycsy TickerMonitor/1.0", config.sec_user_agent)
+        self.assertIn("owner@example.com", config.sec_user_agent)
+        self.assertEqual(config.sec_headers["From"], "owner@example.com")
+
+    def test_github_hosted_runner_bypasses_raw_sec_archives(self):
+        yahoo_trade = hm.InsiderTrade(filer="Fallback", trade_type="Sale")
+        with (
+            patch.dict("os.environ", {
+                "GITHUB_ACTIONS": "true",
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "SEC_ARCHIVE_MODE": "auto",
+            }),
+            patch.object(hm, "_form4_candidates_from_submissions") as submissions,
+            patch.object(
+                hm,
+                "_fetch_insider_trades_from_yahoo",
+                return_value=[yahoo_trade],
+            ) as yahoo,
+        ):
+            trades = hm.fetch_insider_trades()
+
+        self.assertEqual(trades, [yahoo_trade])
+        submissions.assert_not_called()
+        yahoo.assert_called_once_with()
+
+    def test_workflow_disables_raw_sec_archives_on_hosted_runner(self):
+        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+
+        self.assertIn("SEC_ARCHIVE_MODE:   yahoo", workflow)
 
     def test_workflow_has_no_dca_modes_or_inputs(self):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()

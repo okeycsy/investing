@@ -112,6 +112,7 @@ jobs:
           SEC_CONTACT:        ${{ secrets.SEC_CONTACT }}
           SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
+          SEC_ARCHIVE_MODE:   yahoo
           RUN_MODE:           ${{ steps.mode.outputs.mode }}
           PREVIEW_CHANGE_PCT: ${{ steps.mode.outputs.preview_change_pct }}
         run: python hood_monitor.py
