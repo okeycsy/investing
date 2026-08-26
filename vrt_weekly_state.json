@@ -1,6 +1,8 @@
 {
   "week_start": "2026-08-24",
-  "alerts_fired": [],
+  "alerts_fired": [
+    "큰 폭 양전"
+  ],
   "insider_trades": [],
   "news_headlines": [],
   "company_filings": [],
@@ -43,7 +45,8 @@
     40.04,
     43.89,
     42.94,
-    44.14
+    44.14,
+    44.21
   ],
   "pcr_readings": [
     1.57,

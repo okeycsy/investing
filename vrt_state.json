@@ -129,10 +129,10 @@
     261.95,
     254.97,
     255.75,
-    263.67
+    263.81
   ],
-  "price_alert_max_pct": 0,
-  "price_alert_direction": "",
+  "price_alert_max_pct": 6,
+  "price_alert_direction": "up",
   "price_alert_date": "2026-08-26",
   "volume_alert_date": "",
   "pending_morning_alert": null
