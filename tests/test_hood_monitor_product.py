@@ -350,6 +350,14 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn('git add -f -- "$file"', workflow)
         self.assertIn("*_sec_alert_cache.json", workflow)
 
+    def test_workflow_retries_transient_state_push_failures(self):
+        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+
+        self.assertIn("MAX_ATTEMPTS=4", workflow)
+        self.assertIn("git pull --rebase origin main && git push origin main", workflow)
+        self.assertIn('sleep "$WAIT_SECONDS"', workflow)
+        self.assertIn("State push failed after $MAX_ATTEMPTS attempts", workflow)
+
     def test_workflow_has_no_dca_modes_or_inputs(self):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()
 

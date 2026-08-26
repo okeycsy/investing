@@ -131,5 +131,22 @@ jobs:
             exit 0
           fi
           git commit -m "chore: update state [skip ci]"
-          git pull --rebase
-          git push
+
+          # GitHub가 간헐적으로 commit_refs 단계에서 push를 거부하므로
+          # 최신 main에 다시 정렬한 뒤 짧은 간격으로 재시도한다.
+          MAX_ATTEMPTS=4
+          for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
+            if git pull --rebase origin main && git push origin main; then
+              exit 0
+            fi
+
+            git rebase --abort 2>/dev/null || true
+            if [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
+              echo "State push failed after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+
+            WAIT_SECONDS=$((ATTEMPT * 10))
+            echo "State push attempt $ATTEMPT failed; retrying in ${WAIT_SECONDS}s"
+            sleep "$WAIT_SECONDS"
+          done
