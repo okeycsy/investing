@@ -39,12 +39,12 @@
     "4151a9ff1a64"
   ],
   "last_insider_hashes": [
-    "0f2000fce3f8",
     "33531b699601",
     "44568575f517",
     "fb8d93a46b18",
-    "154d5f52b4f5",
+    "0f2000fce3f8",
     "4b458fbc68a3",
+    "154d5f52b4f5",
     "f76f2de69f87",
     "19ceae218474",
     "12da0f4c40cb",
@@ -61,7 +61,7 @@
     "ddb4e5f6e67c",
     "732e649b8a05",
     "98e66715e063",
-    "ea9092190069"
+    "76450d8da8ff"
   ],
   "last_13f_hashes": [],
   "last_company_filing_hashes": [
@@ -70,7 +70,6 @@
   ],
   "last_13f_positions": {},
   "price_history": [
-    331.44,
     323.92,
     300.51,
     300.57,
@@ -129,10 +128,11 @@
     254.97,
     255.75,
     263.81,
-    269.28
+    269.28,
+    256.91
   ],
-  "price_alert_max_pct": 0,
-  "price_alert_direction": "",
+  "price_alert_max_pct": 4,
+  "price_alert_direction": "down",
   "price_alert_date": "2026-08-28",
   "volume_alert_date": "",
   "pending_morning_alert": null
