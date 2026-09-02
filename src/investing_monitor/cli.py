@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sqlite3
+import tempfile
 import uuid
 from contextlib import closing
 from datetime import date, datetime, time, timedelta, timezone
@@ -37,6 +38,7 @@ from investing_monitor.application.briefs import (
 from investing_monitor.application.evidence import EvidenceIngestionService
 from investing_monitor.application.monitor import MarketCycleService
 from investing_monitor.application.quality import QualityReportService
+from investing_monitor.application.replay import MarketReplayLab
 from investing_monitor.application.sec_monitor import SecMonitorService
 from investing_monitor.presentation.evidence_messages import build_evidence_message
 from investing_monitor.runtime.tick import NEW_YORK, TickPlanner, TickRunner, TickTask
@@ -76,6 +78,14 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
     shadow_tick.add_argument("--scheduled-at", default="")
     shadow_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+
+    replay = subparsers.add_parser(
+        "replay-market",
+        help="replay completed trading days in an isolated quality lab",
+    )
+    replay.add_argument("--config", default="monitor_config.md")
+    replay.add_argument("--days", type=int, default=3)
+    replay.add_argument("--end-date", default="", help="YYYY-MM-DD, defaults to latest close")
 
     subparsers.add_parser("status", help="show persisted runtime status")
 
@@ -137,6 +147,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             "database_sha256": result.database_sha256,
         }
         return _emit(payload, args.summary_file)
+
+    if args.command == "replay-market":
+        now = datetime.now(timezone.utc)
+        profile = load_instrument_profile(args.config)
+        calendar = XNYSCalendar()
+        if args.end_date:
+            end_date = date.fromisoformat(args.end_date)
+            if not calendar.is_trading_day(end_date):
+                raise ValueError(f"{end_date} is not an XNYS trading day")
+        else:
+            end_date = _latest_completed_trading_date(now, calendar)
+        replay_dates = [end_date]
+        for _ in range(max(1, args.days) - 1):
+            replay_dates.append(calendar.previous_trading_day(replay_dates[-1]))
+        replay_dates.reverse()
+
+        with tempfile.TemporaryDirectory(prefix="investing-monitor-replay-") as directory:
+            replay_repository = SQLiteMonitorRepository(Path(directory) / "replay.db")
+            replay_adapter = YahooMarketDataAdapter(
+                YahooChartClient(),
+                calendar,
+                profile,
+            )
+            lab = MarketReplayLab(
+                replay_adapter,
+                calendar,
+                MarketCycleService(replay_repository, enqueue_alerts=False),
+            )
+            reports = [lab.replay_day(value) for value in replay_dates]
+        passed = all(report.quality_passed for report in reports)
+        _emit(
+            {
+                "command": args.command,
+                "profile": {
+                    "ticker": profile.ticker,
+                    "benchmark": profile.benchmark,
+                    "peers": list(profile.peers),
+                },
+                "passed": passed,
+                "days": [report.as_dict() for report in reports],
+            },
+            args.summary_file,
+        )
+        return 0 if passed else 1
 
     if args.command in {"market-tick", "shadow-tick"}:
         now = _parse_timestamp(args.now) if args.now else datetime.now(timezone.utc)
@@ -425,6 +479,16 @@ def _nominal_market_tick(now: datetime) -> datetime:
     seconds = int(now.timestamp())
     scheduled_seconds = ((seconds - 120) // 300) * 300 + 120
     return datetime.fromtimestamp(scheduled_seconds, timezone.utc)
+
+
+def _latest_completed_trading_date(now: datetime, calendar: XNYSCalendar) -> date:
+    ny_now = now.astimezone(NEW_YORK)
+    if (
+        calendar.is_trading_day(ny_now.date())
+        and now >= calendar.regular_close(ny_now.date())
+    ):
+        return ny_now.date()
+    return calendar.previous_trading_day(ny_now.date())
 
 
 def _iso(value: datetime | None) -> str | None:

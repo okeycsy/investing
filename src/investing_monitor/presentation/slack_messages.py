@@ -57,7 +57,8 @@ def build_price_band_message(
             _section(
                 f"*{status}*\n"
                 f"누적 {volume.observed_volume:,}주 | "
-                f"동시간대 {volume.lookback_sessions}일 평균 {volume.expected_volume:,}주 | "
+                f"동시간대 {volume.baseline_sessions}거래일 평균 "
+                f"{volume.expected_volume:,}주 | "
                 f"{volume_assessment.ratio:.1f}배"
             )
         )
@@ -107,7 +108,7 @@ def build_volume_message(
             _section(
                 f"*동시간대 거래량 터짐*\n"
                 f"누적 {volume.observed_volume:,}주 | "
-                f"과거 {volume.lookback_sessions}일 동시간 평균 "
+                f"과거 {volume.baseline_sessions}거래일 동시간 평균 "
                 f"{volume.expected_volume:,}주 | {ratio:.1f}배"
             ),
             _section(f"{direction_icon} *종목 방향: {direction_label}*\n{_relative_text(relative)}"),

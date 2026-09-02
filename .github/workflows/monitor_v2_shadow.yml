@@ -29,6 +29,7 @@ on:
           - doctor
           - market
           - shadow
+          - replay
       persist_state:
         description: 'Checkpoint the SQLite snapshot to runtime-state'
         required: true
@@ -92,6 +93,10 @@ jobs:
       - name: Build product quality report
         if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.mode == 'shadow')
         run: investing-monitor --db .runtime/monitor.db quality-report
+
+      - name: Replay three completed trading days
+        if: inputs.mode == 'replay'
+        run: investing-monitor replay-market --days 3
 
       - name: Show runtime status
         if: inputs.mode == 'status'

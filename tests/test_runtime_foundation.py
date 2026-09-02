@@ -330,6 +330,7 @@ class ShadowWorkflowTest(unittest.TestCase):
         self.assertIn("market-tick", workflow)
         self.assertIn("shadow-tick", workflow)
         self.assertIn("quality-report", workflow)
+        self.assertIn("replay-market --days 3", workflow)
         self.assertIn("github.event_name == 'push'", workflow)
 
 

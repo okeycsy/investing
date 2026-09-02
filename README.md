@@ -20,6 +20,7 @@
 - Stage 3 근거 경로는 Yahoo Search와 발행사 IR RSS, 결정론적 저가치 필터, 사건 클러스터링, 원문 근거 검증 AI 분석, SEC 403 Yahoo 미러 복구, 신규 공시 기준선과 재시도 ledger를 구현했습니다.
 - Stage 4 브리핑은 실제 XNYS 마감 15분 후 일일 브리프와 월요일 08:13 KST 주간 리뷰를 생성합니다. 일일 브리프는 방향, SOXX, 피어 평균, 20거래일 거래량, 당일 핵심 근거 순서를 고정하고, 주간 리뷰는 완료된 미국 거래 주간의 상대 흐름과 high-confidence 강화·위험 근거만 요약합니다. 공식 IR 원문에서 날짜가 검증된 다음 주 일정만 링크와 함께 표시합니다.
 - 모든 v2 사용자 메시지는 alert/outbox 저장 전에 길이, 필수 정보, 금지 문구, 원문 링크와 중복 블록 품질 게이트를 통과해야 합니다. `quality-report`는 최근 메시지 판정과 schedule 지연, 10분 이상 gap, task 성공 수, outbox/evidence 상태를 Actions Summary에 기록합니다.
+- `replay-market`은 운영 DB와 Slack을 사용하지 않는 격리 DB에서 완료된 거래일의 Yahoo 5분봉을 재생합니다. 동일 방향 최고 구간 압축, 양·음 방향 반전, 재실행 중복 0건, 상대 흐름·실제 baseline 거래량과 메시지 품질을 검증합니다.
 - SEC 인라인 XBRL의 숨김 메타데이터는 제거하고 10-Q/10-K의 실제 MD&A를 우선 추출합니다. 폼 번호만 있거나 본문을 확보하지 못한 공시는 알림으로 만들지 않습니다.
 - Form 4와 Yahoo 내부자 집계는 거래 코드를 구조화해 `P` 장내매수와 `S` 장내매도만 materiality 기준을 통과할 수 있습니다. `A` 보상, `M` 옵션 행사, `F` 세금 처리는 독립 알림 없이 ledger에만 저장합니다.
 - `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 계획 출력을 자동 검증하며, 수동 실행에서는 상태 진단과 snapshot 저장을 선택할 수 있습니다.
@@ -37,6 +38,7 @@ investing-monitor doctor
 investing-monitor market-tick --config monitor_config.md
 investing-monitor shadow-tick --config monitor_config.md
 investing-monitor quality-report
+investing-monitor replay-market --days 3
 ```
 
 ## 1차 정리 범위

@@ -58,7 +58,7 @@ def build_close_message(
             _section(
                 f"*{status}*\n"
                 f"당일 {volume.observed_volume:,}주 | "
-                f"최근 {volume.lookback_sessions}거래일 평균 "
+                f"최근 {volume.baseline_sessions}거래일 평균 "
                 f"{volume.expected_volume:,}주 | {ratio:.1f}배"
             )
         )
