@@ -1,5 +1,6 @@
 {
   "last_news_hashes": [
+    "457c8eb5c688",
     "0c3b2e1ba238",
     "24989262b86c",
     "379b5808cfdf",
@@ -58,8 +59,7 @@
     "79f4bbf14e79",
     "700c6984ee2b",
     "de4d186d7a5c",
-    "e20aec43e6d3",
-    "c49fd7f072b5"
+    "e20aec43e6d3"
   ],
   "last_insider_hashes": [
     "f76f2de69f87",
@@ -151,7 +151,7 @@
     269.28,
     258.72,
     255.97,
-    256.2
+    255.15
   ],
   "price_alert_max_pct": 0,
   "price_alert_direction": "",
