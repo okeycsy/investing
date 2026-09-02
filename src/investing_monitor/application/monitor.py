@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
@@ -21,7 +21,11 @@ from investing_monitor.domain.policies import (
     assess_intraday_volume,
     assess_relative_performance,
 )
-from investing_monitor.ports.providers import DeliveryOutcomeUnknown, NotificationPort
+from investing_monitor.ports.providers import (
+    DeliveryOutcomeUnknown,
+    DeliveryRejected,
+    NotificationPort,
+)
 from investing_monitor.ports.repository import AlertRecord, MonitorRepository
 from investing_monitor.presentation.slack_messages import (
     build_price_band_message,
@@ -263,9 +267,12 @@ class OutboxDeliveryService:
         self,
         repository: MonitorRepository,
         notifier: NotificationPort,
+        *,
+        checkpoint: Callable[[str], None] | None = None,
     ) -> None:
         self.repository = repository
         self.notifier = notifier
+        self.checkpoint = checkpoint or (lambda _reason: None)
 
     async def deliver_pending(self, *, limit: int = 20) -> int:
         now = datetime.now(timezone.utc)
@@ -273,9 +280,35 @@ class OutboxDeliveryService:
         for item in self.repository.pending_deliveries(now, limit=limit):
             self.repository.mark_sending(item.outbox_id, now)
             try:
+                self.checkpoint(f"sending:{item.event_key}")
+            except Exception as exc:
+                self.repository.mark_failed(
+                    item.outbox_id,
+                    now,
+                    f"pre-send checkpoint failed: {exc}",
+                )
+                raise
+            try:
                 receipt = await self.notifier.send(item.payload)
             except DeliveryOutcomeUnknown as exc:
                 self.repository.mark_delivery_unknown(item.outbox_id, now, str(exc))
+                self.checkpoint(f"delivery-unknown:{item.event_key}")
+                continue
+            except DeliveryRejected as exc:
+                if not exc.retryable:
+                    self.repository.mark_discarded(item.outbox_id, now, str(exc))
+                    self.checkpoint(f"delivery-discarded:{item.event_key}")
+                    continue
+                delay_seconds = exc.retry_after_seconds or min(
+                    30 * (2 ** item.attempts),
+                    15 * 60,
+                )
+                self.repository.mark_failed(
+                    item.outbox_id,
+                    now + timedelta(seconds=delay_seconds),
+                    str(exc),
+                )
+                self.checkpoint(f"delivery-failed:{item.event_key}")
                 continue
             except Exception as exc:
                 delay_seconds = min(30 * (2 ** item.attempts), 15 * 60)
@@ -284,7 +317,9 @@ class OutboxDeliveryService:
                     now + timedelta(seconds=delay_seconds),
                     str(exc),
                 )
+                self.checkpoint(f"delivery-failed:{item.event_key}")
                 continue
             self.repository.mark_delivered(item.outbox_id, datetime.now(timezone.utc), receipt)
+            self.checkpoint(f"delivered:{item.event_key}")
             delivered += 1
         return delivered

@@ -947,6 +947,23 @@ class SQLiteMonitorRepository:
                 ),
             )
 
+    def mark_discarded(
+        self,
+        outbox_id: int,
+        attempted_at: datetime,
+        error: str,
+    ) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "UPDATE outbox SET delivery_status = 'discarded', attempted_at = ?, "
+                "last_error = ? WHERE id = ?",
+                (
+                    attempted_at.astimezone(timezone.utc).isoformat(),
+                    error[:1000],
+                    outbox_id,
+                ),
+            )
+
     def task_checkpoints(self) -> dict[str, TaskCheckpoint]:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(

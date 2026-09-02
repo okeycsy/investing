@@ -11,6 +11,19 @@ class DeliveryOutcomeUnknown(RuntimeError):
     """The provider may have accepted a notification before the request failed."""
 
 
+class DeliveryRejected(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+
+
 class MarketDataPort(Protocol):
     def stream(self) -> AsyncIterator[MarketSnapshot]: ...
 

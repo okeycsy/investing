@@ -229,6 +229,75 @@ class DeliveryContractTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, "delivery_unknown")
             self.assertEqual(attempts, 1)
 
+    async def test_remote_checkpoint_brackets_the_slack_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            repository = SQLiteMonitorRepository(path)
+            MarketMonitorService(repository).handle_snapshot(snapshot(4.4))
+            transitions = []
+
+            def checkpoint_state(reason):
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    status = connection.execute(
+                        "SELECT delivery_status FROM outbox"
+                    ).fetchone()[0]
+                transitions.append((reason.split(":", 1)[0], status))
+
+            class Notifier:
+                async def send(self, _payload):
+                    transitions.append(("slack", "called"))
+                    return "ok"
+
+            delivered = await OutboxDeliveryService(
+                repository,
+                Notifier(),
+                checkpoint=checkpoint_state,
+            ).deliver_pending()
+
+            self.assertEqual(delivered, 1)
+            self.assertEqual(
+                transitions,
+                [
+                    ("sending", "sending"),
+                    ("slack", "called"),
+                    ("delivered", "delivered"),
+                ],
+            )
+
+    async def test_failed_pre_send_checkpoint_prevents_slack_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            repository = SQLiteMonitorRepository(path)
+            MarketMonitorService(repository).handle_snapshot(snapshot(4.4))
+
+            class Notifier:
+                called = False
+
+                async def send(self, _payload):
+                    self.called = True
+                    return "ok"
+
+            notifier = Notifier()
+
+            def fail_checkpoint(_reason):
+                raise RuntimeError("remote state unavailable")
+
+            service = OutboxDeliveryService(
+                repository,
+                notifier,
+                checkpoint=fail_checkpoint,
+            )
+            with self.assertRaisesRegex(RuntimeError, "remote state unavailable"):
+                await service.deliver_pending()
+
+            self.assertFalse(notifier.called)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                status, error = connection.execute(
+                    "SELECT delivery_status, last_error FROM outbox"
+                ).fetchone()
+            self.assertEqual(status, "failed")
+            self.assertIn("pre-send checkpoint failed", error)
+
 
 if __name__ == "__main__":
     unittest.main()
