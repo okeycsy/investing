@@ -127,12 +127,18 @@ class QualityReportService:
         schedule_intervals = _same_session_intervals(
             [run.started_at for run in scheduled_runs]
         )
+        schedule_start_delays = [
+            max(0, int((run.started_at - run.scheduled_at).total_seconds()))
+            for run in scheduled_runs
+        ]
         if not scheduled_runs:
             scheduler_status = "unobserved"
+        elif max(schedule_start_delays, default=0) > 10 * 60 or max(
+            schedule_intervals, default=0
+        ) > 15 * 60:
+            scheduler_status = "degraded"
         elif not schedule_intervals:
             scheduler_status = "insufficient_history"
-        elif max(schedule_intervals) > 15 * 60:
-            scheduler_status = "degraded"
         else:
             scheduler_status = "healthy"
         runtime = {
@@ -146,6 +152,18 @@ class QualityReportService:
                 max(run.started_at for run in scheduled_runs).isoformat()
                 if scheduled_runs
                 else None
+            ),
+            "max_schedule_start_delay_seconds": max(
+                schedule_start_delays,
+                default=0,
+            ),
+            "average_schedule_start_delay_seconds": (
+                int(sum(schedule_start_delays) / len(schedule_start_delays))
+                if schedule_start_delays
+                else 0
+            ),
+            "schedule_starts_over_10_minutes": sum(
+                delay > 10 * 60 for delay in schedule_start_delays
             ),
             "max_schedule_interval_seconds": max(schedule_intervals, default=0),
             "average_schedule_interval_seconds": (

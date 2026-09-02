@@ -366,6 +366,10 @@ class ShadowWorkflowTest(unittest.TestCase):
         self.assertIn("quality-report", workflow)
         self.assertIn("replay-market --days 3", workflow)
         self.assertIn("github.event_name == 'push'", workflow)
+        self.assertIn("actions: read", workflow)
+        self.assertIn("actions/github-script@v7", workflow)
+        self.assertIn("getWorkflowRun", workflow)
+        self.assertIn('--scheduled-at "${{ steps.run-metadata.outputs.created_at }}"', workflow)
         self.assertIn('--trigger "${{ github.event_name }}"', workflow)
 
 
