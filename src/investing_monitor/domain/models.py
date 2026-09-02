@@ -60,6 +60,7 @@ class MarketSnapshot:
     session: MarketSession
     change_pct: float
     benchmark_change_pct: float | None = None
+    benchmark_symbol: str = "SOXX"
     peer_changes: Mapping[str, float | None] = field(default_factory=dict)
 
     @property
@@ -69,6 +70,39 @@ class MarketSnapshot:
         if self.change_pct < 0:
             return Direction.DOWN
         return Direction.FLAT
+
+
+@dataclass(frozen=True)
+class MarketFrame:
+    snapshot: MarketSnapshot
+    close_price: float
+    reference_close: float
+    cumulative_volume: int = 0
+
+    def __post_init__(self) -> None:
+        if self.snapshot.observed_at.tzinfo is None:
+            raise ValueError("market frame timestamp must be timezone-aware")
+        if self.close_price <= 0 or self.reference_close <= 0:
+            raise ValueError("market frame prices must be positive")
+        if self.cumulative_volume < 0:
+            raise ValueError("cumulative volume cannot be negative")
+
+
+@dataclass(frozen=True)
+class MarketCycle:
+    ticker: str
+    trading_date: date
+    frames: tuple[MarketFrame, ...]
+    volume: VolumeSnapshot | None
+    source_age_seconds: int
+
+    @property
+    def latest_snapshot(self) -> MarketSnapshot | None:
+        return self.frames[-1].snapshot if self.frames else None
+
+    @property
+    def replayed_frames(self) -> int:
+        return max(0, len(self.frames) - 1)
 
 
 @dataclass(frozen=True)
@@ -111,6 +145,7 @@ class PriceBandState:
     trading_date: date
     upward_high_watermark: int = 0
     downward_high_watermark: int = 0
+    volume_alerted: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,4 +156,13 @@ class PriceBandSignal:
     direction: Direction
     level: int
     is_reversal: bool
+    observed_at: datetime
+    session: MarketSession = MarketSession.REGULAR
+
+
+@dataclass(frozen=True)
+class VolumeSignal:
+    event_key: str
+    ticker: str
+    trading_date: date
     observed_at: datetime

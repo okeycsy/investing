@@ -90,9 +90,13 @@ class TickPlanner:
         *,
         schedule: TickSchedule | None = None,
         calendar: TradingCalendar | None = None,
+        enabled_tasks: set[TickTask] | frozenset[TickTask] | None = None,
     ) -> None:
         self.schedule = schedule or TickSchedule()
         self.calendar = calendar or WeekdayTradingCalendar()
+        self.enabled_tasks = (
+            frozenset(TickTask) if enabled_tasks is None else frozenset(enabled_tasks)
+        )
 
     def plan(
         self,
@@ -105,7 +109,11 @@ class TickPlanner:
         gap_seconds = _gap_seconds(now, last_completed_run_at)
         tasks: list[PlannedTask] = []
 
-        if last_completed_run_at and gap_seconds >= int(self.schedule.recovery_gap.total_seconds()):
+        if (
+            TickTask.RECOVERY in self.enabled_tasks
+            and last_completed_run_at
+            and gap_seconds >= int(self.schedule.recovery_gap.total_seconds())
+        ):
             tasks.append(
                 PlannedTask(
                     TickTask.RECOVERY,
@@ -118,7 +126,7 @@ class TickPlanner:
         trading_day = self.calendar.is_trading_day(ny_now.date())
         active_session = trading_day and time(4, 0) <= ny_now.time() < time(20, 0)
 
-        if active_session and _is_due(
+        if TickTask.MARKET in self.enabled_tasks and active_session and _is_due(
             checkpoints.get(TickTask.MARKET.value),
             now,
             self.schedule.market_interval,
@@ -130,7 +138,9 @@ class TickPlanner:
             if active_session
             else self.schedule.off_hours_source_interval
         )
-        if _is_due(checkpoints.get(TickTask.NEWS.value), now, news_interval):
+        if TickTask.NEWS in self.enabled_tasks and _is_due(
+            checkpoints.get(TickTask.NEWS.value), now, news_interval
+        ):
             tasks.append(PlannedTask(TickTask.NEWS, TickTask.NEWS.value))
 
         sec_interval = (
@@ -138,11 +148,13 @@ class TickPlanner:
             if active_session
             else self.schedule.off_hours_source_interval
         )
-        if _is_due(checkpoints.get(TickTask.SEC.value), now, sec_interval):
+        if TickTask.SEC in self.enabled_tasks and _is_due(
+            checkpoints.get(TickTask.SEC.value), now, sec_interval
+        ):
             tasks.append(PlannedTask(TickTask.SEC, TickTask.SEC.value))
 
         close_date = self._due_close_date(ny_now)
-        if close_date is not None:
+        if TickTask.CLOSE in self.enabled_tasks and close_date is not None:
             close_key = f"close:{close_date.isoformat()}"
             if not _was_successful(checkpoints.get(close_key)):
                 close_at = self.calendar.regular_close(close_date) + self.schedule.close_delay
@@ -151,7 +163,8 @@ class TickPlanner:
         seoul_now = now.astimezone(SEOUL)
         weekly_key = f"weekly:{seoul_now.strftime('%G-W%V')}"
         if (
-            seoul_now.weekday() == 0
+            TickTask.WEEKLY in self.enabled_tasks
+            and seoul_now.weekday() == 0
             and seoul_now.time() >= time(8, 10)
             and not _was_successful(checkpoints.get(weekly_key))
         ):
@@ -159,13 +172,15 @@ class TickPlanner:
 
         thirteen_f_key = f"13f:{seoul_now.strftime('%G-W%V')}"
         if (
-            seoul_now.weekday() == 5
+            TickTask.THIRTEEN_F in self.enabled_tasks
+            and seoul_now.weekday() == 5
             and seoul_now.time() >= time(19, 0)
             and not _was_successful(checkpoints.get(thirteen_f_key))
         ):
             tasks.append(PlannedTask(TickTask.THIRTEEN_F, thirteen_f_key))
 
-        tasks.append(PlannedTask(TickTask.DELIVERY, TickTask.DELIVERY.value))
+        if TickTask.DELIVERY in self.enabled_tasks:
+            tasks.append(PlannedTask(TickTask.DELIVERY, TickTask.DELIVERY.value))
         return TickPlan(now=now, gap_seconds=gap_seconds, tasks=tuple(tasks))
 
     def _due_close_date(self, ny_now: datetime) -> date | None:

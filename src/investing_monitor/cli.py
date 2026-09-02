@@ -4,14 +4,23 @@ import argparse
 import json
 import os
 import sqlite3
+import uuid
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 from investing_monitor.adapters.git_state_branch import GitStateBranchStore
+from investing_monitor.adapters.config import load_instrument_profile
+from investing_monitor.adapters.exchange_calendar import XNYSCalendar
 from investing_monitor.adapters.sqlite_repository import SCHEMA_VERSION, SQLiteMonitorRepository
-from investing_monitor.runtime.tick import TickPlanner
+from investing_monitor.adapters.yahoo_market_data import (
+    YahooChartClient,
+    YahooMarketDataAdapter,
+    YahooQuoteClient,
+)
+from investing_monitor.application.monitor import MarketCycleService
+from investing_monitor.runtime.tick import TickPlanner, TickRunner, TickTask
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="show due tasks without executing providers")
     plan.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
+
+    market_tick = subparsers.add_parser(
+        "market-tick",
+        help="run the Stage 2 Yahoo market monitor without delivering Slack",
+    )
+    market_tick.add_argument("--config", default="monitor_config.md")
+    market_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
+    market_tick.add_argument("--scheduled-at", default="")
+    market_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
 
     subparsers.add_parser("status", help="show persisted runtime status")
 
@@ -85,6 +103,66 @@ def main(argv: Sequence[str] | None = None) -> int:
             "database_sha256": result.database_sha256,
         }
         return _emit(payload, args.summary_file)
+
+    if args.command == "market-tick":
+        now = _parse_timestamp(args.now) if args.now else datetime.now(timezone.utc)
+        scheduled_at = (
+            _parse_timestamp(args.scheduled_at)
+            if args.scheduled_at
+            else _nominal_market_tick(now)
+        )
+        profile = load_instrument_profile(args.config)
+        calendar = XNYSCalendar()
+        adapter = YahooMarketDataAdapter(
+            YahooChartClient(),
+            calendar,
+            profile,
+            quote_client=YahooQuoteClient(),
+        )
+        service = MarketCycleService(repository)
+        market_result: dict[str, object] = {}
+
+        def handle_market(_task):
+            cycle = adapter.fetch_cycle(
+                now,
+                last_observed_at=repository.latest_market_observation_at(profile.ticker),
+            )
+            report = service.process(cycle)
+            market_result.update(report.as_dict())
+            market_result["source_age_seconds"] = cycle.source_age_seconds
+            return {
+                "observed_frames": report.observed_frames,
+                "replayed_frames": report.replayed_frames,
+                "inserted_events": len(report.inserted_event_keys),
+                "source_age_seconds": cycle.source_age_seconds,
+            }
+
+        run_id = args.run_id or f"manual-{uuid.uuid4()}"
+        execution = TickRunner(
+            repository,
+            {TickTask.MARKET: handle_market},
+            planner=TickPlanner(
+                calendar=calendar,
+                enabled_tasks={TickTask.MARKET},
+            ),
+            clock=lambda: now,
+        ).run(run_id, scheduled_at=scheduled_at, started_at=now)
+        payload = {
+            "command": args.command,
+            "profile": {
+                "ticker": profile.ticker,
+                "benchmark": profile.benchmark,
+                "peers": list(profile.peers),
+            },
+            "schedule_delay_seconds": max(
+                0,
+                int((now - scheduled_at).total_seconds()),
+            ),
+            "execution": execution.as_dict(),
+            "market": market_result,
+        }
+        _emit(payload, args.summary_file)
+        return 0 if execution.status == "success" else 1
 
     if args.command == "plan":
         now = _parse_timestamp(args.now) if args.now else datetime.now(timezone.utc)
@@ -160,6 +238,13 @@ def _parse_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("timestamp must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _nominal_market_tick(now: datetime) -> datetime:
+    now = now.astimezone(timezone.utc)
+    seconds = int(now.timestamp())
+    scheduled_seconds = ((seconds - 120) // 300) * 300 + 120
+    return datetime.fromtimestamp(scheduled_seconds, timezone.utc)
 
 
 def _iso(value: datetime | None) -> str | None:

@@ -5,14 +5,14 @@ import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
-from investing_monitor.domain.models import PriceBandSignal, PriceBandState
-from investing_monitor.ports.repository import PendingDelivery
+from investing_monitor.domain.models import MarketFrame, PriceBandSignal, PriceBandState
+from investing_monitor.ports.repository import AlertRecord, PendingDelivery
 from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -20,8 +20,27 @@ CREATE TABLE IF NOT EXISTS market_sessions (
     trading_date TEXT NOT NULL,
     upward_high_watermark INTEGER NOT NULL DEFAULT 0,
     downward_high_watermark INTEGER NOT NULL DEFAULT 0,
+    volume_alerted INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS market_observations (
+    ticker TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    trading_date TEXT NOT NULL,
+    session TEXT NOT NULL,
+    close_price REAL NOT NULL,
+    reference_close REAL NOT NULL,
+    change_pct REAL NOT NULL,
+    benchmark_symbol TEXT NOT NULL DEFAULT '',
+    benchmark_change_pct REAL,
+    peer_changes_json TEXT NOT NULL DEFAULT '{}',
+    cumulative_volume INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(ticker, observed_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_observations_ticker_time
+ON market_observations(ticker, observed_at DESC);
 
 CREATE TABLE IF NOT EXISTS alerts (
     event_key TEXT PRIMARY KEY,
@@ -92,6 +111,30 @@ class SQLiteMonitorRepository:
                 "TEXT NOT NULL DEFAULT 'pending'",
             )
             self._ensure_column(connection, "outbox", "attempted_at", "TEXT")
+            self._ensure_column(
+                connection,
+                "market_sessions",
+                "volume_alerted",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                connection,
+                "market_observations",
+                "benchmark_symbol",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "market_observations",
+                "benchmark_change_pct",
+                "REAL",
+            )
+            self._ensure_column(
+                connection,
+                "market_observations",
+                "peer_changes_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
@@ -111,7 +154,8 @@ class SQLiteMonitorRepository:
     def load_price_band_state(self, ticker: str) -> PriceBandState | None:
         with closing(self._connect()) as connection, connection:
             row = connection.execute(
-                "SELECT trading_date, upward_high_watermark, downward_high_watermark "
+                "SELECT trading_date, upward_high_watermark, downward_high_watermark, "
+                "volume_alerted "
                 "FROM market_sessions WHERE ticker = ?",
                 (ticker.upper(),),
             ).fetchone()
@@ -121,6 +165,7 @@ class SQLiteMonitorRepository:
             trading_date=date.fromisoformat(row["trading_date"]),
             upward_high_watermark=row["upward_high_watermark"],
             downward_high_watermark=row["downward_high_watermark"],
+            volume_alerted=bool(row["volume_alerted"]),
         )
 
     def record_price_signal(
@@ -143,18 +188,20 @@ class SQLiteMonitorRepository:
                 return False
             connection.execute(
                 "INSERT INTO market_sessions "
-                "(ticker, trading_date, upward_high_watermark, downward_high_watermark, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "(ticker, trading_date, upward_high_watermark, downward_high_watermark, "
+                "volume_alerted, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(ticker) DO UPDATE SET "
                 "trading_date = excluded.trading_date, "
                 "upward_high_watermark = excluded.upward_high_watermark, "
                 "downward_high_watermark = excluded.downward_high_watermark, "
+                "volume_alerted = excluded.volume_alerted, "
                 "updated_at = excluded.updated_at",
                 (
                     signal.ticker,
                     state.trading_date.isoformat(),
                     state.upward_high_watermark,
                     state.downward_high_watermark,
+                    int(state.volume_alerted),
                     now,
                 ),
             )
@@ -163,6 +210,100 @@ class SQLiteMonitorRepository:
                 (signal.event_key, payload_json, now),
             )
         return True
+
+    def latest_market_observation_at(self, ticker: str) -> datetime | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT observed_at FROM market_observations "
+                "WHERE ticker = ? ORDER BY observed_at DESC LIMIT 1",
+                (ticker.upper(),),
+            ).fetchone()
+        return _parse_datetime(row["observed_at"]) if row else None
+
+    def record_market_cycle(
+        self,
+        ticker: str,
+        state: PriceBandState,
+        frames: Sequence[MarketFrame],
+        alerts: Sequence[AlertRecord],
+    ) -> tuple[str, ...]:
+        ticker = ticker.upper()
+        updated_at = datetime.now(timezone.utc).isoformat()
+        inserted_events: list[str] = []
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for frame in frames:
+                snapshot = frame.snapshot
+                connection.execute(
+                    "INSERT OR IGNORE INTO market_observations "
+                    "(ticker, observed_at, trading_date, session, close_price, "
+                    "reference_close, change_pct, benchmark_symbol, "
+                    "benchmark_change_pct, peer_changes_json, cumulative_volume) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        ticker,
+                        _utc_iso(snapshot.observed_at),
+                        snapshot.trading_date.isoformat(),
+                        snapshot.session.value,
+                        frame.close_price,
+                        frame.reference_close,
+                        snapshot.change_pct,
+                        snapshot.benchmark_symbol,
+                        snapshot.benchmark_change_pct,
+                        json.dumps(
+                            dict(snapshot.peer_changes),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        frame.cumulative_volume,
+                    ),
+                )
+            connection.execute(
+                "INSERT INTO market_sessions "
+                "(ticker, trading_date, upward_high_watermark, downward_high_watermark, "
+                "volume_alerted, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(ticker) DO UPDATE SET "
+                "trading_date = excluded.trading_date, "
+                "upward_high_watermark = excluded.upward_high_watermark, "
+                "downward_high_watermark = excluded.downward_high_watermark, "
+                "volume_alerted = excluded.volume_alerted, "
+                "updated_at = excluded.updated_at",
+                (
+                    ticker,
+                    state.trading_date.isoformat(),
+                    state.upward_high_watermark,
+                    state.downward_high_watermark,
+                    int(state.volume_alerted),
+                    updated_at,
+                ),
+            )
+            for alert in alerts:
+                payload_json = json.dumps(
+                    alert.payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                inserted = connection.execute(
+                    "INSERT OR IGNORE INTO alerts "
+                    "(event_key, ticker, alert_type, created_at, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        alert.event_key,
+                        alert.ticker.upper(),
+                        alert.alert_type,
+                        _utc_iso(alert.created_at),
+                        payload_json,
+                    ),
+                ).rowcount
+                if not inserted:
+                    continue
+                connection.execute(
+                    "INSERT INTO outbox (event_key, payload_json, next_attempt_at) "
+                    "VALUES (?, ?, ?)",
+                    (alert.event_key, payload_json, updated_at),
+                )
+                inserted_events.append(alert.event_key)
+        return tuple(inserted_events)
 
     def pending_deliveries(self, now: datetime, limit: int = 20) -> list[PendingDelivery]:
         with closing(self._connect()) as connection, connection:

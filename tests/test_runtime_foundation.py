@@ -271,10 +271,13 @@ class ShadowWorkflowTest(unittest.TestCase):
 
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("push:", workflow)
-        self.assertNotIn("schedule:", workflow)
+        self.assertIn("schedule:", workflow)
+        self.assertIn("2-57/5 4-19 * * 1-5", workflow)
+        self.assertIn("America/New_York", workflow)
         self.assertNotIn("hood_monitor.py", workflow)
         self.assertIn("persist_state", workflow)
         self.assertIn("unittest discover", workflow)
+        self.assertIn("market-tick", workflow)
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:

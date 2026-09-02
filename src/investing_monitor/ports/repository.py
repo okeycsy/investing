@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, Sequence
 
-from investing_monitor.domain.models import PriceBandSignal, PriceBandState
+from investing_monitor.domain.models import MarketFrame, PriceBandSignal, PriceBandState
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,15 @@ class PendingDelivery:
     status: str = "pending"
 
 
+@dataclass(frozen=True)
+class AlertRecord:
+    event_key: str
+    ticker: str
+    alert_type: str
+    created_at: datetime
+    payload: dict
+
+
 class MonitorRepository(Protocol):
     def load_price_band_state(self, ticker: str) -> PriceBandState | None: ...
 
@@ -25,6 +34,16 @@ class MonitorRepository(Protocol):
         state: PriceBandState,
         payload: dict,
     ) -> bool: ...
+
+    def latest_market_observation_at(self, ticker: str) -> datetime | None: ...
+
+    def record_market_cycle(
+        self,
+        ticker: str,
+        state: PriceBandState,
+        frames: Sequence[MarketFrame],
+        alerts: Sequence[AlertRecord],
+    ) -> tuple[str, ...]: ...
 
     def pending_deliveries(self, now: datetime, limit: int = 20) -> list[PendingDelivery]: ...
 

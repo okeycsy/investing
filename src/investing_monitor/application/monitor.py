@@ -1,17 +1,32 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from investing_monitor.domain.models import Catalyst, MarketSnapshot, VolumeSnapshot
+from investing_monitor.domain.models import (
+    Catalyst,
+    Direction,
+    MarketCycle,
+    MarketFrame,
+    MarketSnapshot,
+    PriceBandState,
+    VolumeSignal,
+    VolumeSnapshot,
+)
 from investing_monitor.domain.policies import (
     PriceBandPolicy,
+    RelativeAssessment,
+    VolumeAssessment,
     assess_intraday_volume,
     assess_relative_performance,
 )
 from investing_monitor.ports.providers import DeliveryOutcomeUnknown, NotificationPort
-from investing_monitor.ports.repository import MonitorRepository
-from investing_monitor.presentation.slack_messages import build_price_band_message
+from investing_monitor.ports.repository import AlertRecord, MonitorRepository
+from investing_monitor.presentation.slack_messages import (
+    build_price_band_message,
+    build_volume_message,
+)
 
 
 class MarketMonitorService:
@@ -45,12 +60,194 @@ class MarketMonitorService:
             volume_assessment,
             catalysts,
         )
+        if volume_assessment.is_exploded:
+            next_state = replace(next_state, volume_alerted=True)
         inserted = self.repository.record_price_signal(
             signal,
             next_state,
             payload,
         )
         return signal.event_key if inserted else None
+
+
+@dataclass(frozen=True)
+class MarketCycleReport:
+    ticker: str
+    trading_date: str
+    observed_frames: int
+    replayed_frames: int
+    inserted_event_keys: tuple[str, ...]
+    messages: tuple[dict, ...]
+    latest_context: Mapping[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "ticker": self.ticker,
+            "trading_date": self.trading_date,
+            "observed_frames": self.observed_frames,
+            "replayed_frames": self.replayed_frames,
+            "inserted_event_keys": list(self.inserted_event_keys),
+            "messages": list(self.messages),
+            "latest_context": dict(self.latest_context),
+        }
+
+
+class MarketCycleService:
+    def __init__(
+        self,
+        repository: MonitorRepository,
+        *,
+        price_policy: PriceBandPolicy | None = None,
+    ) -> None:
+        self.repository = repository
+        self.price_policy = price_policy or PriceBandPolicy()
+
+    def process(self, cycle: MarketCycle) -> MarketCycleReport:
+        existing = self.repository.load_price_band_state(cycle.ticker)
+        state = self._state_for_cycle(cycle, existing)
+        if not cycle.frames:
+            return MarketCycleReport(
+                ticker=cycle.ticker,
+                trading_date=cycle.trading_date.isoformat(),
+                observed_frames=0,
+                replayed_frames=0,
+                inserted_event_keys=(),
+                messages=(),
+                latest_context={},
+            )
+
+        selected_frames = self._select_replay_extremes(cycle.frames)
+        signals = []
+        for frame in selected_frames:
+            signal, state = self.price_policy.evaluate(frame.snapshot, state)
+            if signal is not None:
+                signals.append((signal, frame))
+
+        volume_assessment = assess_intraday_volume(cycle.volume)
+        consume_volume = volume_assessment.is_exploded and not state.volume_alerted
+        alerts: list[AlertRecord] = []
+        payloads: dict[str, dict] = {}
+        for signal, frame in signals:
+            payload = build_price_band_message(
+                signal,
+                assess_relative_performance(frame.snapshot),
+                cycle.volume,
+                volume_assessment,
+                (),
+            )
+            alerts.append(
+                AlertRecord(
+                    event_key=signal.event_key,
+                    ticker=signal.ticker,
+                    alert_type="price_band",
+                    created_at=signal.observed_at,
+                    payload=payload,
+                )
+            )
+            payloads[signal.event_key] = payload
+
+        latest = cycle.frames[-1].snapshot
+        latest_relative = assess_relative_performance(latest)
+        if consume_volume and not signals and cycle.volume is not None:
+            signal = VolumeSignal(
+                event_key=(
+                    f"{cycle.ticker.upper()}:{cycle.trading_date.isoformat()}:volume-spike"
+                ),
+                ticker=cycle.ticker.upper(),
+                trading_date=cycle.trading_date,
+                observed_at=latest.observed_at,
+            )
+            payload = build_volume_message(
+                signal,
+                latest,
+                latest_relative,
+                cycle.volume,
+                volume_assessment,
+            )
+            alerts.append(
+                AlertRecord(
+                    event_key=signal.event_key,
+                    ticker=signal.ticker,
+                    alert_type="volume_spike",
+                    created_at=signal.observed_at,
+                    payload=payload,
+                )
+            )
+            payloads[signal.event_key] = payload
+
+        if consume_volume:
+            state = replace(state, volume_alerted=True)
+
+        inserted = self.repository.record_market_cycle(
+            cycle.ticker,
+            state,
+            cycle.frames,
+            alerts,
+        )
+        return MarketCycleReport(
+            ticker=cycle.ticker,
+            trading_date=cycle.trading_date.isoformat(),
+            observed_frames=len(cycle.frames),
+            replayed_frames=cycle.replayed_frames,
+            inserted_event_keys=inserted,
+            messages=tuple(payloads[key] for key in inserted),
+            latest_context=self._latest_context(
+                latest,
+                latest_relative,
+                cycle.volume,
+                volume_assessment,
+            ),
+        )
+
+    @staticmethod
+    def _state_for_cycle(
+        cycle: MarketCycle,
+        state: PriceBandState | None,
+    ) -> PriceBandState:
+        if state is None or state.trading_date != cycle.trading_date:
+            return PriceBandState(trading_date=cycle.trading_date)
+        return state
+
+    @staticmethod
+    def _select_replay_extremes(frames: Sequence[MarketFrame]) -> tuple[MarketFrame, ...]:
+        candidates: list[MarketFrame] = []
+        positive = [frame for frame in frames if frame.snapshot.direction is Direction.UP]
+        negative = [frame for frame in frames if frame.snapshot.direction is Direction.DOWN]
+        if positive:
+            candidates.append(max(positive, key=lambda frame: frame.snapshot.change_pct))
+        if negative:
+            candidates.append(min(negative, key=lambda frame: frame.snapshot.change_pct))
+        return tuple(sorted(candidates, key=lambda frame: frame.snapshot.observed_at))
+
+    @staticmethod
+    def _latest_context(
+        snapshot: MarketSnapshot,
+        relative: RelativeAssessment,
+        volume: VolumeSnapshot | None,
+        volume_assessment: VolumeAssessment,
+    ) -> dict[str, object]:
+        context: dict[str, object] = {
+            "direction": snapshot.direction.value,
+            "benchmark": {
+                "symbol": relative.benchmark_symbol,
+                "outcome": relative.benchmark.value,
+            },
+            "peers": {
+                "symbols": list(relative.peer_symbols),
+                "outcome": relative.peers.value,
+            },
+        }
+        if volume is not None and volume_assessment.is_ready:
+            context["volume"] = {
+                "status": "exploded" if volume_assessment.is_exploded else "normal",
+                "ratio": round(volume_assessment.ratio or 0.0, 2),
+                "observed": volume.observed_volume,
+                "expected": volume.expected_volume,
+                "baseline_sessions": volume.baseline_sessions,
+            }
+        else:
+            context["volume"] = {"status": "unavailable"}
+        return context
 
 
 class OutboxDeliveryService:

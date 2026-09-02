@@ -16,9 +16,11 @@
 
 - Stage 0 계약은 문서와 기존 제품 테스트로 동결되어 있습니다.
 - Stage 1 기반은 versioned SQLite, due-task planner, run/task checkpoint, outbox 상태 전이, `runtime-state` rolling snapshot으로 구현되어 있습니다.
+- Stage 2 시장 경로는 XNYS 휴장·조기폐장 캘린더, Yahoo 5분봉, 인증 multi-quote, 고정 전일 종가, SOXX/피어 상대 흐름, 동시간대 20세션 거래량과 intraday replay를 구현했습니다.
 - `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 계획 출력을 자동 검증하며, 수동 실행에서는 상태 진단과 snapshot 저장을 선택할 수 있습니다.
+- 동일 workflow는 거래일 04:00-20:00 ET에 정각을 피한 5분 schedule로 market shadow tick을 실행하고 `runtime-state`를 checkpoint합니다.
 - 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
-- production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 2~5 검증 전에는 v2로 전환하지 않습니다.
+- production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 3~5 검증 전에는 v2로 전환하지 않습니다.
 
 로컬에서 Stage 1 상태를 확인하려면:
 
@@ -27,6 +29,7 @@ pip install -e .
 investing-monitor plan
 investing-monitor status
 investing-monitor doctor
+investing-monitor market-tick --config monitor_config.md
 ```
 
 ## 1차 정리 범위

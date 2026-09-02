@@ -1,6 +1,9 @@
 name: Monitor V2 Runtime Shadow
 
 on:
+  schedule:
+    - cron: '2-57/5 4-19 * * 1-5'
+      timezone: 'America/New_York'
   push:
     branches:
       - main
@@ -20,6 +23,7 @@ on:
           - plan
           - status
           - doctor
+          - market
       persist_state:
         description: 'Checkpoint the SQLite snapshot to runtime-state'
         required: true
@@ -65,6 +69,10 @@ jobs:
         if: github.event_name == 'push' || inputs.mode == 'plan'
         run: investing-monitor --db .runtime/monitor.db plan
 
+      - name: Run market shadow tick
+        if: github.event_name == 'schedule' || inputs.mode == 'market'
+        run: investing-monitor --db .runtime/monitor.db market-tick --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+
       - name: Show runtime status
         if: inputs.mode == 'status'
         run: investing-monitor --db .runtime/monitor.db status
@@ -77,5 +85,5 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db doctor --require-secrets
 
       - name: Checkpoint runtime state
-        if: inputs.persist_state
+        if: always() && (github.event_name == 'schedule' || inputs.persist_state)
         run: investing-monitor --db .runtime/monitor.db checkpoint-state --run-id "${{ github.run_id }}"

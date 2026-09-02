@@ -153,7 +153,7 @@ class MessageContractTest(unittest.TestCase):
         )
         rendered = json.dumps(payload, ensure_ascii=False)
 
-        self.assertIn("+4% 상승 구간 진입", rendered)
+        self.assertIn("+4.0% 상승 구간 진입", rendered)
         self.assertIn("반도체 지수", rendered)
         self.assertIn("피어(ETN·GEV·NVT)", rendered)
         self.assertIn("1.7배", rendered)
@@ -197,7 +197,10 @@ class RepositoryContractTest(unittest.TestCase):
             at_retry = repository.pending_deliveries(retry_at)
             self.assertEqual(before_retry, [])
             self.assertEqual(at_retry[0].attempts, 1)
-            self.assertIn("-4% 하락 구간 진입", json.dumps(at_retry[0].payload, ensure_ascii=False))
+            self.assertIn(
+                "-4.0% 하락 구간 진입",
+                json.dumps(at_retry[0].payload, ensure_ascii=False),
+            )
 
 
 class DeliveryContractTest(unittest.IsolatedAsyncioTestCase):

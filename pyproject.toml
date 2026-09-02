@@ -6,6 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "investing-monitor"
 version = "0.1.0"
 requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "exchange-calendars==4.13.2",
+]
 
 [project.scripts]
 investing-monitor = "investing_monitor.cli:main"

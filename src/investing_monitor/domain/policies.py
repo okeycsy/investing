@@ -16,6 +16,7 @@ from .models import (
 @dataclass(frozen=True)
 class RelativeAssessment:
     benchmark: RelativeOutcome
+    benchmark_symbol: str
     peers: RelativeOutcome
     peer_symbols: tuple[str, ...]
     peer_average_change_pct: float | None
@@ -77,6 +78,7 @@ class PriceBandPolicy:
             level=normalized_level,
             is_reversal=opposite_seen,
             observed_at=snapshot.observed_at,
+            session=snapshot.session,
         )
         return signal, next_state
 
@@ -111,6 +113,7 @@ def assess_relative_performance(
     if len(valid_peers) < minimum_peers:
         return RelativeAssessment(
             benchmark=benchmark,
+            benchmark_symbol=snapshot.benchmark_symbol.upper(),
             peers=RelativeOutcome.UNAVAILABLE,
             peer_symbols=tuple(symbol for symbol, _ in valid_peers),
             peer_average_change_pct=None,
@@ -119,6 +122,7 @@ def assess_relative_performance(
     peer_average = sum(change for _, change in valid_peers) / len(valid_peers)
     return RelativeAssessment(
         benchmark=benchmark,
+        benchmark_symbol=snapshot.benchmark_symbol.upper(),
         peers=_relative_outcome(snapshot.change_pct, peer_average, neutral_band_pct),
         peer_symbols=tuple(symbol for symbol, _ in valid_peers),
         peer_average_change_pct=peer_average,
