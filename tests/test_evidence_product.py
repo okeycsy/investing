@@ -17,13 +17,19 @@ from investing_monitor.adapters.anthropic_evidence import (
 )
 from investing_monitor.adapters.config import load_evidence_profile
 from investing_monitor.adapters.evidence_feeds import parse_evidence_feed
+from investing_monitor.adapters.insider_transactions import (
+    parse_yahoo_insider_transactions,
+    transaction_code,
+)
 from investing_monitor.adapters.sec_filings import (
     ResilientSecFilingsAdapter,
     SecAccessBlocked,
     SecFetchResult,
     SecSubmissionsClient,
+    parse_form4_document,
     parse_sec_document_text,
     parse_sec_submissions,
+    parse_yahoo_sec_filings,
     select_filing_analysis_text,
 )
 from investing_monitor.adapters.sqlite_repository import SQLiteMonitorRepository
@@ -39,6 +45,7 @@ from investing_monitor.application.evidence import (
 from investing_monitor.application.sec_monitor import SecMonitorService
 from investing_monitor.domain.evidence import (
     EvidenceAnalysis,
+    EvidenceDocument,
     EvidenceKind,
     EvidenceProfile,
     EvidenceStatus,
@@ -72,6 +79,7 @@ def raw(
     source_name: str = "Reuters",
     source_url: str = "https://example.com/story?utm_source=test",
     source_text: str = "Verified source text.",
+    metadata: dict | None = None,
 ) -> RawEvidenceCandidate:
     return RawEvidenceCandidate(
         ticker="VRT",
@@ -81,6 +89,7 @@ def raw(
         source_url=source_url,
         published_at=NOW + timedelta(minutes=minute),
         source_text=source_text,
+        metadata=metadata or {},
     )
 
 
@@ -118,6 +127,17 @@ class CandidateScreeningTest(unittest.TestCase):
 
         self.assertEqual(decision.status, EvidenceStatus.FILTERED)
         self.assertIsNotNone(decision.candidate)
+
+    def test_industry_listicle_is_filtered_before_ai(self):
+        decision = screen_candidate(
+            raw(
+                "The AI Boom Isn't Just About Chips. "
+                "These 3 Overlooked Stocks Keep Data Centers Running"
+            ),
+            PROFILE,
+        )
+
+        self.assertEqual(decision.status, EvidenceStatus.FILTERED)
 
     def test_routine_ir_dividend_is_filtered_before_ai(self):
         decision = screen_candidate(
@@ -740,8 +760,237 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
             self.assertIn("버티브, 냉각 생산능력 확대", move_text)
             self.assertIn("https://example.com/story", move_text)
 
+    def test_material_insider_purchase_bypasses_ai_and_creates_structured_alert(self):
+        class Analyzer:
+            def analyze(self, _candidates, _profile):
+                raise AssertionError("structured insider transaction must bypass AI")
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+            )
+            report = service.ingest(
+                [
+                    raw(
+                        "Jane Doe — Open-market purchase",
+                        kind=EvidenceKind.INSIDER,
+                        source_name="Yahoo Finance insider data",
+                        source_text=(
+                            "Jane Doe (Chief Financial Officer). Open-market purchase: "
+                            "2,000 shares; reported value $250,000."
+                        ),
+                        metadata={
+                            "transaction_code": "P",
+                            "transaction_codes": ("P",),
+                            "insider_name": "Jane Doe",
+                            "position": "Chief Financial Officer",
+                            "shares": 2_000,
+                            "value_usd": 250_000,
+                            "exact_form": False,
+                        },
+                    )
+                ],
+                NOW,
+            )
+
+            self.assertEqual(report.analyzed, 1)
+            self.assertEqual(report.alerts, 1)
+            payload = repository.pending_deliveries(NOW)[0].payload
+            rendered = json.dumps(payload, ensure_ascii=False)
+            self.assertIn("🟢", rendered)
+            self.assertIn("장내 매수", rendered)
+            self.assertIn("Jane Doe", rendered)
+            self.assertIn("2,000주", rendered)
+            self.assertIn("Yahoo Finance 집계 보기", rendered)
+            self.assertNotIn("옵션 행사로 추정", rendered)
+
+    def test_rsu_award_and_small_sale_are_ledger_only(self):
+        class Analyzer:
+            def analyze(self, _candidates, _profile):
+                raise AssertionError("non-material insider events must bypass AI")
+
+        candidates = [
+            raw(
+                "Jane Doe — Stock award",
+                kind=EvidenceKind.INSIDER,
+                metadata={
+                    "transaction_code": "A",
+                    "transaction_codes": ("A",),
+                    "value_usd": 0,
+                },
+            ),
+            raw(
+                "John Doe — Open-market sale",
+                kind=EvidenceKind.INSIDER,
+                source_url="https://example.com/sale",
+                metadata={
+                    "transaction_code": "S",
+                    "transaction_codes": ("S",),
+                    "value_usd": 999_999,
+                },
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(repository, PROFILE, Analyzer())
+
+            report = service.ingest(candidates, NOW)
+
+            self.assertEqual(report.filtered, 2)
+            self.assertEqual(report.analyzed, 0)
+            self.assertEqual(repository.pending_deliveries(NOW), [])
+
+    def test_direct_form4_award_is_filtered_after_document_enrichment(self):
+        class Analyzer:
+            def analyze(self, _candidates, _profile):
+                raise AssertionError("Form 4 award must not reach AI")
+
+        class FilingText:
+            def fetch(self, _candidate):
+                return EvidenceDocument(
+                    source_text="Jane Doe received a stock award of 2,000 shares.",
+                    metadata={
+                        "transaction_code": "A",
+                        "transaction_codes": ("A",),
+                        "insider_name": "Jane Doe",
+                        "position": "Director",
+                        "shares": 2_000,
+                        "value_usd": 0,
+                        "exact_form": True,
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                filing_text=FilingText(),
+                alert_builder=build_evidence_message,
+            )
+
+            report = service.ingest(
+                [
+                    raw(
+                        "Form 4",
+                        kind=EvidenceKind.INSIDER,
+                        source_name="SEC EDGAR",
+                        source_url="https://www.sec.gov/form4.xml",
+                        source_text="Form 4",
+                    )
+                ],
+                NOW,
+            )
+
+            self.assertEqual(report.enriched, 1)
+            self.assertEqual(report.filtered, 1)
+            self.assertEqual(report.analyzed, 0)
+            self.assertEqual(repository.pending_deliveries(NOW), [])
+
+
+class InsiderTransactionTest(unittest.TestCase):
+    def test_yahoo_semantics_distinguish_purchase_sale_award_exercise_and_tax(self):
+        self.assertEqual(transaction_code("Purchase at price 10.00 per share"), "P")
+        self.assertEqual(transaction_code("Sale at price 10.00 per share"), "S")
+        self.assertEqual(transaction_code("Stock Award(Grant) at price 0.00"), "A")
+        self.assertEqual(transaction_code("Option Exercise at price 2.00"), "M")
+        self.assertEqual(transaction_code("Tax withholding transaction"), "F")
+
+    def test_yahoo_insider_row_is_normalized_without_calling_award_a_purchase(self):
+        rows = [
+            {
+                "Shares": 236,
+                "Value": 0,
+                "Text": "Stock Award(Grant) at price 0.00 per share.",
+                "Insider": "PAYNE CHRISTOPHER D",
+                "Position": "Director",
+                "Start Date": NOW.date(),
+                "Ownership": "D",
+            }
+        ]
+
+        candidate = parse_yahoo_insider_transactions(
+            rows,
+            PROFILE,
+            limit=10,
+            lookback_days=30,
+            now=NOW,
+        )[0]
+
+        self.assertEqual(candidate.metadata["transaction_code"], "A")
+        self.assertEqual(candidate.metadata["shares"], 236)
+        self.assertIn("Stock award", candidate.headline)
+        self.assertNotIn("purchase", candidate.headline.casefold())
+
+    def test_form4_xml_preserves_transaction_semantics_and_holding_change(self):
+        payload = """<?xml version="1.0"?>
+        <ownershipDocument>
+          <reportingOwner><reportingOwnerId><rptOwnerName>DOE JANE</rptOwnerName>
+          </reportingOwnerId><reportingOwnerRelationship><isOfficer>1</isOfficer>
+          <officerTitle>Chief Financial Officer</officerTitle>
+          </reportingOwnerRelationship></reportingOwner>
+          <nonDerivativeTable><nonDerivativeTransaction>
+            <securityTitle><value>Common Stock</value></securityTitle>
+            <transactionDate><value>2026-09-02</value></transactionDate>
+            <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+            <transactionAmounts><transactionShares><value>3000</value></transactionShares>
+            <transactionPricePerShare><value>400</value></transactionPricePerShare>
+            <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+            </transactionAmounts><postTransactionAmounts>
+            <sharesOwnedFollowingTransaction><value>7000</value></sharesOwnedFollowingTransaction>
+            </postTransactionAmounts><ownershipNature>
+            <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+            </ownershipNature></nonDerivativeTransaction></nonDerivativeTable>
+        </ownershipDocument>"""
+
+        document = parse_form4_document(payload)
+
+        self.assertIsNotNone(document)
+        self.assertEqual(document.metadata["transaction_code"], "S")
+        self.assertEqual(document.metadata["shares"], 3_000)
+        self.assertEqual(document.metadata["value_usd"], 1_200_000)
+        self.assertEqual(document.metadata["holding_change_ratio"], 0.3)
+        self.assertEqual(document.metadata["post_shares"], 7_000)
+        self.assertIn("Chief Financial Officer", document.source_text)
+
 
 class SecFilingsTest(unittest.TestCase):
+    def test_yahoo_mirror_uses_sec_archive_index_as_user_source(self):
+        rows = [
+            {
+                "date": NOW.date(),
+                "type": "8-K",
+                "title": "Current report",
+                "edgarUrl": (
+                    "https://finance.yahoo.com/sec-filing/VRT/"
+                    "0001628280-26-050609_1674101"
+                ),
+                "exhibits": {
+                    "EX-99.1": "https://cdn.example.com/exhibit991.htm",
+                },
+            }
+        ]
+
+        candidate = parse_yahoo_sec_filings(
+            rows,
+            PROFILE,
+            limit=10,
+            lookback_days=30,
+            now=NOW,
+        )[0]
+
+        self.assertTrue(candidate.source_url.startswith("https://www.sec.gov/Archives/"))
+        self.assertIn("000162828026050609", candidate.source_url)
+        self.assertEqual(
+            candidate.metadata["document_urls"],
+            ("https://finance.yahoo.com/sec-filing/VRT/0001628280-26-050609_1674101", "https://cdn.example.com/exhibit991.htm"),
+        )
+
     def test_submissions_parser_builds_accession_archive_candidate(self):
         profile = EvidenceProfile(
             ticker="VRT",

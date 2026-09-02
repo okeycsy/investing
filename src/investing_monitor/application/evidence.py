@@ -16,8 +16,13 @@ from investing_monitor.domain.evidence import (
     EvidenceKind,
     EvidenceProfile,
     EvidenceStatus,
+    EvidenceDocument,
     RawEvidenceCandidate,
     candidate_identity,
+)
+from investing_monitor.application.insider import (
+    assess_insider_materiality,
+    build_insider_analysis,
 )
 from investing_monitor.ports.repository import AlertRecord, MonitorRepository
 
@@ -35,6 +40,9 @@ LOW_VALUE_PATTERNS = (
     "top 3",
     "stocks to watch",
     "stocks with",
+    "overlooked stocks",
+    "isn't just about",
+    "is not just about",
     "buy, sell, or hold",
     "buy sell or hold",
     "may be fairly valued",
@@ -139,6 +147,14 @@ def screen_candidate(
             reason="deterministic low-value title rule",
             candidate=candidate,
         )
+    if candidate.kind is EvidenceKind.INSIDER:
+        assessment = assess_insider_materiality(candidate)
+        if assessment is not None and not assessment.material:
+            return CandidateDecision(
+                status=EvidenceStatus.FILTERED,
+                reason=assessment.reason,
+                candidate=candidate,
+            )
     return CandidateDecision(
         status=EvidenceStatus.PENDING,
         reason="ready for evidence analysis",
@@ -256,7 +272,7 @@ class ArticleTextProvider(Protocol):
 
 
 class FilingTextProvider(Protocol):
-    def fetch(self, candidate: EvidenceCandidate) -> str: ...
+    def fetch(self, candidate: EvidenceCandidate) -> str | EvidenceDocument: ...
 
 
 @dataclass(frozen=True)
@@ -355,9 +371,12 @@ class EvidenceIngestionService:
             now,
             limit=self.batch_limit,
         )
-        analysis_candidates, enriched, enrichment_errors = self._enrich(
-            analysis_candidates
-        )
+        (
+            analysis_candidates,
+            enriched,
+            enrichment_errors,
+            post_enrichment_filters,
+        ) = self._enrich(analysis_candidates)
         analyzed = relevant = alerts = 0
         failed = len(enrichment_errors)
         for candidate_id, error in enrichment_errors.items():
@@ -367,6 +386,32 @@ class EvidenceIngestionService:
                 now + self.retry_delay,
                 error,
             )
+        for candidate_id, reason in post_enrichment_filters.items():
+            self.repository.mark_evidence_filtered(candidate_id, now, reason)
+
+        structured_insiders = [
+            candidate
+            for candidate in analysis_candidates
+            if candidate.kind is EvidenceKind.INSIDER
+            and assess_insider_materiality(candidate) is not None
+        ]
+        analysis_candidates = [
+            candidate
+            for candidate in analysis_candidates
+            if candidate not in structured_insiders
+        ]
+        for candidate in structured_insiders:
+            analysis = build_insider_analysis(candidate)
+            alert = self._build_alert(candidate, analysis)
+            inserted_alert = self.repository.record_evidence_analysis(
+                candidate.candidate_id,
+                analysis,
+                now,
+                alert,
+            )
+            analyzed += 1
+            relevant += 1
+            alerts += int(inserted_alert)
         if analysis_candidates:
             try:
                 batch = self.analyzer.analyze(analysis_candidates, self.profile)
@@ -387,20 +432,7 @@ class EvidenceIngestionService:
                 }
                 for candidate_id, analysis in batch.analyses.items():
                     candidate = candidates_by_id[candidate_id]
-                    alert = None
-                    if analysis.relevant and self.alert_builder is not None:
-                        alert = AlertRecord(
-                            event_key=self.repository.evidence_cluster_key(candidate_id),
-                            ticker=candidate.ticker,
-                            alert_type={
-                                EvidenceKind.NEWS: "catalyst",
-                                EvidenceKind.IR: "catalyst",
-                                EvidenceKind.SEC: "filing",
-                                EvidenceKind.INSIDER: "insider",
-                            }[candidate.kind],
-                            created_at=candidate.published_at,
-                            payload=self.alert_builder(candidate, analysis),
-                        )
+                    alert = self._build_alert(candidate, analysis)
                     inserted_alert = self.repository.record_evidence_analysis(
                         candidate_id,
                         analysis,
@@ -423,7 +455,8 @@ class EvidenceIngestionService:
             inserted_pending=len(inserted),
             filtered=sum(
                 decision.status is EvidenceStatus.FILTERED for decision in decisions
-            ),
+            )
+            + len(post_enrichment_filters),
             quarantined=sum(
                 decision.status is EvidenceStatus.QUARANTINED for decision in decisions
             ),
@@ -455,10 +488,16 @@ class EvidenceIngestionService:
     def _enrich(
         self,
         candidates: Sequence[EvidenceCandidate],
-    ) -> tuple[list[EvidenceCandidate], int, dict[str, str]]:
+    ) -> tuple[
+        list[EvidenceCandidate],
+        int,
+        dict[str, str],
+        dict[str, str],
+    ]:
         enriched = 0
         results = []
         errors = {}
+        filtered = {}
         for candidate in candidates:
             host = urlsplit(candidate.source_url).netloc.lower()
             should_fetch = (
@@ -479,21 +518,61 @@ class EvidenceIngestionService:
                         source_text,
                     )
                     enriched += 1
-            if candidate.kind in {EvidenceKind.SEC, EvidenceKind.INSIDER}:
+            needs_filing_text = candidate.kind is EvidenceKind.SEC or (
+                candidate.kind is EvidenceKind.INSIDER
+                and not candidate.metadata.get("transaction_code")
+            )
+            if needs_filing_text:
                 if len(candidate.source_text) < 200:
                     if self.filing_text is None:
                         errors[candidate.candidate_id] = "filing text provider unavailable"
                         continue
                     try:
-                        source_text = self.filing_text.fetch(candidate)
+                        document = self.filing_text.fetch(candidate)
                     except Exception as exc:
                         errors[candidate.candidate_id] = str(exc)
                         continue
-                    candidate = replace(candidate, source_text=source_text)
+                    if isinstance(document, EvidenceDocument):
+                        source_text = document.source_text
+                        metadata = {**candidate.metadata, **document.metadata}
+                    else:
+                        source_text = document
+                        metadata = candidate.metadata
+                    candidate = replace(
+                        candidate,
+                        source_text=source_text,
+                        metadata=metadata,
+                    )
                     self.repository.update_evidence_source_text(
                         candidate.candidate_id,
                         source_text,
+                        metadata,
                     )
                     enriched += 1
+            if candidate.kind is EvidenceKind.INSIDER:
+                assessment = assess_insider_materiality(candidate)
+                if assessment is not None and not assessment.material:
+                    filtered[candidate.candidate_id] = assessment.reason
+                    continue
             results.append(candidate)
-        return results, enriched, errors
+        return results, enriched, errors, filtered
+
+    def _build_alert(
+        self,
+        candidate: EvidenceCandidate,
+        analysis: EvidenceAnalysis,
+    ) -> AlertRecord | None:
+        if not analysis.relevant or self.alert_builder is None:
+            return None
+        return AlertRecord(
+            event_key=self.repository.evidence_cluster_key(candidate.candidate_id),
+            ticker=candidate.ticker,
+            alert_type={
+                EvidenceKind.NEWS: "catalyst",
+                EvidenceKind.IR: "catalyst",
+                EvidenceKind.SEC: "filing",
+                EvidenceKind.INSIDER: "insider",
+            }[candidate.kind],
+            created_at=candidate.published_at,
+            payload=self.alert_builder(candidate, analysis),
+        )

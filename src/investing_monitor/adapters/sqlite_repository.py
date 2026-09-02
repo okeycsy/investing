@@ -449,11 +449,37 @@ class SQLiteMonitorRepository:
         self,
         candidate_id: str,
         source_text: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        with closing(self._connect()) as connection, connection:
+            if metadata is None:
+                connection.execute(
+                    "UPDATE evidence_candidates SET source_text = ? WHERE candidate_id = ?",
+                    (source_text, candidate_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE evidence_candidates SET source_text = ?, metadata_json = ? "
+                    "WHERE candidate_id = ?",
+                    (
+                        source_text,
+                        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+                        candidate_id,
+                    ),
+                )
+
+    def mark_evidence_filtered(
+        self,
+        candidate_id: str,
+        filtered_at: datetime,
+        reason: str,
     ) -> None:
         with closing(self._connect()) as connection, connection:
             connection.execute(
-                "UPDATE evidence_candidates SET source_text = ? WHERE candidate_id = ?",
-                (source_text, candidate_id),
+                "UPDATE evidence_candidates SET status = 'filtered', status_reason = ?, "
+                "last_attempt_at = ?, next_attempt_at = NULL, last_error = '' "
+                "WHERE candidate_id = ?",
+                (reason, _utc_iso(filtered_at), candidate_id),
             )
 
     def evidence_cluster_key(self, candidate_id: str) -> str:

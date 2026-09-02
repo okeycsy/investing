@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 from investing_monitor.domain.evidence import (
     CandidateDecision,
@@ -81,6 +81,14 @@ class MonitorRepository(Protocol):
         self,
         candidate_id: str,
         source_text: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> None: ...
+
+    def mark_evidence_filtered(
+        self,
+        candidate_id: str,
+        filtered_at: datetime,
+        reason: str,
     ) -> None: ...
 
     def evidence_cluster_key(self, candidate_id: str) -> str: ...

@@ -129,6 +129,12 @@ class EvidenceAnalysis:
     confidence: str = "medium"
 
 
+@dataclass(frozen=True)
+class EvidenceDocument:
+    source_text: str
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+
 def candidate_identity(raw: RawEvidenceCandidate) -> str:
     parts = urlsplit(raw.source_url.strip())
     canonical_url = urlunsplit(

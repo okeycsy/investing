@@ -7,10 +7,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any, Protocol
+from xml.etree import ElementTree
 
 import requests
 
+from investing_monitor.adapters.insider_transactions import (
+    YahooInsiderTransactionsAdapter,
+)
 from investing_monitor.domain.evidence import (
+    EvidenceDocument,
     EvidenceKind,
     EvidenceCandidate,
     EvidenceProfile,
@@ -148,6 +153,12 @@ class SecSubmissionsClient:
 
 
 class YFinanceSecMirror:
+    def __init__(
+        self,
+        insider: YahooInsiderTransactionsAdapter | None = None,
+    ) -> None:
+        self.insider = insider or YahooInsiderTransactionsAdapter()
+
     def fetch(
         self,
         profile: EvidenceProfile,
@@ -156,18 +167,40 @@ class YFinanceSecMirror:
         lookback_days: int,
         now: datetime,
     ) -> tuple[RawEvidenceCandidate, ...]:
+        errors = []
+        candidates: tuple[RawEvidenceCandidate, ...] = ()
         try:
             import yfinance as yf
 
             rows = yf.Ticker(profile.ticker).get_sec_filings() or []
         except Exception as exc:
-            raise SecFilingError(f"Yahoo SEC mirror unavailable: {exc}") from exc
-        return parse_yahoo_sec_filings(
-            rows,
-            profile,
-            limit=limit,
-            lookback_days=lookback_days,
-            now=now,
+            errors.append(f"filings={exc}")
+        else:
+            candidates = parse_yahoo_sec_filings(
+                rows,
+                profile,
+                limit=limit,
+                lookback_days=lookback_days,
+                now=now,
+            )
+        try:
+            insiders = self.insider.fetch(
+                profile,
+                limit=limit,
+                lookback_days=lookback_days,
+                now=now,
+            )
+        except Exception as exc:
+            errors.append(f"insiders={exc}")
+            insiders = ()
+        if not candidates and not insiders and errors:
+            raise SecFilingError(f"Yahoo SEC mirror unavailable: {'; '.join(errors)}")
+        return tuple(
+            sorted(
+                (*candidates, *insiders),
+                key=lambda item: item.published_at or now,
+                reverse=True,
+            )
         )
 
 
@@ -296,9 +329,15 @@ def parse_yahoo_sec_filings(
             continue
         edgar_url = str(row.get("edgarUrl") or "")
         exhibits = row.get("exhibits") if isinstance(row.get("exhibits"), dict) else {}
-        source_url = str(exhibits.get(form) or "") or edgar_url
+        mirror_url = str(exhibits.get(form) or "") or edgar_url
         accession_match = re.search(r"(\d{10}-\d{2}-\d{6})", edgar_url)
         accession = accession_match.group(1) if accession_match else edgar_url
+        source_url = edgar_url
+        if accession_match:
+            source_url = (
+                f"https://www.sec.gov/Archives/edgar/data/{int(profile.cik)}/"
+                f"{accession.replace('-', '')}/{accession}-index.html"
+            )
         title = str(row.get("title") or f"{form} filing")
         items = ",".join(dict.fromkeys(re.findall(r"\b(\d\.\d{2})\b", title)))
         published_at = datetime.combine(
@@ -325,7 +364,7 @@ def parse_yahoo_sec_filings(
                     "document_urls": tuple(
                         dict.fromkeys(
                             str(url)
-                            for url in (source_url, *exhibits.values())
+                            for url in (mirror_url, *exhibits.values())
                             if str(url).startswith(("https://", "http://"))
                         )
                     ),
@@ -351,7 +390,7 @@ class SecFilingTextClient:
         self.timeout = timeout
         self.max_chars = max_chars
 
-    def fetch(self, candidate: EvidenceCandidate) -> str:
+    def fetch(self, candidate: EvidenceCandidate) -> str | EvidenceDocument:
         raw_urls = candidate.metadata.get("document_urls") or (candidate.source_url,)
         urls = [str(url) for url in raw_urls if str(url).startswith("http")]
         form = str(candidate.metadata.get("form") or "")
@@ -379,6 +418,10 @@ class SecFilingTextClient:
             if response.status_code != 200:
                 errors.append(f"HTTP {response.status_code}")
                 continue
+            if form.startswith("4"):
+                document = parse_form4_document(response.text)
+                if document is not None:
+                    return document
             text = parse_sec_document_text(response.text, max_chars=200_000)
             if text:
                 parts.append(
@@ -397,6 +440,109 @@ class SecFilingTextClient:
                 + ("; ".join(errors[-3:]) or "insufficient document text")
             )
         return combined
+
+
+def parse_form4_document(payload: str) -> EvidenceDocument | None:
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError:
+        return None
+    if _local_name(root.tag) != "ownershipDocument":
+        return None
+
+    insider_name = _first_text(root, "rptOwnerName") or "Unknown insider"
+    officer_title = _first_text(root, "officerTitle")
+    roles = []
+    if _first_text(root, "isOfficer") == "1":
+        roles.append("Officer")
+    if _first_text(root, "isDirector") == "1":
+        roles.append("Director")
+    if _first_text(root, "isTenPercentOwner") == "1":
+        roles.append("10% Owner")
+    position = officer_title or " and ".join(roles) or "Position unavailable"
+
+    transactions = []
+    for node in root.iter():
+        if _local_name(node.tag) not in {
+            "nonDerivativeTransaction",
+            "derivativeTransaction",
+        }:
+            continue
+        code = (_first_text(node, "transactionCode") or "").upper()
+        if not code:
+            continue
+        shares = _float(_first_text(node, "transactionShares"))
+        price = _float(_first_text(node, "transactionPricePerShare"))
+        acquired_disposed = (
+            _first_text(node, "transactionAcquiredDisposedCode") or ""
+        ).upper()
+        post_shares = _float(_first_text(node, "sharesOwnedFollowingTransaction"))
+        transactions.append(
+            {
+                "code": code,
+                "date": _first_text(node, "transactionDate"),
+                "security": _first_text(node, "securityTitle"),
+                "shares": shares,
+                "price": price,
+                "value_usd": shares * price,
+                "acquired_disposed": acquired_disposed,
+                "post_shares": post_shares,
+                "ownership": _first_text(node, "directOrIndirectOwnership"),
+            }
+        )
+    if not transactions:
+        return None
+
+    codes = tuple(dict.fromkeys(str(item["code"]) for item in transactions))
+    primary_code = next(
+        (code for code in ("P", "S", "A", "M", "F") if code in codes),
+        codes[0],
+    )
+    primary = [item for item in transactions if item["code"] == primary_code]
+    shares = sum(float(item["shares"]) for item in primary)
+    value_usd = sum(float(item["value_usd"]) for item in primary)
+    post_shares = float(primary[-1]["post_shares"] or 0)
+    holding_change = 0.0
+    if primary_code == "S" and shares > 0 and post_shares >= 0:
+        holding_change = shares / (shares + post_shares) if shares + post_shares else 0
+    labels = {
+        "P": "Open-market purchase",
+        "S": "Open-market sale",
+        "A": "Stock award",
+        "M": "Option exercise",
+        "F": "Tax withholding",
+    }
+    details = []
+    for item in transactions:
+        detail = (
+            f"{labels.get(str(item['code']), str(item['code']))}: "
+            f"{float(item['shares']):,.0f} shares"
+        )
+        if float(item["price"]) > 0:
+            detail += f" at ${float(item['price']):,.2f} per share"
+        if item["date"]:
+            detail += f" on {item['date']}"
+        details.append(detail)
+    source_text = (
+        f"Reporting owner: {insider_name}; position: {position}. "
+        + " ".join(details)
+        + f" Shares owned following transaction: {post_shares:,.0f}."
+    )
+    return EvidenceDocument(
+        source_text=source_text,
+        metadata={
+            "transaction_code": primary_code,
+            "transaction_codes": codes,
+            "insider_name": insider_name,
+            "position": position,
+            "shares": shares,
+            "value_usd": value_usd,
+            "post_shares": post_shares,
+            "holding_change_ratio": holding_change,
+            "transactions": tuple(transactions),
+            "exact_form": True,
+        },
+    )
 
 
 def parse_sec_document_text(payload: str, *, max_chars: int = 24_000) -> str:
@@ -506,3 +652,24 @@ def _retry_after(value: str | None) -> float | None:
         return max(0.0, float(value))
     except ValueError:
         return None
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _first_text(node: ElementTree.Element, name: str) -> str:
+    for child in node.iter():
+        if _local_name(child.tag) != name:
+            continue
+        for value in child.iter():
+            if value.text and value.text.strip():
+                return value.text.strip()
+    return ""
+
+
+def _float(value: str) -> float:
+    try:
+        return float(value.replace(",", ""))
+    except (AttributeError, ValueError):
+        return 0.0
