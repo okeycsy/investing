@@ -54,3 +54,15 @@ Every visible alert must answer at least one question:
 Existing collection depth is preserved unless a source is irrelevant to the
 configured profile. Improvements should add a concise decision summary above
 useful detail, not replace working detail with a generic status card.
+
+## Runtime Contract
+
+- Every production task runs on a standard GitHub-hosted Actions runner.
+- The nominal market schedule is every five minutes during the extended session;
+  start-time delay is accepted and measured rather than presented as real time.
+- A successful run replays market bars and source cursors since the previous
+  checkpoint before evaluating the current snapshot.
+- Stateful runs share one non-cancelling concurrency group.
+- Runtime state never creates commits on `main`; it lives in a dedicated
+  `runtime-state` branch as a rolling, non-sensitive SQLite snapshot.
+- Actions cache and artifacts are diagnostics and backups, not the primary state.

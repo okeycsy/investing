@@ -8,7 +8,7 @@
 > `src/investing_monitor`는 기존 운영 경로와 분리된 새 코어이며 아직 production
 > Slack을 대신하지 않습니다.
 
-단일 종목 투자 논지 모니터입니다. 현재 기본 종목은 `$VRT`입니다. 새 버전은 로컬 Mac에서 상주하며 Yahoo REST를 장중 2분마다 조회하고, 중요 뉴스, 발행사 SEC 공시, 내부자 거래, 장마감 상대 성과와 주간 논지 변화를 Slack으로 전달합니다. 기존 GitHub Actions 예약 경로는 재개발 검증이 끝날 때까지만 유지합니다.
+단일 종목 투자 논지 모니터입니다. 현재 기본 종목은 `$VRT`입니다. 새 버전도 GitHub Actions hosted runner에서 실행하며 Yahoo REST를 장중 5분 schedule로 조회합니다. 예약 지연이나 누락은 다음 성공 실행의 intraday replay로 보완하고, 중요 뉴스, 발행사 SEC 공시, 내부자 거래, 장마감 상대 성과와 주간 논지 변화를 Slack으로 전달합니다.
 
 제품 동작과 표시 금지사항은 `HOOD_MONITOR_PRODUCT.md`에 고정되어 있습니다.
 
@@ -54,7 +54,7 @@ market_scan_focus: $VRT
 - `SEC_DATA_MODE` (`auto`, `direct`, `yahoo`)
 - `SEC_ARCHIVE_MODE` (`auto`, `direct`, `yahoo`)
 
-`SEC_CONTACT`는 SEC 공식 지침에 맞춰 `User-Agent`와 `From` 헤더에 함께 들어갑니다. GitHub-hosted runner의 공유 IP는 `data.sec.gov`, `efts.sec.gov`, raw Archives에서 간헐적으로 차단되므로 운영 워크플로는 `SEC_DATA_MODE=yahoo`, `SEC_ARCHIVE_MODE=yahoo`를 사용합니다. 발행사 공시·재무제표·Form 4는 Yahoo 대체 경로로 조회하고, 13F는 `SEC_API_KEY`가 있을 때만 sec-api.io 중계 경로를 사용합니다. 로컬 또는 self-hosted runner에서 SEC를 직접 읽으려면 두 모드를 `direct`로 지정할 수 있습니다.
+`SEC_CONTACT`는 SEC 공식 지침에 맞춰 `User-Agent`와 `From` 헤더에 함께 들어갑니다. GitHub-hosted runner의 공유 IP는 `data.sec.gov`, `efts.sec.gov`, raw Archives에서 간헐적으로 차단되므로 운영 워크플로는 `SEC_DATA_MODE=yahoo`, `SEC_ARCHIVE_MODE=yahoo`를 사용합니다. 발행사 공시·재무제표·Form 4는 Yahoo 대체 경로로 조회하고, 13F는 `SEC_API_KEY`가 있을 때만 sec-api.io 중계 경로를 사용합니다.
 
 ## 수동 실행
 
@@ -93,7 +93,7 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 
 ## 알림 원칙
 
-- 현재 legacy workflow는 가격을 10분 cron, 뉴스·공시를 시간 단위 cron으로 조회합니다. v2 cutover 후에는 GitHub 예약 실행을 제거하고 로컬 Mac worker가 프리마켓부터 애프터마켓까지 Yahoo REST를 2분마다 조회합니다.
+- 현재 legacy workflow는 가격을 10분 cron, 뉴스·공시를 시간 단위 cron으로 조회합니다. v2 cutover 후에는 GitHub Actions의 정각을 피한 5분 tick으로 통합하고, 지연된 close/news/SEC와 누락된 가격 구간은 다음 성공 tick에서 복원합니다.
 - 장중 급등락은 `±4%` 정수 구간부터 시작해 같은 방향의 새 1%p 구간 진입 때만 전송합니다. 당일 반대 방향 전환과 이미 통과한 구간은 다시 알리지 않습니다.
 - 장중에는 새 뉴스, 분석 완료된 발행사 중요 SEC 공시, 내부자 거래, 큰 폭의 이상 움직임, 20거래일 평균 대비 1.5배 이상 거래량만 전송합니다. 거래량 알림은 하루 한 번만 보냅니다.
 - 상대 흐름은 반도체 지수 `SOXX`와 동일가중 피어 평균 `ETN/NVT/GEV`를 함께 사용합니다.

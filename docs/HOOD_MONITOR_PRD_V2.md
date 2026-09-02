@@ -4,9 +4,13 @@
 
 작성일: 2026-09-02
 
-대상 릴리스: local worker 기반 v2
+대상 릴리스: GitHub Actions scheduled runner 기반 v2
 
 기본 프로필: `$VRT`
+
+용어상 GitHub Desktop은 로컬 commit/push 클라이언트이며 예약 작업을 실행하지 않는다.
+이 문서에서 GitHub를 서버로 사용한다는 말은 GitHub Actions hosted runner가 모든
+production 작업을 실행한다는 뜻이다.
 
 ## 0. 의사결정 요약
 
@@ -15,16 +19,17 @@
 
 아래 결정은 구현 중 임의로 바꾸지 않는다.
 
-1. 실시간 시장 데이터는 Yahoo REST polling으로 충분하다.
-2. 정규장, 프리마켓, 애프터마켓의 기본 polling 간격은 2분이다.
-3. production scheduler로 GitHub Actions cron을 사용하지 않는다.
-4. 사용자의 Mac에서 하나의 Python worker를 `launchd`로 상시 실행한다.
+1. 모든 production 작업은 GitHub Actions hosted runner에서 실행한다.
+2. 시장 데이터는 Yahoo REST로 조회하고 기본 schedule 간격은 GitHub가 지원하는 최소값인 5분이다.
+3. 예약 실행의 지연과 일부 누락은 허용하되 다음 성공 실행에서 누락 구간을 복원한다.
+4. 각 실행은 하나의 `tick`으로 가격, 촉매, 공시, 브리프의 실행 필요 여부를 판단한다.
 5. 신규 유료 서버, 유료 시세 API, 유료 데이터베이스를 도입하지 않는다.
 6. 현재 보유한 Slack webhook과 Anthropic API 외에 새 유료 서비스를 요구하지 않는다.
 7. 알림은 현재 주가나 정확한 일일 수익률을 보여주는 시세판이 아니다.
 8. 가격 이상 알림에는 상대 흐름, 거래량, 확인된 촉매를 하나의 사건으로 묶는다.
 9. AI가 분석하지 못한 뉴스 제목과 요약 전 공시를 사용자에게 보내지 않는다.
-10. 현재 운영 파일은 shadow 검증이 끝날 때까지 동결하고 새 코어를 병렬 개발한다.
+10. runtime 상태는 `main`이 아닌 전용 `runtime-state` 브랜치에 저장한다.
+11. 현재 운영 파일은 shadow 검증이 끝날 때까지 동결하고 새 코어를 병렬 개발한다.
 
 추가 비용 없음은 외부 서비스를 새로 구독하지 않는다는 뜻이다. 기존 Anthropic
 API는 실제 호출량에 따라 기존 계정 사용량이 발생할 수 있으므로, 결정론적 필터와
@@ -86,12 +91,12 @@ API는 실제 호출량에 따라 기존 계정 사용량이 발생할 수 있�
 
 ### v2 목표
 
-- Mac이 깨어 있고 네트워크가 정상일 때 2분 간격으로 가격 이상을 감시한다.
+- 거래일에는 5분 GitHub schedule로 가격 이상을 감시한다.
 - `+4.0%`, `-4.0%`에서 시작해 같은 방향의 새 1%p 구간만 알린다.
 - 가격 알림 한 건에서 반도체 지수, 피어, 거래량, 최신 촉매를 함께 제공한다.
 - 중요 SEC 공시와 뉴스는 요약 및 논지 관련성 분석 후 한 번만 보낸다.
 - 장마감과 주간 알림을 별도 목적의 브리프로 제공한다.
-- 재시작, 네트워크 장애, Mac 절전 뒤에도 중복이나 조용한 누락이 없도록 복구한다.
+- 예약 지연·누락, runner 실패, 네트워크 장애 뒤에도 중복이나 조용한 누락이 없도록 복구한다.
 - 상태, 원문, 판단, 전달 기록을 SQLite에 남겨 실제 품질을 측정한다.
 
 ### v2 비목표
@@ -108,33 +113,40 @@ API는 실제 호출량에 따라 기존 계정 사용량이 발생할 수 있�
 
 | 항목 | 채택안 | 비용 | 제약 |
 | --- | --- | --- | --- |
-| production host | 사용자의 Mac | 추가 0원 | 종료·절전 중 실시간 중단 |
-| process manager | macOS `launchd` | 추가 0원 | 로그인 사용자 세션 기준 |
+| production host | GitHub-hosted Ubuntu runner | public repository 표준 runner 무료 | 예약 지연·누락 가능 |
+| scheduler | GitHub Actions `schedule` | 추가 0원 | 최소 간격 5분 |
 | 시장 데이터 | Yahoo REST | 추가 0원 | 비공식 API 변경·지연 가능 |
 | 공시 | SEC 공식 API/Archives | 추가 0원 | 요청 예절·속도 제한 필요 |
 | 뉴스 | Yahoo RSS, 회사 IR | 추가 0원 | 기사 커버리지 제한 |
 | 분석 | 기존 Anthropic API | 신규 구독 없음 | 기존 API 사용량은 발생 가능 |
 | 전달 | 기존 Slack webhook | 추가 0원 | webhook 응답만으로 thread 관리 제한 |
-| 상태 저장 | local SQLite | 추가 0원 | Mac 디스크 백업 필요 |
-| CI | GitHub Actions push/manual | 현재 GitHub plan 범위 | 예약 실행에는 사용 금지 |
+| 상태 저장 | `runtime-state` branch의 SQLite snapshot | 추가 0원 | 공개 가능한 비민감 상태만 저장 |
+| CI/운영 | GitHub Actions push/schedule/manual | public repository 표준 runner 무료 | larger runner 사용 금지 |
 
 ### 명시적 한계
 
-무료 로컬 운영에서는 Mac이 꺼지거나 잠든 동안 실제 polling을 할 수 없다. 제품은
-이를 가용한 것처럼 가장하지 않는다.
+GitHub Actions schedule은 정확한 실행 시각을 보장하지 않는다. GitHub 공식 문서도
+고부하 때 예약 작업이 지연되거나 일부 queue가 drop될 수 있다고 명시한다. 제품은
+이를 장애가 아닌 플랫폼 제약으로 수용하되 데이터 누락으로 이어지지 않게 설계한다.
 
-- 전원 연결 중 자동 잠자기 방지를 권장하고 설치 preflight에서 상태를 확인한다.
-- 사용자 LaunchAgent는 로그인 뒤에 실행된다. 재부팅 후 로그인 전 공백도 복구 대상으로 기록한다.
-- 마지막 heartbeat와 현재 시각의 차이로 중단 구간을 감지한다.
-- 재기동 시 Yahoo intraday history와 SEC/news cursor를 이용해 복구한다.
+- cron은 정각 혼잡을 피해 `02, 07, 12 ... 57분`에 등록한다.
+- 마지막 성공 tick과 현재 실행 시각의 차이로 schedule gap을 감지한다.
+- 다음 실행에서 Yahoo intraday history와 SEC/news cursor를 이용해 복구한다.
 - 복구 데이터만으로 정확한 발생 시각을 알 수 없으면 `지연 감지`로 표시한다.
 - 과거 가격 임계치를 한꺼번에 여러 개 보내지 않고 최고 도달 구간 하나로 합친다.
+- 모든 stateful workflow는 하나의 concurrency group으로 직렬화한다.
+- public repository가 60일 동안 비활성 상태이면 schedule이 자동 비활성화될 수 있으므로 Actions 상태를 운영 점검 항목에 포함한다.
+
+공식 근거:
+
+- https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+- https://docs.github.com/en/billing/concepts/product-billing/github-actions
 
 ## 5. 무료 환경에서 제공할 제품군
 
 ### P1. Live Move Monitor
 
-2분마다 목표 종목을 확인하고 새 가격 구간 진입을 감지한다. 트리거가 생기면 같은
+5분 schedule tick마다 목표 종목을 확인하고 새 가격 구간 진입을 감지한다. 트리거가 생기면 같은
 시점의 SOXX와 피어를 조회하고, 거래량과 최근 촉매를 합쳐 완결된 알림을 만든다.
 
 ### P2. Catalyst Watch
@@ -159,18 +171,19 @@ SEC 제출을 빠르게 감지하고 10-Q/10-K/중요 8-K/Form 4를 구조화한
 
 ### P6. Research Ledger
 
-감지한 원문, AI 판단, 발송 여부와 억제 이유를 SQLite에 저장한다. CLI로 특정 날짜와
-사건을 조회하고, 판단 규칙을 사후 검토할 수 있게 한다.
+감지한 원문 메타데이터, AI 판단, 발송 여부와 억제 이유를 SQLite에 저장한다.
+`workflow_dispatch: status/replay`와 진단 artifact로 특정 날짜와 사건을 사후 검토한다.
 
 ### P7. Replay and Quality Lab
 
 과거 intraday 데이터나 저장된 fixture로 하루를 재생한다. 규칙 변경 전후의 알림 수,
 트리거 시점, 메시지를 비교해 production에 넣기 전에 품질을 확인한다.
 
-### P8. Local Operations
+### P8. GitHub Operations
 
-worker 상태, 마지막 성공 polling, outbox, 연속 실패와 복구 기록을 CLI와 로컬 로그로
-확인한다. 투자 Slack에는 stack trace나 반복 실패를 보내지 않는다.
+마지막 성공 tick, 실제 시작 지연, outbox, 연속 실패와 복구 기록을 Actions Job
+Summary와 진단 artifact에서 확인한다. 투자 Slack에는 stack trace나 반복 실패를
+보내지 않는다.
 
 ## 6. 정보 구조와 사건 우선순위
 
@@ -201,7 +214,7 @@ worker 상태, 마지막 성공 polling, outbox, 연속 실패와 복구 기록�
 
 ### 여정 A: 정규장 +4% 진입
 
-1. worker가 VRT quote를 조회한다.
+1. 예약된 GitHub Actions tick이 VRT quote를 조회한다.
 2. 저장된 이전 정규장 종가 대비 `+4.0%` 구간에 처음 진입했음을 확인한다.
 3. SOXX와 ETN/GEV/NVT를 동시에 조회한다.
 4. 동시간대 20세션 거래량 기준과 최신 분석 완료 촉매를 가져온다.
@@ -219,45 +232,70 @@ worker 상태, 마지막 성공 polling, outbox, 연속 실패와 복구 기록�
 6. 제목, 핵심 변화, 논지 영향, SEC 직접 링크가 준비된 경우에만 보낸다.
 7. 분석 실패 시 발송하지 않고 재시도 queue에 남긴다.
 
-### 여정 C: Mac이 두 시간 잠든 뒤 재개
+### 여정 C: GitHub schedule이 두 시간 지연된 뒤 재개
 
-1. `launchd`가 worker를 다시 시작한다.
-2. heartbeat gap을 감지하고 recovery mode로 들어간다.
+1. 다음 GitHub Actions tick이 `runtime-state`를 복원한다.
+2. 마지막 성공 tick과의 gap을 감지하고 recovery mode로 들어간다.
 3. 같은 거래일의 intraday bars를 시간순으로 재생한다.
 4. 중단 중 +4, +5, +6을 통과했다면 `+6.0% 지연 감지` 한 건만 만든다.
 5. +4/+5/+6 상태는 모두 소비 처리해 이후 역순 또는 중복 알림을 막는다.
 6. SEC/news는 마지막 cursor 이후의 모든 후보를 정상 규칙으로 처리한다.
-7. 로컬 operations 기록에 gap과 복구 결과를 남긴다.
+7. Actions Job Summary와 runtime state에 gap과 복구 결과를 남긴다.
 
 ## 8. 실행 모델과 polling cadence
 
-모든 시간 판단은 `America/New_York` 거래소 시간으로 수행하고, 사용자 메시지만
-`Asia/Seoul`로 표시한다. Mac의 로컬 timezone에 의존하지 않는다.
+모든 거래 시간 판단은 `America/New_York`로 수행하고 사용자 메시지는
+`Asia/Seoul`로 표시한다. runner의 UTC timezone에 의존하지 않는다.
 
 | 작업 | 활성 구간 | 기본 주기 | 비고 |
 | --- | --- | --- | --- |
-| heartbeat | worker 실행 중 | 30초 | SQLite에 마지막 생존 시각 기록 |
-| outbox 전달 | worker 실행 중 | 15초 | 실패 시 지수 backoff |
-| VRT quote | 거래일 04:00-20:00 ET | 2분 | 이전 정규장 종가 기준 |
+| core tick | 거래일 04:00-20:00 ET | 5분 | 정각을 피해 02분부터 시작 |
+| state restore/checkpoint | 모든 tick | 실행당 2회 이상 | Slack 전후 상태 보존 |
+| VRT quote | 거래일 04:00-20:00 ET | 성공 tick마다 | 이전 정규장 종가 기준 |
 | benchmark/peer quote | MOVE 발생 시 | 즉시 | SOXX/ETN/GEV/NVT 동시 조회 |
-| intraday volume baseline | 시작 시, 09:25 ET | 1회 | 20세션 profile 캐시 |
-| Yahoo/IR news | 거래일 04:00-20:00 ET | 5분 | 그 외 시간 15분 |
-| SEC submissions | 평일 06:00-22:00 ET | 5분 | 그 외 시간 30분 |
-| 분석 retry | pending 존재 시 | 2분 | 최대 시도 후 다음 긴 backoff |
-| close brief | 거래일 16:15 ET | 1회 | 최종 거래량 안정 후 |
+| intraday volume baseline | 첫 장중 tick | 거래일 1회 | 20세션 profile 캐시 |
+| Yahoo/IR news | 거래일 04:00-20:00 ET | 성공 tick마다 | 그 외 시간 30분 |
+| SEC submissions | 평일 06:00-22:00 ET | 10분 목표 | 그 외 시간 30분 |
+| 분석 retry | pending 존재 시 | 다음 성공 tick | 실행별 retry budget 적용 |
+| close brief | 실제 마감+15분 이후 첫 tick | 거래일 1회 | 지연돼도 due-state로 따라잡음 |
 | weekly review | 월요일 08:10 KST | 1회 | 직전 거래 주간 기준 |
-| log rotation | local date 변경 시 | 1회 | 30일 보관 기본 |
+| 13F review | 토요일 19:00 KST | 1회 | 기존 mode 유지 |
+| 진단 DB artifact | 매일 마지막 성공 tick | 1회 | 7일 보관 |
+
+목표 schedule은 다음과 같다. timezone-aware schedule을 사용해 DST용 중복 cron과
+문자열 기반 mode 분기를 제거한다.
+
+```yaml
+on:
+  schedule:
+    - cron: '2-57/5 4-19 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '13,43 0-3,20-23 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '13 */2 * * 0,6'
+      timezone: 'America/New_York'
+    - cron: '10 8 * * 1'
+      timezone: 'Asia/Seoul'
+    - cron: '0 19 * * 6'
+      timezone: 'Asia/Seoul'
+```
+
+첫 schedule은 시장 monitoring, 둘째와 셋째는 장외 및 주말 source catch-up, 넷째는
+weekly, 다섯째는 13F wake-up이다. 어떤 schedule로 시작했더라도 동일한 `tick`이
+state를 보고 실제 due task를 결정한다.
 
 ### Scheduler 규칙
 
-- 하나의 장기 실행 event loop가 위 작업을 독립 task로 관리한다.
-- 긴 SEC/AI 호출이 2분 quote task를 막지 않도록 I/O task를 분리한다.
-- 같은 종류의 이전 task가 아직 실행 중이면 중첩 실행하지 않는다.
-- 각 task는 timeout, retry, jitter를 가진다.
-- quote 실패는 15초, 30초, 60초 뒤 재시도하고 이후 2분 주기로 복귀한다.
+- 모든 schedule과 수동 실행은 하나의 `tick` entrypoint를 사용한다.
+- `tick`은 event name이 아니라 저장된 마지막 성공 시각을 보고 실행할 due task를 계산한다.
+- `concurrency.group=ticker-monitor-state`, `cancel-in-progress=false`로 stateful 실행을 직렬화한다.
+- 정상 실행은 12분 안에 끝내고 다음 schedule을 불필요하게 막지 않는다.
+- 긴 SEC/AI 호출은 market snapshot 저장 이후 수행하며 task별 실패를 격리한다.
+- quote 실패는 실행 예산 안에서 15초, 30초, 60초 뒤 재시도한다.
 - provider의 `429` 또는 `Retry-After`는 명시된 대기 시간을 따른다.
-- 미국 휴장일에는 quote task를 실행하지 않고 news/SEC만 저빈도로 유지한다.
+- 미국 휴장일에는 market task를 생략하고 news/SEC만 저빈도로 실행한다.
 - 조기 폐장일에는 exchange calendar의 실제 마감 시각을 사용한다.
+- schedule gap이 있으면 현재 quote보다 intraday replay를 먼저 처리한다.
 
 ## 9. 상세 기능 요구사항
 
@@ -268,19 +306,19 @@ worker 상태, 마지막 성공 polling, outbox, 연속 실패와 복구 기록�
 
 | ID | 우선순위 | 요구사항 | 수용 기준 |
 | --- | --- | --- | --- |
-| RT-001 | P0 | worker는 `launchd KeepAlive`로 관리한다. | 로그인 후 자동 시작하고 강제 종료 테스트에서 자동 재기동한다. |
-| RT-002 | P0 | scheduler는 프로세스 내부에서 동작한다. | GitHub schedule이 없어도 2시간 동안 설정 주기대로 poll 기록이 남는다. |
-| RT-003 | P0 | 각 task는 서로 실패 격리한다. | SEC timeout 중에도 quote와 outbox 주기가 유지된다. |
+| RT-001 | P0 | 모든 production task는 GitHub-hosted `ubuntu-latest`에서 실행한다. | workflow에 self-hosted 또는 local runtime 의존성이 없다. |
+| RT-002 | P0 | 장중 schedule은 5분 간격이며 정각을 피한다. | cron이 `02`분부터 5분 간격이고 NY session gate를 통과한다. |
+| RT-003 | P0 | 하나의 tick 안에서 task 실패를 격리한다. | SEC timeout이어도 market event와 기존 outbox 처리는 완료된다. |
 | RT-004 | P0 | 모든 시간은 exchange timezone으로 계산한다. | DST 시작·종료 fixture에서 개장, 마감, KST 표시가 정확하다. |
-| RT-005 | P0 | worker는 graceful shutdown을 지원한다. | SIGTERM 시 진행 중 상태 transaction을 정리하고 10초 안에 종료한다. |
-| RT-006 | P1 | `monitor doctor` 명령을 제공한다. | Python, config, DB, Keychain, network, Slack dry validation 결과를 보여준다. |
-| RT-007 | P0 | 사용자 동의 시 worker를 전원 연결 중 `caffeinate -s`로 감싼다. | 디스플레이가 꺼져도 AC 전원 상태에서 2시간 poll 공백이 발생하지 않는다. |
+| RT-005 | P0 | 매 tick 시작 시 state를 복원하고 종료 전 checkpoint한다. | 강제 실패 뒤 다음 run이 마지막 원격 checkpoint에서 재개한다. |
+| RT-006 | P1 | `workflow_dispatch: doctor`를 제공한다. | config, DB, GitHub Secrets 존재 여부, Yahoo/SEC/Slack 연결을 Job Summary에 표시한다. |
+| RT-007 | P0 | state branch 갱신은 main 코드 이력을 만들지 않는다. | 100회 tick 뒤 main에 state commit이 0건이다. |
 
 ### 9.2 Market quote와 가격 구간
 
 | ID | 우선순위 | 요구사항 | 수용 기준 |
 | --- | --- | --- | --- |
-| MKT-001 | P0 | 거래일 04:00-20:00 ET에 VRT를 2분마다 조회한다. | 2시간 shadow run에서 중앙 간격 120초, p95 150초 이하이다. |
+| MKT-001 | P0 | 거래일 04:00-20:00 ET에 VRT를 5분 schedule로 조회한다. | workflow가 GitHub 최소 주기인 5분으로 등록되고 실제 시작 지연을 기록한다. |
 | MKT-002 | P0 | 기준가는 해당 trading date의 이전 정규장 종가로 고정한다. | 프리·정규·애프터 전환 중 baseline이 임의로 바뀌지 않는다. |
 | MKT-003 | P0 | 첫 트리거는 절대변동 `4.0%`다. | `3.99%`는 무발송, `4.00%`는 상승 구간 이벤트를 만든다. |
 | MKT-004 | P0 | 같은 방향은 새 정수 1%p 구간에서만 발송한다. | `4.4→4.7→5.0→4.9`에서 +4와 +5만 생성된다. |
@@ -376,27 +414,28 @@ worker 상태, 마지막 성공 polling, outbox, 연속 실패와 복구 기록�
 
 | ID | 우선순위 | 요구사항 | 수용 기준 |
 | --- | --- | --- | --- |
-| DLV-001 | P0 | event와 outbox를 같은 transaction에서 저장한다. | transaction 중단 fault injection에서 유실 또는 중복이 없다. |
+| DLV-001 | P0 | event와 outbox를 같은 runner SQLite transaction에서 저장한다. | transaction 중단 fault injection에서 반쪽 상태가 남지 않는다. |
 | DLV-002 | P0 | 모든 사용자 사건은 deterministic event key를 가진다. | 같은 입력을 100회 처리해 outbox row가 하나다. |
-| DLV-003 | P0 | Slack 실패는 지수 backoff로 재시도한다. | 500/timeout 뒤 30초부터 최대 15분 간격으로 재시도한다. |
-| DLV-004 | P0 | 전달 성공 후 재시작해도 다시 보내지 않는다. | delivered row가 pending으로 돌아가지 않는다. |
+| DLV-003 | P0 | 확정 실패만 지수 backoff로 재시도하고 timeout처럼 전달 여부가 모호한 실패는 자동 중복 발송하지 않는다. | 5xx는 retry되고 ambiguous timeout은 `delivery_unknown`으로 보존된다. |
+| DLV-004 | P0 | 전달 성공 후 다음 Actions run에서도 다시 보내지 않는다. | delivered row가 pending으로 돌아가지 않는다. |
 | DLV-005 | P0 | 메시지는 최대 2,900자 내에 핵심을 완결한다. | 긴 news/filing fixture도 Slack text 제한을 넘지 않는다. |
 | DLV-006 | P0 | production과 smoke 메시지를 명확히 구분한다. | smoke는 전용 prefix와 test channel 없이는 production webhook을 쓰지 않는다. |
 | DLV-007 | P1 | 같은 15분 window의 연관 사건을 합친다. | news와 8-K가 같은 사건이면 중복 알림 대신 대표 사건 하나가 된다. |
+| DLV-008 | P0 | Slack 호출 전 `sending` 상태를 원격 checkpoint하고 성공 뒤 `delivered`를 다시 checkpoint한다. | runner가 어느 단계에서 종료돼도 다음 run의 처리 정책이 결정적이다. |
 
 ### 9.10 운영과 설정
 
 | ID | 우선순위 | 요구사항 | 수용 기준 |
 | --- | --- | --- | --- |
-| OPS-001 | P0 | provider별 성공, 실패, latency를 기록한다. | `monitor status`에서 마지막 성공과 연속 실패를 확인한다. |
+| OPS-001 | P0 | provider별 성공, 실패, latency를 기록한다. | Actions Job Summary에서 마지막 성공과 연속 실패를 확인한다. |
 | OPS-002 | P0 | raw 오류는 투자 메시지에 넣지 않는다. | 403, 429, timeout fixture에서 Slack 투자 payload가 생성되지 않는다. |
-| OPS-003 | P0 | 10분 이상 heartbeat gap을 기록한다. | sleep simulation 뒤 gap row와 recovery run이 생성된다. |
+| OPS-003 | P0 | 예정 tick 사이 10분 이상 schedule gap을 기록한다. | dropped-run simulation 뒤 gap row와 recovery run이 생성된다. |
 | OPS-004 | P0 | 비밀값을 repo, DB payload, log에 저장하지 않는다. | secret scanner와 redaction test를 통과한다. |
-| OPS-005 | P1 | operations Slack은 별도 webhook일 때만 사용한다. | 미설정 시 로컬 log/Notification Center만 사용한다. |
+| OPS-005 | P1 | operations Slack은 별도 webhook일 때만 사용한다. | 미설정 시 Actions Summary와 실패 annotation에만 표시한다. |
 | CFG-001 | P0 | ticker/profile은 `monitor_config.md`로 변경 가능하다. | VRT를 fixture ticker로 바꿔도 코드를 수정하지 않고 시작한다. |
 | CFG-002 | P0 | VRT 전용 thesis는 profile 데이터로 분리한다. | domain policy에 `VRT` literal이 없다. |
-| CFG-003 | P0 | 설정 오류는 시작 전에 fail-fast한다. | CIK, benchmark, peer 부족을 doctor가 설명하고 worker가 polling하지 않는다. |
-| CFG-004 | P1 | polling 값은 안전한 범위에서 설정 가능하다. | quote는 최소 60초, news/SEC는 최소 300초 미만으로 설정할 수 없다. |
+| CFG-003 | P0 | 설정 오류는 tick 시작 전에 fail-fast한다. | CIK, benchmark, peer 부족을 doctor가 설명하고 provider를 호출하지 않는다. |
+| CFG-004 | P1 | polling 값은 GitHub 한계 안에서 설정 가능하다. | schedule은 5분보다 짧게 설정할 수 없고 task due 간격은 5분 단위다. |
 
 ## 10. 가격 상태 머신
 
@@ -404,7 +443,7 @@ worker 상태, 마지막 성공 polling, outbox, 연속 실패와 복구 기록�
 
 - trading date는 뉴욕 거래소 calendar가 부여한다.
 - 프리마켓 04:00 ET부터 애프터마켓 20:00 ET까지 같은 trading date다.
-- 상태는 KST 자정이나 Mac 자정에 초기화하지 않는다.
+- 상태는 KST 자정이나 runner의 UTC 자정에 초기화하지 않는다.
 - 다음 유효 거래일 프리마켓 시작 시 새 상태를 만든다.
 
 ### 방향별 high-watermark
@@ -583,12 +622,14 @@ AI는 데이터 소스가 아니라 분류와 요약 도구다.
 
 ```mermaid
 flowchart TD
-    LA["macOS LaunchAgent"] --> WK["Long-running worker"]
-    WK --> SC["Session-aware scheduler"]
-    SC --> MQ["Yahoo quote poller"]
+    GH["GitHub Actions 5-minute schedule"] --> RN["Ephemeral Ubuntu runner"]
+    ST["runtime-state branch"] --> RS["Restore SQLite snapshot"]
+    RS --> RN
+    RN --> SC["Due-task tick coordinator"]
+    SC --> MQ["Yahoo quote and replay"]
     SC --> NP["News and IR poller"]
     SC --> SP["SEC poller"]
-    SC --> OD["Outbox delivery loop"]
+    SC --> OD["Outbox delivery"]
     MQ --> NM["Canonical market snapshot"]
     NP --> CC["Catalyst candidates"]
     SP --> CC
@@ -598,9 +639,12 @@ flowchart TD
     NM --> TP["Trigger policies"]
     ES --> CP["Event composer"]
     TP --> CP
-    CP --> DB["SQLite event ledger and outbox"]
-    DB --> OD
+    CP --> DB["Local SQLite event ledger and outbox"]
+    DB --> CK["Checkpoint runtime-state"]
+    CK --> OD
     OD --> SL["Slack"]
+    OD --> CK2["Checkpoint delivery result"]
+    CK2 --> ST
     DB --> RC["Recovery and replay"]
 ```
 
@@ -635,12 +679,11 @@ src/investing_monitor/
   presentation/
     slack_messages.py
   runtime/
-    scheduler.py
+    tick.py
     recovery.py
     health.py
     settings.py
   cli.py
-  worker.py
 ```
 
 의존성은 `adapters -> application -> domain` 방향이다. domain은 HTTP, Slack,
@@ -648,16 +691,22 @@ SQLite, 파일 경로를 알지 못한다.
 
 ## 14. 상태와 데이터 모델
 
-### 저장 위치
+### 저장 위치와 수명주기
 
 ```text
-~/Library/Application Support/InvestingMonitor/monitor.db
-~/Library/Application Support/InvestingMonitor/cache/
-~/Library/Logs/InvestingMonitor/worker.log
-~/Library/LaunchAgents/com.okeycsy.investing-monitor.plist
+main branch                    # code/config only
+runtime-state branch           # rolling runtime snapshot only
+  monitor.db
+  state_manifest.json
+runner workspace/.runtime/     # 한 run 동안 사용하는 복원본
+Actions artifact               # 일일 진단/backup, retention 7일
 ```
 
-runtime 파일은 Git repository에 저장하지 않는다.
+`runtime-state`는 `main`과 history를 공유하지 않는 orphan branch로 만들고 하나의 rolling
+snapshot만 유지한다. `force-with-lease`와 workflow concurrency를 함께 사용한다. cache는
+언제든 없어질 수 있고 artifact는 run 간 state database가 아니므로 둘 다 primary state로
+사용하지 않는다. 이 저장소는 public이므로 DB에는 비밀값, 원문 본문, AI prompt를 넣지
+않는다.
 
 ### 핵심 테이블
 
@@ -672,7 +721,7 @@ runtime 파일은 Git repository에 저장하지 않는다.
 | `events` | 사용자 사건 ledger | event_key |
 | `alerts` | 렌더링 버전과 payload | event_key + payload_version |
 | `outbox` | 전달과 retry | alert_id |
-| `heartbeats` | worker 생존과 gap | worker_id + recorded_at |
+| `run_checkpoints` | 예정/실제 tick과 schedule gap | run_id + started_at |
 | `source_health` | provider 상태 | provider |
 
 ### 상태 보존
@@ -681,7 +730,9 @@ runtime 파일은 Git repository에 저장하지 않는다.
 - 원문 본문 cache는 30일 뒤 삭제할 수 있다.
 - market observations는 기본 90일 보존한다.
 - aggregate metric과 alert payload는 유지한다.
-- DB backup은 매일 worker 시작 전 압축본 하나를 만들고 최근 7개만 보존한다.
+- DB backup은 매일 마지막 성공 tick에서 artifact 하나를 만들고 7일만 보존한다.
+- state branch push는 `main` workflow를 재귀적으로 실행하지 않는다.
+- remote checkpoint 실패 시 Slack 신규 전송 단계로 넘어가지 않는다.
 
 ## 15. 중단과 복구 정책
 
@@ -689,8 +740,8 @@ runtime 파일은 Git repository에 저장하지 않는다.
 
 | gap | 처리 |
 | --- | --- |
-| 5분 미만 | 정상 jitter로 간주, 즉시 poll |
-| 5분 이상 2시간 미만 | 같은 거래일 bars를 replay하고 최고 미발송 band 복원 |
+| 10분 미만 | 허용된 schedule jitter로 기록하고 현재 tick 실행 |
+| 10분 이상 2시간 미만 | 같은 거래일 bars를 replay하고 최고 미발송 band 복원 |
 | 2시간 이상 같은 거래일 | `지연 감지` MOVE 최대 1건, 나머지 band 소비 처리 |
 | 이전 거래일 gap | stale MOVE 미발송, 미발송 CLOSE는 다음 개장 전까지만 복원 |
 | 기간 무관 SEC/news | 마지막 cursor 이후 후보를 순차 처리, canonical dedupe 적용 |
@@ -713,17 +764,15 @@ runtime 파일은 Git repository에 저장하지 않는다.
 
 ## 16. 운영 경험
 
-### CLI
+### workflow_dispatch와 Job Summary
 
 ```text
-monitor start           # launchd 설치 후 worker 시작
-monitor stop            # 안전 종료
-monitor status          # heartbeat, source, outbox 요약
-monitor doctor          # config, secret, network, DB 점검
-monitor run-once market # 실제 전송 없이 한 cycle 점검
-monitor preview move    # fixture 기반 Slack 미리보기
-monitor replay DATE     # 과거 session 재생
-monitor logs            # 최근 구조화 로그 보기
+mode=tick                # due task를 실제 운영 규칙으로 1회 실행
+mode=status              # state/source/outbox를 Job Summary로 출력
+mode=doctor              # config, secret, network, DB 점검
+mode=preview             # fixture 기반 Slack 미리보기
+mode=replay, date=DATE   # 과거 session 재생, 기본 무전송
+mode=retry-delivery      # delivery_unknown을 사용자가 확인 후 재시도
 ```
 
 ### 로그 원칙
@@ -736,10 +785,10 @@ monitor logs            # 최근 구조화 로그 보기
 
 ### 장애 알림
 
-- 단일 실패는 로컬 로그에만 남긴다.
-- 같은 핵심 source 3회 연속 실패 또는 quote 10분 공백은 incident를 연다.
+- 단일 실패는 Actions log와 state에만 남긴다.
+- 같은 핵심 source 3회 연속 실패 또는 15분 schedule gap은 incident를 연다.
 - 별도 `OPS_SLACK_WEBHOOK_URL`이 있을 때만 Slack ops 알림을 한 번 보낸다.
-- 별도 webhook이 없으면 macOS Notification Center와 `monitor status`에 표시한다.
+- 별도 webhook이 없으면 Actions Summary와 workflow annotation에 표시한다.
 - 장애가 지속돼도 같은 incident를 반복 발송하지 않는다.
 - 복구 시 한 번만 닫고 gap과 복원 건수를 기록한다.
 
@@ -747,30 +796,32 @@ monitor logs            # 최근 구조화 로그 보기
 
 ### 신뢰성 SLO
 
-SLO는 Mac이 켜져 있고 자동 잠자기가 방지됐으며 인터넷이 정상이라는 조건부 목표다.
+GitHub schedule은 실행 시각을 보장하지 않으므로 아래는 플랫폼 보장이 아닌 운영
+목표다. 초과 시 실패로 숨기지 않고 실제 지연과 복구 여부를 측정한다.
 
 | 지표 | 목표 |
 | --- | --- |
-| quote poll 간격 | median 120초, p95 150초 이하 |
-| MOVE 감지부터 Slack 전달 | p95 4분 이하 |
-| SEC metadata 감지 | p95 10분 이하 |
-| SEC 분석 완료와 전달 | p95 20분 이하 |
-| 중요 news source 게시부터 전달 | p95 15분 이하 |
+| nominal quote schedule | 5분 |
+| 실제 tick 시작 간격 | median 10분 이하, p95 20분 이하 목표 |
+| MOVE 발생부터 Slack 전달 | 다음 성공 tick에서 처리, p95 20분 이하 목표 |
+| SEC metadata 감지 | p95 30분 이하 목표 |
+| SEC 분석 완료와 전달 | p95 45분 이하 목표 |
+| 중요 news source 게시부터 전달 | p95 30분 이하 목표 |
 | 동일 event 중복 전달 | 0건 목표, 월 0.1% 미만 |
-| worker gap 탐지 | 재기동 후 60초 이하 |
-| pending outbox 복구 | 네트워크 복구 후 p95 2분 이하 |
+| schedule gap 탐지 | 다음 성공 tick 안 |
+| pending outbox 복구 | 다음 성공 tick 안 |
 
 ### 성능
 
-- idle worker 평균 CPU 사용량 2% 미만을 목표로 한다.
-- SQLite와 cache를 포함한 90일 기본 저장공간은 1GB 미만을 목표로 한다.
-- quote 한 cycle은 timeout 전 정상 조건에서 20초 안에 끝나야 한다.
+- 평시 GitHub Actions tick은 3분 안에 끝나는 것을 목표로 한다.
+- SQLite와 일일 artifact를 포함한 저장공간은 100MB 미만을 목표로 한다.
+- quote와 replay 단계는 정상 조건에서 30초 안에 끝나야 한다.
 - Slack message compose는 네트워크를 호출하지 않는 순수 연산이어야 한다.
 
 ### 보안과 개인정보
 
-- secret은 환경 변수 또는 macOS Keychain에서만 읽는다.
-- repo 안 `.env`, DB, fixture, log에 실제 secret을 저장하지 않는다.
+- secret은 GitHub Actions Secrets에서만 읽는다.
+- branch, artifact, DB, fixture, log에 실제 secret을 저장하지 않는다.
 - SEC contact email은 User-Agent 목적 외 payload에 노출하지 않는다.
 - 외부 URL은 수집 source URL만 허용하고 Slack markdown injection을 escape한다.
 - 의존성은 version range를 고정하고 CI에서 import와 테스트를 검증한다.
@@ -795,9 +846,9 @@ SLO는 Mac이 켜져 있고 자동 잠자기가 방지됐으며 인터넷이 정
 | volume baseline 9세션 | 거래량 섹션 생략 |
 | news AI 실패 | raw 뉴스 무발송, pending retry |
 | SEC 403 | cursor 유지, backoff, investment Slack 무발송 |
-| Slack timeout | outbox retry, event 재생성 금지 |
-| worker crash | launchd 재기동, heartbeat gap recovery |
-| Mac sleep | wake 후 지연 감지와 cursor catch-up |
+| Slack timeout | `delivery_unknown` 보존, 자동 재전송 금지, 수동 retry만 허용 |
+| runner crash/cancel | 다음 schedule에서 checkpoint 이후부터 gap recovery |
+| scheduled run drop | 다음 성공 tick에서 bars와 source cursor catch-up |
 | DB locked | 짧은 retry 후 task만 실패 격리 |
 | DB corrupt | 마지막 일일 backup으로 복구하고 incident 기록 |
 | config 변경 | 새 profile hash로 검증 후 명시적 baseline 생성 |
@@ -809,7 +860,7 @@ SLO는 Mac이 켜져 있고 자동 잠자기가 방지됐으며 인터넷이 정
 
 | KPI | 정의 | 초기 목표 |
 | --- | --- | --- |
-| polling coverage | 예정 poll 대비 성공 poll | host 가동 중 99% 이상 |
+| tick coverage | nominal schedule 대비 성공 tick | 측정·공개, GitHub 지연은 gap recovery로 보완 |
 | meaningful alert rate | 사용자가 유용하다고 판단한 알림 비율 | 80% 이상 |
 | duplicate rate | 같은 사건의 중복 전달 비율 | 0.1% 미만 |
 | unexplained MOVE | 직접 촉매가 없는 MOVE 비율 | 측정만, 억지로 낮추지 않음 |
@@ -834,7 +885,7 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 ### 원칙
 
 - 모놀리스에 계속 덧붙이지 않는다.
-- 기존 production은 새 worker가 검증될 때까지 유지한다.
+- 기존 production workflow는 새 tick entrypoint가 검증될 때까지 유지한다.
 - 같은 실제 입력으로 기존과 신규 결과를 나란히 비교한다.
 - 테스트 통과만으로 cutover하지 않는다.
 
@@ -851,27 +902,27 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 - 사용자 피드백이 요구사항 ID에 모두 연결된다.
 - 구현자가 임의로 메시지 섹션을 제거할 수 없다.
 
-### Stage 1: Local runtime foundation
+### Stage 1: GitHub runtime foundation
 
 산출물:
 
 - SQLite migration과 repository
-- internal scheduler
-- launchd 설치/제거/상태 명령
-- 전원 연결 중 sleep assertion을 적용하는 선택형 `caffeinate` wrapper
-- heartbeat, outbox, structured logging
+- due-task tick coordinator
+- `runtime-state` orphan branch restore/checkpoint
+- workflow concurrency와 permissions 최소화
+- run checkpoint, outbox, Actions Job Summary
 
 통과 조건:
 
-- 2시간 local soak에서 quote scheduler가 p95 150초 이내다.
-- 강제 종료, 네트워크 단절, 재시작에서 중복과 유실이 없다.
+- 20회 연속 Actions simulation에서 main state commit이 0건이다.
+- runner 강제 종료, 네트워크 단절, 다음 tick 재개에서 상태 전이가 결정적이다.
 
 ### Stage 2: Market product
 
 산출물:
 
 - Yahoo quote/history adapter
-- 2분 MOVE monitor
+- 5분 scheduled MOVE monitor와 intraday replay
 - SOXX/peer context
 - same-time volume profile
 - MOVE/VOLUME Slack renderer
@@ -903,7 +954,7 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 산출물:
 
 - CLOSE와 WEEKLY composer
-- sleep/wake catch-up
+- schedule gap과 failed-run catch-up
 - replay와 quality report
 - DB backup/restore
 
@@ -934,13 +985,13 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 - 신규 알림이 이전 우수 버전보다 판단 정보가 적다.
 - raw SEC, raw news, 내부 오류가 한 번이라도 사용자 메시지에 노출된다.
 - 중복 MOVE가 한 번이라도 재현된다.
-- sleep/restart 뒤 상태가 설명 없이 초기화된다.
+- delayed/dropped run 뒤 상태가 설명 없이 초기화된다.
 
 ### Stage 6: Production cutover
 
 1. shadow에서 검증한 동일 package를 production 설정으로 전환한다.
-2. 기존 GitHub scheduled workflow를 비활성화한다.
-3. local LaunchAgent를 production webhook으로 시작한다.
+2. 기존 mode 분기 workflow를 새 통합 tick workflow로 교체한다.
+3. `runtime-state` baseline을 만든 뒤 production webhook을 활성화한다.
 4. 첫 5개 거래일 매일 품질 report를 확인한다.
 5. 5일 동안 회귀가 없을 때만 기존 `hood_monitor.py` 제거 계획을 세운다.
 
@@ -952,10 +1003,10 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 | --- | --- | --- |
 | A-01 DB schema/migration | P0 | versioned SQLite schema |
 | A-02 repository 확장 | P0 | market, catalyst, event, outbox repository |
-| A-03 scheduler | P0 | 독립 periodic task와 timeout |
-| A-04 launchd package | P0 | plist, install/uninstall/status |
-| A-05 heartbeat/recovery trigger | P0 | gap detection |
-| A-06 log/backup | P1 | JSON log와 7일 DB backup |
+| A-03 tick coordinator | P0 | due task 계산과 timeout |
+| A-04 state branch adapter | P0 | restore/checkpoint/force-with-lease |
+| A-05 run-gap recovery trigger | P0 | scheduled/delayed/dropped gap detection |
+| A-06 summary/backup | P1 | Job Summary와 7일 DB artifact |
 
 ### Epic B: Market intelligence
 
@@ -999,7 +1050,7 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 | E-03 CLOSE renderer | P0 | one daily brief |
 | E-04 WEEKLY renderer | P1 | evidence change review |
 | E-05 golden message tests | P0 | screenshots and text fixtures |
-| E-06 preview CLI | P1 | fixture message preview |
+| E-06 preview dispatch | P1 | fixture message preview workflow |
 
 ### Epic F: Verification and migration
 
@@ -1007,7 +1058,7 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 | --- | --- | --- |
 | F-01 provider contract tests | P0 | Yahoo/SEC/AI/Slack fixtures |
 | F-02 failure injection | P0 | timeout/403/429/crash cases |
-| F-03 local soak report | P0 | cadence and resource metrics |
+| F-03 Actions cadence report | P0 | actual start delay와 run duration metrics |
 | F-04 two-day shadow report | P0 | old/new comparison |
 | F-05 cutover checklist | P0 | reproducible promotion |
 | F-06 legacy retirement | P2 | monolith removal after observation |
@@ -1030,12 +1081,12 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 | 근거 없는 논지 훼손 제거 | BRF-004, AI validation |
 | 실패 알림 반복 | OPS-002, OPS-005, incident dedupe |
 | 이전 버전보다 정보가 빈약 | 메시지 계약, rubric 6번, Stage 5 중단 조건 |
-| 추가 비용 없이 개발 | 비용과 운영 제약, local runtime |
+| 추가 비용 없이 개발 | public repository 표준 GitHub runner 사용 |
 
 ## 23. 구현 중 변경 금지 사항
 
-- polling 문제를 다시 GitHub cron 주기 변경으로 해결하지 않는다.
-- 상태 저장을 다시 JSON 파일과 Git commit에 연결하지 않는다.
+- polling 문제를 cron 주기 변경만으로 해결했다고 간주하지 않는다. gap replay가 반드시 함께 있어야 한다.
+- 상태 저장을 `main`의 JSON 파일과 일반 commit에 다시 연결하지 않는다.
 - provider 장애를 `변화 없음`으로 변환하지 않는다.
 - 메시지를 짧게 만든다는 이유로 상대 흐름, 거래량, 촉매를 삭제하지 않는다.
 - AI 품질 문제를 raw headline fallback으로 해결하지 않는다.
@@ -1045,13 +1096,13 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 
 ## 24. 구현 직전 필요한 사용자 설정
 
-설계와 코드 개발은 지금 진행할 수 있다. 실제 local production 전환 직전에만 아래가
-필요하다.
+설계와 코드 개발은 지금 진행할 수 있다. 현재 Slack, Anthropic, SEC 관련 GitHub
+Secrets는 그대로 사용한다. production 전환 직전 아래만 확인한다.
 
-1. Mac에 Slack webhook과 Anthropic key를 Keychain으로 등록
-2. 전원 연결 중 자동 잠자기 방지 허용 여부 확인
-3. operations 알림을 별도 Slack webhook으로 받을지, 로컬 알림만 사용할지 결정
-4. shadow 메시지를 받을 test channel webhook 확인
+1. Actions workflow의 `contents: write` 권한과 schedule 활성 상태
+2. operations 알림을 별도 Slack webhook으로 받을지, Actions Summary만 사용할지 결정
+3. shadow 메시지를 받을 test channel webhook 확인
+4. public `runtime-state`에 비민감 상태만 저장되는지 secret scan 확인
 
 비밀값은 채팅이나 repository에 다시 적지 않는다.
 
@@ -1059,13 +1110,14 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 
 v2는 아래 조건을 모두 만족할 때만 완료다.
 
-- GitHub schedule 없이 local worker가 2분 quote polling을 수행한다.
-- sleep, crash, network failure 뒤 상태와 outbox를 복구한다.
+- GitHub Actions가 정각을 피한 5분 schedule로 quote polling을 수행한다.
+- delayed/dropped schedule, runner crash, network failure 뒤 상태와 outbox를 복구한다.
+- runtime 상태가 main commit history에 한 건도 추가되지 않는다.
 - +4/+5 상태 전이와 역순 억제가 실제 재시작을 거쳐도 정확하다.
 - 가격 MOVE 하나에서 반도체, 피어, 거래량, 촉매를 읽을 수 있다.
 - SEC form 이름만 있는 알림과 raw 뉴스 나열이 0건이다.
 - 정확한 현재 주가, 정확한 일일 수익률, DCA 처방이 노출되지 않는다.
 - 모든 회사 사건은 원문과 추적 가능한 event key를 가진다.
 - 실제 2개 거래일 shadow 비교에서 메시지 rubric이 모두 6점이다.
-- production 5개 거래일 동안 중복 사건이 없고 예정 polling coverage가 99% 이상이다.
+- production 5개 거래일 동안 중복 사건이 없고 모든 10분 이상 gap의 복구 결과가 남는다.
 - 사용자가 이전 우수 버전보다 정보가 줄었다고 판단하면 완료로 처리하지 않는다.

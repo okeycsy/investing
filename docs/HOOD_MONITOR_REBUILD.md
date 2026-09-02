@@ -6,7 +6,7 @@
 
 현재 제품은 기능 부족이 아니라 제품 구조와 운영 구조의 실패다.
 
-- GitHub Actions 예약 실행은 모니터링 런타임으로 사용할 수 없다.
+- GitHub Actions 예약 실행의 지연과 누락을 허용하는 대신 다음 실행의 replay로 보완한다.
 - 가격 감지와 원인 설명을 서로 다른 실행으로 분리해 핵심 사용자 경험이 끊겼다.
 - 소스 저장소를 상태 데이터베이스로 사용하면서 중복 방지와 배포가 결합됐다.
 - 수집, 판단, 표현, 전달이 4,841줄짜리 단일 파일과 전역 상태에 묶여 있다.
@@ -59,7 +59,7 @@
 | 출처 추적 | 링크 부족 | 원문 링크와 사실/해석 분리 | 현재 우세 |
 | 명칭 정확성 | FINRA 일일 공매도를 공매도 잔고처럼 표현 | 체결 비중으로 정정 | 현재 우세 |
 | 알림 피로 | 필터와 상태 규칙이 약함 | 규칙은 늘었으나 내부 상태가 노출 | 둘 다 미흡 |
-| 실행 신뢰성 | GitHub 시간별 cron | GitHub 10분 cron | 둘 다 부적합 |
+| 실행 신뢰성 | GitHub 시간별 cron | GitHub 10분 cron | v2에서 5분 tick+gap replay로 보완 |
 | 코드 구조 | 약 3,200줄 단일 파일 | 4,841줄 단일 파일 | 현재 악화 |
 | 영속 상태 | Git 커밋 | Git 커밋과 전용 캐시 추가 | 현재 악화 |
 | 제품 검증 | 실제 알림 중심 | 단위 테스트 중심, 실시간 SLO 없음 | 이전 우세 |
@@ -93,9 +93,12 @@
 
 실시간 경로에서 뉴스, 공시, 내부자 데이터를 생략했다. 그 결과 가장 중요한 가격 이상 알림이 가장 빈약한 메시지가 됐다. 원인은 배치 작업에서 나중에 발견되거나 아예 발견되지 않는다.
 
-### 실행 실패
+### 실행 제약
 
-GitHub는 예약 이벤트가 고부하 때 지연되거나 누락될 수 있다고 명시한다. 실제 최신 기록에서도 새 10분 예약은 생성되지 않았다. 주기를 짧게 쓰는 것은 호출 실패 확률을 낮추지 못한다.
+GitHub는 예약 이벤트가 고부하 때 지연되거나 누락될 수 있다고 명시한다. 사용자는
+완전한 실시간성을 요구하지 않으므로 이 제약은 수용한다. 다만 주기만 5분으로 줄이면
+누락은 해결되지 않으므로, 각 실행이 마지막 성공 cursor 이후의 intraday bars와
+회사 사건을 replay해야 한다.
 
 공식 근거: https://docs.github.com/en/actions/how-tos/troubleshoot-workflows
 
@@ -135,7 +138,7 @@ GitHub는 예약 이벤트가 고부하 때 지연되거나 누락될 수 있다
 
 ### Weaknesses
 
-- 신뢰할 수 없는 예약 실행과 Git 기반 상태 저장
+- 지연될 수 있는 예약 실행과 `main` 브랜치 기반 상태 저장
 - 4,841줄 모놀리스와 전역 상태
 - 이벤트 감지와 설명 생성의 분리
 - 일부 수집원의 비공식 또는 불안정한 접근 방식
@@ -144,7 +147,8 @@ GitHub는 예약 이벤트가 고부하 때 지연되거나 누락될 수 있다
 
 ### Opportunities
 
-- 로컬 상주 worker의 2분 REST polling으로 GitHub 예약 실행 의존성을 없앨 수 있다.
+- public repository의 표준 GitHub-hosted runner를 추가 비용 없이 5분 schedule로 사용할 수 있다.
+- 지연된 tick에서 intraday bars를 replay하면 임계치 통과 누락을 줄일 수 있다.
 - SEC submissions API는 공시를 실시간으로 갱신하므로 안정된 IP에서 직접 감시할 수 있다.
 - AI는 뉴스 생성기가 아니라 관련성 분류와 근거 기반 요약기로 제한해 신뢰도를 높일 수 있다.
 - 동일 시간대 거래량 프로필을 사용하면 이전의 수급 알림을 더 정확하게 복원할 수 있다.
@@ -157,7 +161,7 @@ GitHub는 예약 이벤트가 고부하 때 지연되거나 누락될 수 있다
 - SEC와 뉴스 사이트의 IP 차단 또는 정책 변경
 - AI의 원인 과잉 추론과 투자 논지 과장
 - 알림 과다로 인한 사용자 무시
-- worker 중단을 정상적인 `새 이벤트 없음`으로 오해하는 침묵 실패
+- schedule 누락을 정상적인 `새 이벤트 없음`으로 오해하는 침묵 실패
 - 배포 중 상태 손실 또는 중복 전송
 
 ## 6. 상용 제품에서 가져올 원칙
@@ -371,13 +375,13 @@ SEC 원문
 
 ### 사용자 SLO
 
-- Mac과 네트워크가 정상인 동안 장중 임계치 발생부터 Slack 전송까지 p95 4분 이내
-- 정규장 quote polling 간격 2분, 연속 성공률 99% 이상
+- 장중 nominal quote schedule 5분
+- 실제 tick 간격과 시작 지연을 매 실행 기록하고 p95 20분 이내를 운영 목표로 관리
 - 동일 사건 중복 알림률 0.1% 미만
-- 확인된 신규 SEC 공시는 메타데이터 감지 10분, 분석 완료 20분 이내
+- 확인된 신규 SEC 공시는 메타데이터 감지 30분, 분석 완료 45분 이내를 운영 목표로 관리
 - AI가 실패한 이벤트를 성공 처리하거나 폐기하지 않음
 - 소스 장애를 `새 사건 없음`으로 오판하지 않음
-- Mac 절전이나 종료로 생긴 공백을 재기동 시 감지하고 복원 결과를 기록함
+- 10분 이상 schedule gap을 다음 성공 tick에서 감지하고 복원 결과를 기록함
 
 ### 운영 지표
 
@@ -387,15 +391,17 @@ SEC 원문
 - 감지한 event 수, 억제한 duplicate 수
 - outbox pending/failed 수
 - Slack 전달 지연
-- worker restart 횟수
+- scheduled_at 대비 actual started_at 지연
+- gap replay 범위와 복원 event 수
 
 ## 11. 목표 아키텍처
 
 ```mermaid
 flowchart LR
-    L["macOS launchd"] --> W["Long-running Python worker"]
-    W --> P["Internal interval scheduler"]
-    P --> Y["Yahoo REST quote and history"]
+    L["GitHub Actions 5-minute schedule"] --> W["Ephemeral Ubuntu runner"]
+    J["runtime-state branch"] --> W
+    W --> P["Due-task tick coordinator"]
+    P --> Y["Yahoo REST quote and intraday replay"]
     Y --> B["Market normalizer"]
     S["SEC submissions and filings"] --> C["Catalyst normalizer"]
     N["Yahoo news and IR sources"] --> C
@@ -406,39 +412,40 @@ flowchart LR
     F --> G["Notification composer"]
     G --> H["Durable outbox"]
     H --> I["Slack notifier"]
-    J["SQLite state"] --> E
-    J --> D
-    H --> J
+    K["Restored SQLite state"] --> E
+    K --> D
+    H --> Q["State checkpoint"]
+    Q --> J
 ```
 
 ### 런타임
 
-- GitHub Actions는 test와 수동 smoke test에만 사용하며 예약 실행은 production에서 제거한다.
-- 실제 모니터는 사용자의 Mac에서 `launchd`가 유지하는 단일 Python worker다.
-- 정규장 quote는 Yahoo REST를 2분마다 조회하고, 프리마켓과 애프터마켓도 2분을 기본값으로 한다.
-- SEC와 뉴스는 worker 내부의 주기 작업으로 실행하며 실패 시 backoff한다.
-- `launchd KeepAlive`가 비정상 종료를 복구하고 SQLite heartbeat로 절전 또는 종료 공백을 감지한다.
-- 잠든 Mac에서는 polling이 실행되지 않는다. 전원 연결 상태에서 자동 잠자기를 막는 설정을 운영 전제에 포함하고, 재기동 시 누락 구간을 Yahoo intraday history와 SEC/news cursor로 복원한다.
+- 모든 production 작업은 public repository의 표준 GitHub-hosted Ubuntu runner에서 실행한다.
+- 프리마켓부터 애프터마켓까지 5분 schedule을 사용하되 정각 혼잡을 피해 02분부터 시작한다.
+- 각 run은 mode를 cron 문자열로 고르지 않고 저장된 시각을 기준으로 market/news/SEC/close의 due task를 계산한다.
+- stateful workflow는 하나의 concurrency group으로 직렬화한다.
+- 지연·drop 뒤 다음 run은 현재 quote를 판단하기 전에 intraday와 source cursor gap을 replay한다.
+- GitHub Actions cache와 artifact는 primary state로 사용하지 않는다.
 
 ### 배포 권고
 
-추가 비용을 만들지 않는다. 사용자의 Mac을 유일한 production host로 사용하고 GitHub는 소스와 CI만 담당한다.
+추가 비용을 만들지 않는다. 저장소는 public이므로 표준 GitHub-hosted runner 사용 시간은
+무료다. larger runner와 유료 artifact 용량은 사용하지 않는다.
 
-- 프로세스 관리자: 사용자 LaunchAgent (`launchd`)
-- 영속 상태: `~/Library/Application Support/InvestingMonitor/monitor.db`
-- 로그: `~/Library/Logs/InvestingMonitor/`
-- 비밀값: macOS Keychain 우선, 평문을 저장해야 하면 repo 밖의 권한 `600` 파일만 허용
-- 배포: 테스트 통과 후 로컬 package를 갱신하고 worker를 재시작하는 단일 명령
+- production host와 scheduler: GitHub Actions
+- 영속 상태: orphan `runtime-state` branch의 rolling SQLite snapshot
+- 진단: Actions log, Job Summary, 7일 보관 일일 DB artifact
+- 비밀값: GitHub Actions Secrets
+- 배포: `main` push와 test 통과 후 다음 schedule이 최신 commit을 사용
 
-Apple은 전원 어댑터 연결 중 디스플레이가 꺼져도 Mac이 자동 잠자기 하지 않도록 설정할 수 있다고 안내한다. 이 설정을 하지 않으면 제품은 절전 중 실시간 감지를 보장하지 않으며, 해당 구간은 복구 모드로 처리한다.
-
-- https://support.apple.com/en-gb/guide/mac-help/mchle41a6ccd/mac
+- https://docs.github.com/en/billing/concepts/product-billing/github-actions
+- https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
 
 ### 데이터 공급자
 
 - 장중 quote와 과거 OHLCV: Yahoo REST
-- 공시 메타데이터와 XBRL: SEC 공식 API
-- 공시 원문: SEC Archives, 속도 제한과 캐시 적용
+- 공시 메타데이터와 XBRL: SEC 공식 API를 우선 시도하고 GitHub IP 403 시 Yahoo mirror 사용
+- 공시 원문: SEC Archives를 보수적으로 요청하고 mirror fallback과 cache 적용
 - 뉴스: Yahoo RSS + 회사 IR feed
 - 해석: Anthropic structured JSON
 - 전달: Slack
@@ -473,10 +480,10 @@ src/investing_monitor/
   presentation/
     slack_messages.py  # 순수 메시지 렌더러
   runtime/
-    scheduler.py       # session-aware periodic task
-    recovery.py        # 절전/종료 공백 복원
-    health.py          # heartbeat와 source health
-  worker.py            # 프로세스 수명주기
+    tick.py            # due task 계산과 run budget
+    recovery.py        # schedule gap과 failed-run 복원
+    health.py          # run delay와 source health
+  cli.py               # workflow entrypoint와 dispatch modes
 ```
 
 의존 방향은 adapters -> application -> domain이다. domain은 requests, Slack Block Kit, 파일 경로를 알지 못한다.
@@ -496,11 +503,12 @@ src/investing_monitor/
 
 1. 이벤트와 dedupe key를 저장한다.
 2. 같은 트랜잭션에서 outbox row를 만든다.
-3. Slack 전송 worker가 pending row를 가져간다.
-4. 성공하면 `delivered_at`을 기록한다.
-5. 실패하면 지수 backoff로 재시도한다.
+3. 원격 `runtime-state`에 pending/sending 상태를 먼저 checkpoint한다.
+4. Slack을 전송하고 성공하면 `delivered_at`을 기록해 다시 checkpoint한다.
+5. 확정 실패만 재시도하고 timeout처럼 전달 여부가 모호하면 `delivery_unknown`으로 격리한다.
 
-이 구조는 프로세스가 재시작돼도 알림을 잃지 않는다. Git 커밋은 상태 저장에 사용하지 않는다.
+이 구조는 다음 runner가 outbox를 이어받게 한다. runtime state는 `main` commit에 저장하지
+않고 별도 orphan branch의 rolling snapshot으로만 유지한다.
 
 ## 14. 테스트 전략
 
@@ -508,7 +516,7 @@ src/investing_monitor/
 
 - `+4.4 -> +4.7 -> +5.0 -> +4.9` 상태 전이
 - 반대 방향으로 큰 장중 반전
-- 프로세스 재시작 뒤 중복 억제
+- 다음 Actions run에서 중복 억제
 - 동일 시간대 거래량 비교
 - 피어 3개, 2개, 1개, 0개 데이터 처리
 - exact price와 exact return이 메시지에 노출되지 않음
@@ -524,7 +532,8 @@ src/investing_monitor/
 
 - SQLite transaction과 outbox 재시도
 - provider timeout, 403, 429, malformed JSON
-- Slack 성공 후/전 worker 중단 시나리오
+- Slack 성공 전/후 runner 중단과 remote checkpoint 실패 시나리오
+- schedule 5분 지연, 2시간 gap, dropped run replay
 - 장중 세션 경계와 DST
 
 ### 실제 검증
@@ -554,10 +563,10 @@ src/investing_monitor/
 ### Phase 2: provider adapters
 
 - Yahoo, SEC, Anthropic, Slack 어댑터 구현
-- Yahoo 2분 polling, timeout/backoff, intraday backfill 구현
+- Yahoo 5분 scheduled polling, timeout/backoff, intraday backfill 구현
 - provider별 contract test 추가
 
-중단 조건: 하나의 provider 실패가 전체 worker를 종료하거나 `변화 없음`으로 바뀌면 다음 단계로 가지 않는다.
+중단 조건: 하나의 provider 실패가 전체 tick을 무효화하거나 `변화 없음`으로 바뀌면 다음 단계로 가지 않는다.
 
 ### Phase 3: 메시지와 shadow mode
 
@@ -567,32 +576,32 @@ src/investing_monitor/
 
 중단 조건: 기존 버전보다 촉매 설명, 스캔 속도, 중복률 중 하나라도 나쁘면 production으로 전환하지 않는다.
 
-### Phase 4: 로컬 상시 실행 배포
+### Phase 4: GitHub Actions 운영 전환
 
-- macOS LaunchAgent, 로컬 SQLite, Keychain 연동 구성
-- 전원 연결 중 자동 잠자기 방지 여부를 preflight에서 확인하고 사용자 동의 시 `caffeinate -s` wrapper 적용
-- health, restart, 절전 공백 감지, log rotation 구성
+- 5분 schedule, timezone gate, concurrency 구성
+- `runtime-state` branch restore/checkpoint와 일일 진단 artifact 구성
+- actual start delay, schedule gap, failed-run recovery를 Job Summary에 기록
 
-중단 조건: worker 중단을 10분 이내 감지하지 못하면 production으로 전환하지 않는다.
+중단 조건: 10분 이상 gap을 다음 성공 tick에서 탐지하고 replay하지 못하면 production으로 전환하지 않는다.
 
 ### Phase 5: cutover
 
 - test Slack에서 검증된 동일 artifact를 production으로 승격
-- 기존 GitHub schedule 비활성화
+- 기존 mode별 schedule을 통합 due-task tick으로 교체
 - 5개 거래일 관찰 후 모놀리스 제거 여부 결정
 
 ## 16. 완료 기준
 
 재개발은 코드가 실행된다고 완료되지 않는다. 다음을 모두 만족해야 한다.
 
-- GitHub scheduled event 없이 Mac의 상주 worker가 장중 2분 REST polling으로 동작한다.
+- GitHub Actions가 5분 nominal schedule로 동작하고 실제 지연을 기록한다.
 - 실제 `+4 -> +5` 상태 전이가 재시작을 거쳐도 정확하다.
 - 가격 이상 알림 하나에서 상대 흐름, 거래량, 촉매를 함께 읽을 수 있다.
 - 촉매가 없으면 없다고 정직하게 말하고 억지 설명을 만들지 않는다.
 - SEC 알림은 핵심 사실과 비교가 없으면 발송되지 않는다.
 - 사용자 메시지에 source health와 stack error가 보이지 않는다.
 - 테스트 메시지가 production 알림처럼 보이지 않는다.
-- 코드 변경은 자동 배포되지만 런타임 상태는 GitHub에 커밋되지 않는다.
+- 런타임 상태가 `main` 코드 이력에 커밋되지 않고 전용 state branch에만 존재한다.
 - 장애와 복구를 별도 경로에서 확인할 수 있다.
 - 최소 2일 shadow mode와 5일 production 관찰 결과를 남긴다.
 
