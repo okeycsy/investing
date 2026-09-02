@@ -9,6 +9,7 @@ import uuid
 from contextlib import closing
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Sequence
 
 from investing_monitor.adapters.git_state_branch import GitStateBranchStore
@@ -218,6 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         weekly_result: dict[str, object] = {}
 
         def handle_market(_task):
+            provider_started = monotonic()
             cycle = adapter.fetch_cycle(
                 now,
                 last_observed_at=repository.latest_market_observation_at(profile.ticker),
@@ -237,6 +239,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "replayed_frames": report.replayed_frames,
                 "inserted_events": len(report.inserted_event_keys),
                 "source_age_seconds": cycle.source_age_seconds,
+                "providers": {
+                    "yahoo_market": {
+                        "status": "success",
+                        "latency_ms": int((monotonic() - provider_started) * 1_000),
+                    }
+                },
             }
 
         handlers = {TickTask.MARKET: handle_market}
@@ -258,14 +266,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             def handle_news(_task):
                 candidates = []
                 source_errors = {}
+                provider_health = {}
                 for source_name, source in (
                     ("yahoo", yahoo_news),
                     ("ir", investor_relations),
                 ):
+                    source_started = monotonic()
                     try:
-                        candidates.extend(source.fetch(evidence_profile))
+                        fetched = source.fetch(evidence_profile)
+                        candidates.extend(fetched)
+                        provider_health[source_name] = {
+                            "status": "success",
+                            "latency_ms": int(
+                                (monotonic() - source_started) * 1_000
+                            ),
+                            "items": len(fetched),
+                        }
                     except Exception as exc:
                         source_errors[source_name] = str(exc)
+                        provider_health[source_name] = {
+                            "status": "failed",
+                            "latency_ms": int(
+                                (monotonic() - source_started) * 1_000
+                            ),
+                        }
                 if not candidates:
                     raise RuntimeError(
                         "all news sources failed: "
@@ -273,10 +297,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                             f"{name}={error}" for name, error in source_errors.items()
                         )
                     )
+                analysis_started = monotonic()
                 report = ingestion.ingest(candidates, now)
+                provider_health["evidence_pipeline"] = {
+                    "status": "success" if report.failed == 0 else "degraded",
+                    "latency_ms": int((monotonic() - analysis_started) * 1_000),
+                    "analyzed": report.analyzed,
+                    "failed": report.failed,
+                }
                 evidence_result["news"] = {
                     **report.as_dict(),
                     "source_errors": source_errors,
+                    "providers": provider_health,
                 }
                 return evidence_result["news"]
 
@@ -288,8 +320,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             def handle_sec(_task):
+                provider_started = monotonic()
                 report = sec_service.poll(now)
-                evidence_result["sec"] = report.as_dict()
+                evidence_result["sec"] = {
+                    **report.as_dict(),
+                    "providers": {
+                        f"sec_{report.provider}": {
+                            "status": "recovered" if report.recovered else "success",
+                            "latency_ms": int(
+                                (monotonic() - provider_started) * 1_000
+                            ),
+                        }
+                    },
+                }
                 return evidence_result["sec"]
 
             close_service = CloseBriefService(repository, enqueue_alerts=False)

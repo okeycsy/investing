@@ -124,6 +124,38 @@ class TickPlannerTest(unittest.TestCase):
 
 
 class TickRunnerTest(unittest.TestCase):
+    def test_run_summary_keeps_task_duration_and_provider_health(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            monotonic_values = iter((10.0, 10.125))
+            runner = TickRunner(
+                repository,
+                {
+                    TickTask.NEWS: lambda _task: {
+                        "providers": {
+                            "yahoo": {"status": "success", "latency_ms": 120}
+                        }
+                    }
+                },
+                planner=TickPlanner(enabled_tasks={TickTask.NEWS}),
+                clock=lambda: NOW,
+                monotonic=lambda: next(monotonic_values),
+            )
+
+            report = runner.run("observed-run", scheduled_at=NOW)
+
+            detail = report.details["news"]
+            self.assertEqual(detail["status"], "success")
+            self.assertEqual(detail["duration_ms"], 125)
+            self.assertEqual(
+                detail["metadata"]["providers"]["yahoo"]["latency_ms"],
+                120,
+            )
+            self.assertEqual(
+                repository.recent_runs()[0].summary["details"]["news"]["duration_ms"],
+                125,
+            )
+
     def test_task_failure_does_not_block_later_tasks(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")

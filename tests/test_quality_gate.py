@@ -121,6 +121,21 @@ class QualityReportTest(unittest.TestCase):
                         ]
                     },
                     "succeeded": ["market"],
+                    "details": {
+                        "market": {
+                            "task": "market",
+                            "status": "success",
+                            "duration_ms": 350,
+                            "metadata": {
+                                "providers": {
+                                    "yahoo_market": {
+                                        "status": "success",
+                                        "latency_ms": 300,
+                                    }
+                                }
+                            },
+                        }
+                    },
                 },
             )
 
@@ -133,6 +148,20 @@ class QualityReportTest(unittest.TestCase):
             self.assertEqual(report.runtime["gap_runs_over_10_minutes"], 1)
             self.assertEqual(report.runtime["planned_tasks"], {"market": 1})
             self.assertEqual(report.runtime["succeeded_tasks"], {"market": 1})
+            self.assertEqual(
+                report.runtime["task_execution"]["market"],
+                {
+                    "calls": 1,
+                    "success": 1,
+                    "failed": 0,
+                    "max_ms": 350,
+                    "average_ms": 350,
+                },
+            )
+            self.assertEqual(
+                report.runtime["provider_health"]["yahoo_market"]["average_ms"],
+                300,
+            )
             self.assertEqual(
                 report.recent_messages[0]["fallback_text"],
                 "$VRT 09/02 장 마감 브리프",

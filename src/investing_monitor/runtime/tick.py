@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
+from time import monotonic as monotonic_clock
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -219,6 +220,7 @@ class TickExecutionReport:
     succeeded: tuple[str, ...] = ()
     failed: Mapping[str, str] = field(default_factory=dict)
     skipped: tuple[str, ...] = ()
+    details: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -228,6 +230,7 @@ class TickExecutionReport:
             "succeeded": list(self.succeeded),
             "failed": dict(self.failed),
             "skipped": list(self.skipped),
+            "details": {key: dict(value) for key, value in self.details.items()},
         }
 
 
@@ -239,11 +242,13 @@ class TickRunner:
         *,
         planner: TickPlanner | None = None,
         clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.repository = repository
         self.handlers = handlers
         self.planner = planner or TickPlanner()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.monotonic = monotonic or monotonic_clock
 
     def run(
         self,
@@ -269,17 +274,34 @@ class TickRunner:
         succeeded: list[str] = []
         failed: dict[str, str] = {}
         skipped: list[str] = []
+        details: dict[str, Mapping[str, object]] = {}
         for task in plan.tasks:
             handler = self.handlers.get(task.name)
             if handler is None:
                 skipped.append(task.checkpoint_key)
+                details[task.checkpoint_key] = {
+                    "task": task.name.value,
+                    "status": "skipped",
+                    "duration_ms": 0,
+                }
                 continue
             attempted_at = _aware_utc(self.clock())
             self.repository.mark_task_started(task.checkpoint_key, task.name.value, attempted_at)
+            started_monotonic = self.monotonic()
             try:
                 metadata = handler(task) or {}
             except Exception as exc:  # task isolation is the runtime contract
+                duration_ms = max(
+                    0,
+                    int((self.monotonic() - started_monotonic) * 1_000),
+                )
                 failed[task.checkpoint_key] = str(exc)
+                details[task.checkpoint_key] = {
+                    "task": task.name.value,
+                    "status": "failed",
+                    "duration_ms": duration_ms,
+                    "error": str(exc),
+                }
                 self.repository.mark_task_failed(
                     task.checkpoint_key,
                     task.name.value,
@@ -288,6 +310,10 @@ class TickRunner:
                 )
                 continue
             completed_at = _aware_utc(self.clock())
+            duration_ms = max(
+                0,
+                int((self.monotonic() - started_monotonic) * 1_000),
+            )
             self.repository.mark_task_succeeded(
                 task.checkpoint_key,
                 task.name.value,
@@ -295,6 +321,12 @@ class TickRunner:
                 metadata,
             )
             succeeded.append(task.checkpoint_key)
+            details[task.checkpoint_key] = {
+                "task": task.name.value,
+                "status": "success",
+                "duration_ms": duration_ms,
+                "metadata": dict(metadata),
+            }
 
         status = "partial" if failed or skipped else "success"
         report = TickExecutionReport(
@@ -304,6 +336,7 @@ class TickRunner:
             succeeded=tuple(succeeded),
             failed=failed,
             skipped=tuple(skipped),
+            details=details,
         )
         self.repository.finish_run(
             run_id,
