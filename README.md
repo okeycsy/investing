@@ -42,9 +42,11 @@ market_scan_focus: $VRT
 - `SEC_CONTACT`
 - `SEC_USER_AGENT`
 - `SEC_LEGACY_USER_AGENT`
+- `SEC_API_KEY` (GitHub-hosted runner에서 13F 중계 조회 시 사용)
+- `SEC_DATA_MODE` (`auto`, `direct`, `yahoo`)
 - `SEC_ARCHIVE_MODE` (`auto`, `direct`, `yahoo`)
 
-`SEC_CONTACT`는 SEC 공식 지침에 맞춰 `User-Agent`와 `From` 헤더에 함께 들어갑니다. GitHub-hosted runner는 공유 IP가 SEC raw Archives에서 차단될 수 있어 운영 워크플로는 `SEC_ARCHIVE_MODE=yahoo`로 Form 4 원문 직접 호출을 생략합니다. 발행사 공시와 XBRL은 공식 `data.sec.gov` API를 계속 사용합니다. 로컬 또는 self-hosted runner에서 raw Archives를 직접 읽으려면 `SEC_ARCHIVE_MODE=direct`로 지정할 수 있습니다.
+`SEC_CONTACT`는 SEC 공식 지침에 맞춰 `User-Agent`와 `From` 헤더에 함께 들어갑니다. GitHub-hosted runner의 공유 IP는 `data.sec.gov`, `efts.sec.gov`, raw Archives에서 간헐적으로 차단되므로 운영 워크플로는 `SEC_DATA_MODE=yahoo`, `SEC_ARCHIVE_MODE=yahoo`를 사용합니다. 발행사 공시·재무제표·Form 4는 Yahoo 대체 경로로 조회하고, 13F는 `SEC_API_KEY`가 있을 때만 sec-api.io 중계 경로를 사용합니다. 로컬 또는 self-hosted runner에서 SEC를 직접 읽으려면 두 모드를 `direct`로 지정할 수 있습니다.
 
 ## 수동 실행
 
@@ -52,6 +54,7 @@ market_scan_focus: $VRT
 pip install -r requirements.txt
 
 python hood_monitor.py normal
+python hood_monitor.py realtime
 python hood_monitor.py close
 python hood_monitor.py weekly
 python hood_monitor.py 13f
@@ -82,6 +85,7 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 
 ## 알림 원칙
 
+- 가격·상대 흐름·거래량 임계치는 미국 프리마켓부터 애프터마켓까지 10분마다 확인합니다. 뉴스·공시·내부자 거래는 매시 23분에 별도 조회합니다.
 - 장중 급등락은 `±4%` 정수 구간부터 시작해 같은 방향의 새 1%p 구간 진입 때만 전송합니다. 당일 반대 방향 전환과 이미 통과한 구간은 다시 알리지 않습니다.
 - 장중에는 새 뉴스, 분석 완료된 발행사 중요 SEC 공시, 내부자 거래, 큰 폭의 이상 움직임, 20거래일 평균 대비 1.5배 이상 거래량만 전송합니다. 거래량 알림은 하루 한 번만 보냅니다.
 - 상대 흐름은 반도체 지수 `SOXX`와 동일가중 피어 평균 `ETN/NVT/GEV`를 함께 사용합니다.

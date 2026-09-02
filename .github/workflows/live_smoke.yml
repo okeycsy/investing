@@ -50,6 +50,8 @@ jobs:
           SEC_CONTACT: ${{ secrets.SEC_CONTACT }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
+          SEC_API_KEY: ${{ secrets.SEC_API_KEY }}
+          SEC_DATA_MODE: yahoo
           SEC_ARCHIVE_MODE: yahoo
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |

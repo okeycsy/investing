@@ -20,6 +20,7 @@ import time
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ PROFILE_CONTEXT = CONFIG.profile_context
 
 SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+SEC_API_KEY = os.environ.get("SEC_API_KEY", "").strip()
 STATE_FILE = resolve_runtime_file(CONFIG, "state.json", "MONITOR_STATE_FILE")
 WEEKLY_STATE_FILE = resolve_runtime_file(CONFIG, "weekly_state.json", "MONITOR_WEEKLY_STATE_FILE")
 SEC_ALERT_CACHE_FILE = resolve_runtime_file(
@@ -392,9 +394,9 @@ _last_yahoo_call = 0.0
 _sec_archive_bypass_logged = False
 
 
-def use_direct_sec_archives() -> bool:
-    """Return whether raw SEC Archives documents should be requested directly."""
-    mode = os.environ.get("SEC_ARCHIVE_MODE", "auto").strip().lower()
+def use_direct_sec_data() -> bool:
+    """Return whether SEC API hosts are safe to call from this runtime."""
+    mode = os.environ.get("SEC_DATA_MODE", "auto").strip().lower()
     if mode in {"direct", "sec", "1", "true", "on"}:
         return True
     if mode in {"yahoo", "fallback", "0", "false", "off"}:
@@ -402,6 +404,16 @@ def use_direct_sec_archives() -> bool:
     if os.environ.get("RUNNER_ENVIRONMENT", "").strip().lower() == "self-hosted":
         return True
     return os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true"
+
+
+def use_direct_sec_archives() -> bool:
+    """Return whether raw SEC Archives documents should be requested directly."""
+    mode = os.environ.get("SEC_ARCHIVE_MODE", "auto").strip().lower()
+    if mode in {"direct", "sec", "1", "true", "on"}:
+        return True
+    if mode in {"yahoo", "fallback", "0", "false", "off"}:
+        return False
+    return use_direct_sec_data()
 
 
 def log_sec_archive_bypass():
@@ -2500,6 +2512,8 @@ def fetch_company_filings(limit: int = 20, lookback_days: int = 21) -> list:
     if not CIK_PADDED:
         _set_source_health("SEC 공시", "CIK 없음")
         return []
+    if not use_direct_sec_data():
+        return _fetch_company_filings_from_yahoo(limit, lookback_days)
     resp = safe_get(
         f"https://data.sec.gov/submissions/CIK{CIK_PADDED}.json",
         headers=SEC_HEADERS,
@@ -2556,9 +2570,85 @@ def fetch_company_filings(limit: int = 20, lookback_days: int = 21) -> list:
         return []
 
 
+def _fetch_company_filings_from_yahoo(
+    limit: int = 20,
+    lookback_days: int = 21,
+) -> list:
+    """Read Yahoo's mirrored SEC index when GitHub runner IPs are blocked."""
+    try:
+        import yfinance as yf
+
+        rows = yf.Ticker(TICKER).get_sec_filings() or []
+        cutoff = datetime.now(UTC).date() - timedelta(days=lookback_days)
+        filings = []
+        for row in rows:
+            form = str(row.get("type") or "").upper().strip()
+            if form not in MATERIAL_COMPANY_FORMS:
+                continue
+
+            raw_date = row.get("date")
+            filing_date = (
+                raw_date.strftime("%Y-%m-%d")
+                if hasattr(raw_date, "strftime")
+                else str(raw_date or "")[:10]
+            )
+            parsed_date = _parse_iso_date(filing_date)
+            if parsed_date and parsed_date < cutoff:
+                continue
+
+            edgar_url = str(row.get("edgarUrl") or "")
+            accession_match = re.search(r"(\d{10}-\d{2}-\d{6})", edgar_url)
+            accession = accession_match.group(1) if accession_match else ""
+            exhibits = row.get("exhibits") if isinstance(row.get("exhibits"), dict) else {}
+            primary_url = str(exhibits.get(form) or "")
+            if not primary_url:
+                base_form = form.removesuffix("/A")
+                primary_url = next(
+                    (
+                        str(url)
+                        for exhibit_type, url in exhibits.items()
+                        if str(exhibit_type).upper().startswith(base_form)
+                    ),
+                    "",
+                )
+            document_name = primary_url.rsplit("/", 1)[-1]
+            report_match = re.search(r"(20\d{2})(\d{2})(\d{2})", document_name)
+            report_date = (
+                "-".join(report_match.groups()) if report_match else filing_date
+            )
+            description = str(row.get("title") or f"{form} filing")
+            item_codes = re.findall(r"\b(?:Item\s*)?(\d\.\d{2})\b", description)
+
+            filings.append(CompanyFiling(
+                form=form,
+                filing_date=filing_date,
+                report_date=report_date,
+                description=description,
+                accession=accession,
+                url=primary_url or edgar_url,
+                hash=hashlib.md5(
+                    f"{accession or edgar_url}:{form}".encode()
+                ).hexdigest()[:12],
+                items=",".join(dict.fromkeys(item_codes)),
+            ))
+            if len(filings) >= limit:
+                break
+
+        log.info(f"SEC 공시 Yahoo mirror: {len(filings)}건")
+        _set_source_health("SEC 공시", "Yahoo 대체")
+        return filings
+    except Exception as e:
+        log.warning(f"Yahoo SEC filing fallback failed: {e}")
+        _set_source_health("SEC 공시", "Yahoo 대체 실패")
+        return []
+
+
 def fetch_company_facts() -> dict:
     """SEC Company Facts에서 원문 HTML 없이 공시 수치를 조회한다."""
     if not CIK_PADDED:
+        return {}
+    if not use_direct_sec_data():
+        _set_source_health("SEC XBRL", "Yahoo 재무 대체")
         return {}
     resp = safe_get(
         f"https://data.sec.gov/api/xbrl/companyfacts/CIK{CIK_PADDED}.json",
@@ -2710,28 +2800,14 @@ def _contract_liability_comparison(
     )
 
 
-def _summarize_periodic_filing(
+def _apply_periodic_summary(
     filing: CompanyFiling,
-    company_facts: dict,
+    facts: list[str],
+    changes: dict[str, float],
 ) -> CompanyFiling:
-    changes = {}
-    facts = []
-    for label, tags in SEC_METRIC_TAGS:
-        line, change = _metric_comparison(company_facts, filing, label, tags)
-        if line:
-            facts.append(line)
-        if change is not None:
-            changes[label] = change
-    contract_line = _contract_liability_comparison(company_facts, filing)
-    if contract_line:
-        facts.append(contract_line)
-    if not facts:
-        filing.analysis_status = "failed"
-        return filing
-
+    period = "분기" if filing.form.startswith("10-Q") else "연간"
     revenue_change = changes.get("매출")
     operating_change = changes.get("영업이익")
-    period = "분기" if filing.form.startswith("10-Q") else "연간"
     if revenue_change is not None and operating_change is not None:
         if revenue_change > 0 and operating_change > 0:
             filing.summary = f"{period} 매출·영업이익 동반 증가"
@@ -2763,6 +2839,119 @@ def _summarize_periodic_filing(
     return filing
 
 
+def _summarize_periodic_filing_from_yahoo(
+    filing: CompanyFiling,
+) -> CompanyFiling:
+    """Preserve financial summaries without calling blocked SEC XBRL hosts."""
+    try:
+        import yfinance as yf
+
+        ticker = yf.Ticker(TICKER)
+        statement = (
+            ticker.quarterly_income_stmt
+            if filing.form.startswith("10-Q")
+            else ticker.income_stmt
+        )
+        if statement is None or statement.empty:
+            raise ValueError("income statement empty")
+
+        dated_columns = []
+        for column in statement.columns:
+            column_date = column.date() if hasattr(column, "date") else _parse_iso_date(str(column)[:10])
+            if column_date:
+                dated_columns.append((column, column_date))
+        if not dated_columns:
+            raise ValueError("statement has no dated columns")
+
+        report_date = _parse_iso_date(filing.report_date)
+        if report_date:
+            current_column, current_date = min(
+                dated_columns,
+                key=lambda item: abs((item[1] - report_date).days),
+            )
+        else:
+            current_column, current_date = max(dated_columns, key=lambda item: item[1])
+        prior_candidates = [item for item in dated_columns if item[1] < current_date]
+        if not prior_candidates:
+            raise ValueError("statement has no comparison period")
+        prior_column, prior_date = min(
+            prior_candidates,
+            key=lambda item: abs((current_date - item[1]).days - 365),
+        )
+        if abs((current_date - prior_date).days - 365) > 120:
+            raise ValueError("statement has no year-over-year comparison")
+
+        metrics = (
+            ("매출", "Total Revenue", "USD"),
+            ("영업이익", "Operating Income", "USD"),
+            ("순이익", "Net Income", "USD"),
+            ("희석 EPS", "Diluted EPS", "USD/shares"),
+        )
+        facts = []
+        changes = {}
+        for label, row_name, unit in metrics:
+            if row_name not in statement.index:
+                continue
+            try:
+                current = float(statement.at[row_name, current_column])
+                prior = float(statement.at[row_name, prior_column])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(current) or not math.isfinite(prior):
+                continue
+            change = ((current - prior) / abs(prior) * 100) if prior else None
+            line = f"{label} {_format_sec_value(current, unit)}"
+            if change is not None:
+                line += f" (전년 동기 대비 {change:+.1f}%)"
+                changes[label] = change
+            facts.append(line)
+
+        if not facts:
+            raise ValueError("statement has no supported metrics")
+        _set_source_health("SEC XBRL", "Yahoo 재무 대체")
+        return _apply_periodic_summary(filing, facts, changes)
+    except Exception as e:
+        log.warning(f"Yahoo periodic filing analysis failed: {e}")
+        filing.analysis_status = "failed"
+        return filing
+
+
+def _summarize_periodic_filing(
+    filing: CompanyFiling,
+    company_facts: dict,
+) -> CompanyFiling:
+    changes = {}
+    facts = []
+    for label, tags in SEC_METRIC_TAGS:
+        line, change = _metric_comparison(company_facts, filing, label, tags)
+        if line:
+            facts.append(line)
+        if change is not None:
+            changes[label] = change
+    contract_line = _contract_liability_comparison(company_facts, filing)
+    if contract_line:
+        facts.append(contract_line)
+    if not facts:
+        return _summarize_periodic_filing_from_yahoo(filing)
+    return _apply_periodic_summary(filing, facts, changes)
+
+
+def _extract_filing_items(filing: CompanyFiling) -> str:
+    """Extract 8-K item numbers from a SEC or Yahoo-mirrored filing body."""
+    if not filing.url:
+        return ""
+    resp = safe_get(filing.url, timeout=15, retries=1)
+    if not resp:
+        return ""
+    text = unescape(resp.text)
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    items = re.findall(r"\bItem\s+(\d\.\d{2})\b", text, flags=re.IGNORECASE)
+    return ",".join(dict.fromkeys(items))
+
+
 def analyze_company_filings(
     filings: list,
     company_facts: Optional[dict] = None,
@@ -2783,6 +2972,8 @@ def analyze_company_filings(
             _summarize_periodic_filing(filing, company_facts or {})
             continue
         if filing.form.startswith(("8-K", "6-K")):
+            if not filing.items:
+                filing.items = _extract_filing_items(filing)
             item_codes = [item.strip() for item in filing.items.split(",") if item.strip()]
             if "2.02" in item_codes and filing.filing_date in periodic_dates:
                 filing.summary = "동일 실적 사건의 중복 공시"
@@ -3219,12 +3410,75 @@ def _parse_transaction(txn, filer_name, filer_title, filing_date, url):
 # ─────────────────────────────────────────────
 # 7. 13F (BUG 3 FIX: API URL + infoTable 파싱)
 # ─────────────────────────────────────────────
+def _fetch_13f_filings_from_sec_api() -> list:
+    """Use a stable proxy for 13F data when SEC blocks GitHub-hosted IPs."""
+    if not SEC_API_KEY:
+        log.info("13F 스킵: SEC_API_KEY 없음 (SEC 직접 호출은 차단 예방을 위해 사용하지 않음)")
+        _set_source_health("SEC 13F", "중계 API 키 없음")
+        return []
+
+    try:
+        resp = requests.post(
+            "https://api.sec-api.io/form-13f/holdings",
+            headers={"Authorization": SEC_API_KEY, "Content-Type": "application/json"},
+            json={
+                "query": f"holdings.ticker:{TICKER}",
+                "from": "0",
+                "size": "50",
+                "sort": [{"filedAt": {"order": "desc"}}],
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            log.warning(f"13F proxy failed: HTTP {resp.status_code} — {resp.text[:160]}")
+            _set_source_health("SEC 13F", f"중계 API HTTP {resp.status_code}")
+            return []
+
+        filings = []
+        for row in resp.json().get("data", []):
+            holding = next(
+                (
+                    item for item in row.get("holdings", [])
+                    if str(item.get("ticker") or "").upper() == TICKER
+                    and not item.get("putCall")
+                ),
+                None,
+            )
+            if not holding:
+                continue
+            manager = row.get("filingManager") or {}
+            institution = (
+                manager.get("name")
+                or row.get("companyName")
+                or row.get("cik")
+                or "Unknown"
+            )
+            amount = holding.get("shrsOrPrnAmt") or {}
+            filings.append(Filing13F(
+                institution=str(institution),
+                shares=int(float(amount.get("sshPrnamt") or 0)),
+                value_usd=float(holding.get("value") or 0),
+                filing_date=str(row.get("filedAt") or "")[:10],
+                url=str(row.get("linkToHtml") or row.get("linkToFilingDetails") or ""),
+            ))
+
+        log.info(f"13F proxy: {len(filings)} filings found")
+        _set_source_health("SEC 13F", "중계 API 정상")
+        return filings
+    except Exception as e:
+        log.warning(f"13F proxy error: {e}")
+        _set_source_health("SEC 13F", "중계 API 실패")
+        return []
+
+
 def fetch_13f_filings() -> list:
     """
     BUG 3 FIX:
     - EDGAR search API URL 수정 (파라미터 형식)
     - 실제 13F XML에서 설정 종목 보유 주식 수 / 평가금액 파싱
     """
+    if not use_direct_sec_data():
+        return _fetch_13f_filings_from_sec_api()
     filings = []
     try:
         end_date = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -3934,16 +4188,32 @@ def send_slack(blocks: list, text: str = ""):
         log.info(f"Slack sent OK ({i + 1}-{i + len(chunk)}/{len(blocks)})")
 
 
+def _send_intraday_blocks(blocks: list, technicals: TechnicalSignals):
+    if not blocks:
+        log.info("No alerts — quiet")
+        return
+    if technicals.rsi_alert or technicals.macd_alert:
+        blocks.extend(format_technicals_block(technicals))
+    blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
+        "text": f"{DISPLAY_TICKER} 중요 변화 | {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
+    blocks.insert(1, _ctx(
+        "데이터 상태: "
+        + " · ".join(f"{name} {status}" for name, status in SOURCE_HEALTH.items())
+    ))
+    blocks.extend(_footer())
+    send_slack(blocks)
+
+
 # ─────────────────────────────────────────────
 # 실행 모드
 # ─────────────────────────────────────────────
-def run_normal():
+def run_normal(*, realtime: bool = False):
     """장중 모드: 새 사실과 의미 있는 이상 움직임만 알린다."""
-    log.info("=== NORMAL ===")
+    log.info("=== REALTIME ===" if realtime else "=== NORMAL ===")
     SOURCE_HEALTH.clear()
     initial_state = not STATE_FILE.exists()
     state = load_state()
-    sec_cache = load_sec_alert_cache(state)
+    sec_cache = None if realtime else load_sec_alert_cache(state)
     ws = load_weekly_state()
     blocks = []
     today = datetime.now(NY_TZ).strftime("%Y-%m-%d")
@@ -3999,6 +4269,18 @@ def run_normal():
                     f"거래량 터짐 ({VOLUME_LOOKBACK_DAYS}일 평균 대비 "
                     f"{volume_activity.ratio:.2f}배)"
                 )
+
+    if realtime:
+        technicals = TechnicalSignals()
+        if blocks:
+            closes = fetch_price_history(60)
+            if closes:
+                state["price_history"] = closes[-60:]
+                technicals = get_technical_signals(closes)
+        _send_intraday_blocks(blocks, technicals)
+        save_state(state)
+        save_weekly_state(ws)
+        return
 
     closes = fetch_price_history(60)
     technicals = TechnicalSignals()
@@ -4076,19 +4358,7 @@ def run_normal():
             )
         remember_weekly_thesis_events(ws, insiders=new_insiders)
 
-    if blocks:
-        if technicals.rsi_alert or technicals.macd_alert:
-            blocks.extend(format_technicals_block(technicals))
-        blocks.insert(0, {"type": "header", "text": {"type": "plain_text",
-            "text": f"{DISPLAY_TICKER} 중요 변화 | {datetime.now(KST).strftime('%m/%d %H:%M KST')}"}})
-        blocks.insert(1, _ctx(
-            "데이터 상태: "
-            + " · ".join(f"{name} {status}" for name, status in SOURCE_HEALTH.items())
-        ))
-        blocks.extend(_footer())
-        send_slack(blocks)
-    else:
-        log.info("No alerts — quiet")
+    _send_intraday_blocks(blocks, technicals)
 
     save_state(state)
     save_sec_alert_cache(sec_cache)
@@ -4557,6 +4827,7 @@ def main():
     mode = os.environ.get("RUN_MODE", sys.argv[1] if len(sys.argv) > 1 else "normal").lower()
     log.info(f"{TICKER} Monitor v3.2 — mode: {mode} | {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}")
     {
+        "realtime": lambda: run_normal(realtime=True),
         "normal": run_normal,
         "preview": run_preview,
         "close": run_close,

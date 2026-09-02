@@ -11,10 +11,14 @@ on:
       - '.github/alert_preview_request'
 
   schedule:
-    # ── 장중 normal (프리+정규+애프터) ──────────────────────
+    # ── 실시간 가격 감시: 10분 간격, 정각 혼잡 회피 ───────────
     # DST 양쪽 후보를 예약하고 아래 단계에서 NY 평일 04:00~19:59만 실행한다.
-    - cron: '0 8-23 * * 1-5'    # UTC 월~금 관련 거래 시간대
-    - cron: '0 0-1 * * 2-6'     # UTC 자정 이후의 전일 NY 애프터마켓
+    - cron: '7,17,27,37,47,57 8-23 * * 1-5'
+    - cron: '7,17,27,37,47,57 0-1 * * 2-6'
+
+    # ── 뉴스·공시·내부자 정기 조회: 매시 23분 ──────────────
+    - cron: '23 8-23 * * 1-5'
+    - cron: '23 0-1 * * 2-6'
 
     # ── close: New York 17:10, DST 자동 선택 ─────────────────
     # 두 UTC 후보 중 실행 시점이 실제 17시인 작업만 진행한다.
@@ -30,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'RUN_MODE (normal/preview/close/weekly/13f)'
+        description: 'RUN_MODE (realtime/normal/preview/close/weekly/13f)'
         required: true
         default: 'normal'
       preview_change_pct:
@@ -53,6 +57,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -81,6 +86,8 @@ jobs:
 
           # schedule이면 UTC 시간 기준으로 자동 판별
           SCHEDULE="${{ github.event.schedule }}"
+          NY_DOW=$(TZ=America/New_York date +%u)
+          NY_HOUR=$(TZ=America/New_York date +%H)
           case "$SCHEDULE" in
             "10 21 * * 1-5"|"10 22 * * 1-5")
               NY_OFFSET=$(TZ=America/New_York date +%z)
@@ -93,15 +100,21 @@ jobs:
               ;;
             "0 23 * * 0") echo "mode=weekly" >> $GITHUB_OUTPUT ;;
             "0 10 * * 6") echo "mode=13f" >> $GITHUB_OUTPUT ;;
-            *)
-              NY_DOW=$(TZ=America/New_York date +%u)
-              NY_HOUR=$(TZ=America/New_York date +%H)
+            "7,17,27,37,47,57 8-23 * * 1-5"|"7,17,27,37,47,57 0-1 * * 2-6")
+              if [ "$NY_DOW" -le 5 ] && [ "$NY_HOUR" -ge 4 ] && [ "$NY_HOUR" -lt 20 ]; then
+                echo "mode=realtime" >> $GITHUB_OUTPUT
+              else
+                echo "mode=skip" >> $GITHUB_OUTPUT
+              fi
+              ;;
+            "23 8-23 * * 1-5"|"23 0-1 * * 2-6")
               if [ "$NY_DOW" -le 5 ] && [ "$NY_HOUR" -ge 4 ] && [ "$NY_HOUR" -lt 20 ]; then
                 echo "mode=normal" >> $GITHUB_OUTPUT
               else
                 echo "mode=skip" >> $GITHUB_OUTPUT
               fi
               ;;
+            *) echo "mode=skip" >> $GITHUB_OUTPUT ;;
           esac
 
       - name: Run Ticker Monitor
@@ -112,6 +125,8 @@ jobs:
           SEC_CONTACT:        ${{ secrets.SEC_CONTACT }}
           SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
+          SEC_API_KEY:        ${{ secrets.SEC_API_KEY }}
+          SEC_DATA_MODE:      yahoo
           SEC_ARCHIVE_MODE:   yahoo
           RUN_MODE:           ${{ steps.mode.outputs.mode }}
           PREVIEW_CHANGE_PCT: ${{ steps.mode.outputs.preview_change_pct }}

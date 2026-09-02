@@ -4,7 +4,7 @@ Live smoke checks for the configured ticker.
 
 This intentionally performs real external calls:
 - Yahoo Finance chart API
-- SEC submissions and Form 4 XML
+- SEC data through the runtime's configured direct or Yahoo route
 - Anthropic news-analysis API
 - Slack Incoming Webhook, when SLACK_WEBHOOK_URL or MARKET_SCAN_WEBHOOK is set
 """
@@ -115,6 +115,38 @@ def _request_yahoo_via_yfinance(config, params: dict):
     }
 
 
+def _use_direct_sec_data() -> bool:
+    mode = os.environ.get("SEC_DATA_MODE", "auto").strip().lower()
+    if mode in {"direct", "sec", "1", "true", "on"}:
+        return True
+    if mode in {"yahoo", "fallback", "0", "false", "off"}:
+        return False
+    if os.environ.get("RUNNER_ENVIRONMENT", "").strip().lower() == "self-hosted":
+        return True
+    return os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true"
+
+
+def _check_yahoo_sec_filings(config) -> tuple[bool, str]:
+    try:
+        import yfinance as yf
+
+        filings = yf.Ticker(config.ticker).get_sec_filings() or []
+        material = [
+            row for row in filings
+            if str(row.get("type") or "").upper()
+            in {"8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A"}
+        ]
+        if not material:
+            return False, "Yahoo SEC filing mirror returned no material filings"
+        latest = material[0]
+        return True, (
+            f"Yahoo SEC mirror filings={len(material)}, "
+            f"latest={latest.get('type')} {latest.get('date')}"
+        )
+    except Exception as exc:
+        return False, f"Yahoo SEC filing mirror failed: {exc}"
+
+
 def check_yahoo(config) -> tuple[bool, str]:
     data = _request_yahoo_json(config, {"interval": "1d", "range": "10d"})
     result = (data.get("chart", {}).get("result") or [None])[0]
@@ -135,6 +167,8 @@ def check_yahoo(config) -> tuple[bool, str]:
 def check_sec(config) -> tuple[bool, str]:
     if not config.cik:
         return False, "CIK is not configured"
+    if not _use_direct_sec_data():
+        return _check_yahoo_sec_filings(config)
 
     cik = config.cik.strip().zfill(10)
     data = _request_json(SEC_SUBMISSIONS_URL.format(cik=cik), headers=config.sec_headers)
@@ -147,6 +181,8 @@ def check_sec(config) -> tuple[bool, str]:
 def check_sec_form4(config) -> tuple[bool, str]:
     if not config.cik:
         return False, "CIK is not configured"
+    if not _use_direct_sec_data():
+        return _check_yahoo_insider_fallback(config, "SEC direct route disabled")
 
     cik = config.cik.strip().zfill(10)
     data = _request_json(SEC_SUBMISSIONS_URL.format(cik=cik), headers=config.sec_headers)

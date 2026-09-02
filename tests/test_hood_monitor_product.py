@@ -6,7 +6,10 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pandas as pd
+
 import hood_monitor as hm
+import live_smoke as smoke
 from monitor_config import MonitorConfig
 
 
@@ -359,6 +362,14 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn('sleep "$WAIT_SECONDS"', workflow)
         self.assertIn("State push failed after $MAX_ATTEMPTS attempts", workflow)
 
+    def test_workflow_has_ten_minute_realtime_and_off_hour_normal_crons(self):
+        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+
+        self.assertIn("7,17,27,37,47,57 8-23 * * 1-5", workflow)
+        self.assertIn("23 8-23 * * 1-5", workflow)
+        self.assertNotIn("'0 8-23 * * 1-5'", workflow)
+        self.assertIn('echo "mode=realtime"', workflow)
+
     def test_sec_user_agent_declares_contact_inline(self):
         config = MonitorConfig(sec_contact="owner@example.com")
 
@@ -391,6 +402,143 @@ class ProductContractTest(unittest.TestCase):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()
 
         self.assertIn("SEC_ARCHIVE_MODE:   yahoo", workflow)
+        self.assertIn("SEC_DATA_MODE:      yahoo", workflow)
+
+    def test_github_mode_uses_yahoo_company_filings_without_sec_request(self):
+        yahoo_filing = hm.CompanyFiling(form="10-Q", accession="yahoo")
+        with (
+            patch.dict("os.environ", {
+                "GITHUB_ACTIONS": "true",
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "SEC_DATA_MODE": "auto",
+            }),
+            patch.object(
+                hm,
+                "_fetch_company_filings_from_yahoo",
+                return_value=[yahoo_filing],
+            ) as yahoo,
+            patch.object(hm, "safe_get") as get,
+        ):
+            filings = hm.fetch_company_filings()
+
+        self.assertEqual(filings, [yahoo_filing])
+        yahoo.assert_called_once_with(20, 21)
+        get.assert_not_called()
+
+    def test_yahoo_company_filing_maps_accession_report_date_and_body(self):
+        ticker = Mock()
+        ticker.get_sec_filings.return_value = [{
+            "date": date.today(),
+            "type": "10-Q",
+            "title": "Periodic Financial Reports",
+            "edgarUrl": (
+                "https://finance.yahoo.com/sec-filing/VRT/"
+                "0001628280-26-050609_1674101"
+            ),
+            "exhibits": {
+                "10-Q": (
+                    "https://cdn.yahoofinance.com/prod/sec-filings/"
+                    "vrt-20260630.htm"
+                ),
+            },
+        }]
+        with patch("yfinance.Ticker", return_value=ticker):
+            filings = hm._fetch_company_filings_from_yahoo()
+
+        self.assertEqual(len(filings), 1)
+        self.assertEqual(filings[0].accession, "0001628280-26-050609")
+        self.assertEqual(filings[0].report_date, "2026-06-30")
+        self.assertIn("cdn.yahoofinance.com", filings[0].url)
+
+    def test_yahoo_financials_preserve_periodic_filing_summary(self):
+        current = pd.Timestamp("2026-06-30")
+        prior = pd.Timestamp("2025-06-30")
+        statement = pd.DataFrame({
+            current: [3250.0, 600.0, 450.0, 1.20],
+            prior: [2600.0, 400.0, 300.0, 0.80],
+        }, index=["Total Revenue", "Operating Income", "Net Income", "Diluted EPS"])
+        ticker = Mock(quarterly_income_stmt=statement)
+        filing = hm.CompanyFiling(
+            form="10-Q",
+            report_date="2026-06-30",
+            accession="0001628280-26-050609",
+        )
+
+        with patch("yfinance.Ticker", return_value=ticker):
+            analyzed = hm._summarize_periodic_filing_from_yahoo(filing)
+
+        self.assertEqual(analyzed.analysis_status, "success")
+        self.assertEqual(analyzed.summary, "분기 매출·영업이익 동반 증가")
+        self.assertIn("전년 동기 대비 +25.0%", analyzed.key_facts[0])
+
+    def test_8k_items_are_extracted_from_mirrored_body(self):
+        response = Mock(text="<h2>Item&nbsp;5.02</h2><p>Change</p><h2>Item 9.01</h2>")
+        filing = hm.CompanyFiling(url="https://cdn.example/vrt-8k.htm")
+
+        with patch.object(hm, "safe_get", return_value=response):
+            items = hm._extract_filing_items(filing)
+
+        self.assertEqual(items, "5.02,9.01")
+
+    def test_13f_hosted_mode_never_falls_back_to_blocked_sec_hosts(self):
+        with (
+            patch.dict("os.environ", {"SEC_DATA_MODE": "yahoo"}),
+            patch.object(hm, "SEC_API_KEY", ""),
+            patch.object(hm, "safe_get") as get,
+            patch.object(hm.requests, "post") as post,
+        ):
+            filings = hm.fetch_13f_filings()
+
+        self.assertEqual(filings, [])
+        get.assert_not_called()
+        post.assert_not_called()
+
+    def test_live_smoke_uses_yahoo_in_hosted_mode(self):
+        config = MonitorConfig(ticker="VRT", cik="0001674101")
+        with (
+            patch.dict("os.environ", {"SEC_DATA_MODE": "yahoo"}),
+            patch.object(
+                smoke,
+                "_check_yahoo_sec_filings",
+                return_value=(True, "Yahoo mirror OK"),
+            ) as filings,
+            patch.object(
+                smoke,
+                "_check_yahoo_insider_fallback",
+                return_value=(True, "Yahoo insider OK"),
+            ) as insiders,
+            patch.object(smoke, "_request_json") as sec_request,
+        ):
+            self.assertTrue(smoke.check_sec(config)[0])
+            self.assertTrue(smoke.check_sec_form4(config)[0])
+
+        filings.assert_called_once_with(config)
+        insiders.assert_called_once_with(config, "SEC direct route disabled")
+        sec_request.assert_not_called()
+
+    def test_realtime_mode_skips_news_filings_and_insiders(self):
+        state = {
+            "price_alert_date": date.today().isoformat(),
+            "price_alert_max_pct": 0,
+            "price_alert_direction": "",
+        }
+        with (
+            patch.object(hm, "load_state", return_value=state),
+            patch.object(hm, "load_weekly_state", return_value={}),
+            patch.object(hm, "fetch_price", return_value=None),
+            patch.object(hm, "fetch_price_history") as history,
+            patch.object(hm, "fetch_company_filings") as filings,
+            patch.object(hm, "fetch_news") as news,
+            patch.object(hm, "fetch_insider_trades") as insiders,
+            patch.object(hm, "save_state"),
+            patch.object(hm, "save_weekly_state"),
+        ):
+            hm.run_normal(realtime=True)
+
+        history.assert_not_called()
+        filings.assert_not_called()
+        news.assert_not_called()
+        insiders.assert_not_called()
 
     def test_workflow_has_no_dca_modes_or_inputs(self):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()
