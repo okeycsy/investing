@@ -188,6 +188,7 @@ class MarketCycleService:
             cycle.ticker,
             state,
             cycle.frames,
+            cycle.volume,
             alerts,
             enqueue=self.enqueue_alerts,
         )

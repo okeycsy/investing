@@ -184,9 +184,18 @@ class TickPlanner:
         return TickPlan(now=now, gap_seconds=gap_seconds, tasks=tuple(tasks))
 
     def _due_close_date(self, ny_now: datetime) -> date | None:
-        candidate = ny_now.date()
-        if not self.calendar.is_trading_day(candidate) or ny_now.time() < time(4, 0):
-            candidate = self._previous_trading_day(candidate)
+        today = ny_now.date()
+        today_is_trading = self.calendar.is_trading_day(today)
+        today_close_at = (
+            self.calendar.regular_close(today) + self.schedule.close_delay
+            if today_is_trading
+            else None
+        )
+        candidate = (
+            today
+            if today_close_at is not None and ny_now >= today_close_at
+            else self._previous_trading_day(today)
+        )
         close_at = self.calendar.regular_close(candidate) + self.schedule.close_delay
         if ny_now < close_at or ny_now - close_at > self.schedule.stale_close_after:
             return None

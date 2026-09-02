@@ -6,7 +6,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -29,6 +29,7 @@ from investing_monitor.adapters.yahoo_market_data import (
     YahooQuoteClient,
 )
 from investing_monitor.adapters.yahoo_news import YahooArticleTextClient, YahooNewsAdapter
+from investing_monitor.application.briefs import CloseBriefService
 from investing_monitor.application.evidence import EvidenceIngestionService
 from investing_monitor.application.monitor import MarketCycleService
 from investing_monitor.application.sec_monitor import SecMonitorService
@@ -64,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     shadow_tick = subparsers.add_parser(
         "shadow-tick",
-        help="run market, news, and SEC monitors without delivering Slack",
+        help="run market, evidence, and close monitors without delivering Slack",
     )
     shadow_tick.add_argument("--config", default="monitor_config.md")
     shadow_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
@@ -148,6 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         service = MarketCycleService(repository, enqueue_alerts=False)
         market_result: dict[str, object] = {}
         evidence_result: dict[str, object] = {}
+        close_result: dict[str, object] = {}
 
         def handle_market(_task):
             cycle = adapter.fetch_cycle(
@@ -224,13 +226,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 evidence_result["sec"] = report.as_dict()
                 return evidence_result["sec"]
 
+            close_service = CloseBriefService(repository, enqueue_alerts=False)
+
+            def handle_close(task):
+                close_date = date.fromisoformat(task.checkpoint_key.rsplit(":", 1)[-1])
+                report = close_service.process(
+                    profile.ticker,
+                    close_date,
+                    trading_open_at=calendar.regular_open(close_date),
+                    created_at=now,
+                )
+                close_result.update(report.as_dict())
+                return {
+                    "event_key": report.event_key,
+                    "inserted": report.inserted,
+                    "catalyst_count": report.catalyst_count,
+                }
+
             handlers.update(
                 {
                     TickTask.NEWS: handle_news,
                     TickTask.SEC: handle_sec,
+                    TickTask.CLOSE: handle_close,
                 }
             )
-            enabled_tasks.update({TickTask.NEWS, TickTask.SEC})
+            enabled_tasks.update({TickTask.NEWS, TickTask.SEC, TickTask.CLOSE})
 
         run_id = args.run_id or f"manual-{uuid.uuid4()}"
         execution = TickRunner(
@@ -259,6 +279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         if args.command == "shadow-tick":
             payload["evidence"] = evidence_result
+            payload["close"] = close_result
         _emit(payload, args.summary_file)
         return 0 if execution.status == "success" else 1
 

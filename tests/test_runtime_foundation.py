@@ -17,6 +17,7 @@ from investing_monitor.adapters.git_state_branch import (
     GitStateBranchError,
     GitStateBranchStore,
 )
+from investing_monitor.adapters.exchange_calendar import XNYSCalendar
 from investing_monitor.adapters.sqlite_repository import SCHEMA_VERSION, SQLiteMonitorRepository
 from investing_monitor.ports.runtime import TaskCheckpoint
 from investing_monitor.runtime.tick import TickPlanner, TickRunner, TickTask
@@ -73,6 +74,40 @@ class TickPlannerTest(unittest.TestCase):
         self.assertIn(TickTask.RECOVERY, names)
         self.assertIn(TickTask.CLOSE, names)
         self.assertEqual(plan.gap_seconds, 35 * 60)
+
+    def test_close_is_due_once_after_normal_close_delay(self):
+        now = datetime(2026, 9, 2, 20, 15, tzinfo=timezone.utc)
+        planner = TickPlanner(enabled_tasks={TickTask.CLOSE})
+
+        first = planner.plan(now, {}, last_completed_run_at=None)
+        completed = {
+            "close:2026-09-02": checkpoint("close:2026-09-02", now),
+        }
+        second = planner.plan(now + timedelta(minutes=5), completed, last_completed_run_at=now)
+
+        self.assertEqual([task.checkpoint_key for task in first.tasks], ["close:2026-09-02"])
+        self.assertEqual(second.tasks, ())
+
+    def test_missed_close_is_recovered_next_trading_day_before_open(self):
+        now = datetime(2026, 9, 3, 8, 0, tzinfo=timezone.utc)
+
+        plan = TickPlanner(enabled_tasks={TickTask.CLOSE}).plan(
+            now,
+            {},
+            last_completed_run_at=None,
+        )
+
+        self.assertEqual([task.checkpoint_key for task in plan.tasks], ["close:2026-09-02"])
+
+    def test_early_close_uses_exchange_calendar_close_time(self):
+        now = datetime(2026, 11, 27, 18, 16, tzinfo=timezone.utc)
+
+        plan = TickPlanner(
+            calendar=XNYSCalendar(),
+            enabled_tasks={TickTask.CLOSE},
+        ).plan(now, {}, last_completed_run_at=None)
+
+        self.assertEqual([task.checkpoint_key for task in plan.tasks], ["close:2026-11-27"])
 
 
 class TickRunnerTest(unittest.TestCase):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Mapping, Protocol, Sequence
 
 from investing_monitor.domain.evidence import (
@@ -12,9 +12,11 @@ from investing_monitor.domain.evidence import (
 )
 from investing_monitor.domain.models import (
     Catalyst,
+    CloseMarketContext,
     MarketFrame,
     PriceBandSignal,
     PriceBandState,
+    VolumeSnapshot,
 )
 
 
@@ -53,10 +55,19 @@ class MonitorRepository(Protocol):
         ticker: str,
         state: PriceBandState,
         frames: Sequence[MarketFrame],
+        volume: VolumeSnapshot | None,
         alerts: Sequence[AlertRecord],
         *,
         enqueue: bool = True,
     ) -> tuple[str, ...]: ...
+
+    def load_close_market_context(
+        self,
+        ticker: str,
+        trading_date: date,
+    ) -> CloseMarketContext | None: ...
+
+    def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool: ...
 
     def record_evidence_decisions(
         self,

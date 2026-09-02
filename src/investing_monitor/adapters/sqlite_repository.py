@@ -19,16 +19,20 @@ from investing_monitor.domain.evidence import (
 )
 from investing_monitor.domain.models import (
     Catalyst,
+    CloseMarketContext,
     MarketFrame,
+    MarketSession,
+    MarketSnapshot,
     PriceBandSignal,
     PriceBandState,
     ThesisImpact,
+    VolumeSnapshot,
 )
 from investing_monitor.ports.repository import AlertRecord, PendingDelivery
 from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -57,6 +61,20 @@ CREATE TABLE IF NOT EXISTS market_observations (
 
 CREATE INDEX IF NOT EXISTS idx_market_observations_ticker_time
 ON market_observations(ticker, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_volume_observations (
+    ticker TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    trading_date TEXT NOT NULL,
+    observed_volume INTEGER NOT NULL,
+    expected_volume INTEGER NOT NULL,
+    baseline_sessions INTEGER NOT NULL,
+    lookback_sessions INTEGER NOT NULL,
+    PRIMARY KEY(ticker, observed_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_volume_ticker_date
+ON market_volume_observations(ticker, trading_date, observed_at DESC);
 
 CREATE TABLE IF NOT EXISTS evidence_candidates (
     candidate_id TEXT PRIMARY KEY,
@@ -276,6 +294,7 @@ class SQLiteMonitorRepository:
         ticker: str,
         state: PriceBandState,
         frames: Sequence[MarketFrame],
+        volume: VolumeSnapshot | None,
         alerts: Sequence[AlertRecord],
         *,
         enqueue: bool = True,
@@ -309,6 +328,27 @@ class SQLiteMonitorRepository:
                             separators=(",", ":"),
                         ),
                         frame.cumulative_volume,
+                    ),
+                )
+            if volume is not None and frames:
+                connection.execute(
+                    "INSERT INTO market_volume_observations "
+                    "(ticker, observed_at, trading_date, observed_volume, "
+                    "expected_volume, baseline_sessions, lookback_sessions) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(ticker, observed_at) DO UPDATE SET "
+                    "observed_volume = excluded.observed_volume, "
+                    "expected_volume = excluded.expected_volume, "
+                    "baseline_sessions = excluded.baseline_sessions, "
+                    "lookback_sessions = excluded.lookback_sessions",
+                    (
+                        ticker,
+                        _utc_iso(frames[-1].snapshot.observed_at),
+                        frames[-1].snapshot.trading_date.isoformat(),
+                        volume.observed_volume,
+                        volume.expected_volume,
+                        volume.baseline_sessions,
+                        volume.lookback_sessions,
                     ),
                 )
             connection.execute(
@@ -358,6 +398,80 @@ class SQLiteMonitorRepository:
                     )
                 inserted_events.append(alert.event_key)
         return tuple(inserted_events)
+
+    def load_close_market_context(
+        self,
+        ticker: str,
+        trading_date: date,
+    ) -> CloseMarketContext | None:
+        ticker = ticker.upper()
+        with closing(self._connect()) as connection, connection:
+            market_row = connection.execute(
+                "SELECT ticker, trading_date, observed_at, session, change_pct, "
+                "benchmark_symbol, benchmark_change_pct, peer_changes_json "
+                "FROM market_observations WHERE ticker = ? AND trading_date = ? "
+                "ORDER BY CASE WHEN session = 'regular' THEN 0 ELSE 1 END, "
+                "observed_at DESC LIMIT 1",
+                (ticker, trading_date.isoformat()),
+            ).fetchone()
+            volume_row = connection.execute(
+                "SELECT observed_volume, expected_volume, baseline_sessions, "
+                "lookback_sessions FROM market_volume_observations "
+                "WHERE ticker = ? AND trading_date = ? "
+                "ORDER BY observed_at DESC LIMIT 1",
+                (ticker, trading_date.isoformat()),
+            ).fetchone()
+        if market_row is None:
+            return None
+        snapshot = MarketSnapshot(
+            ticker=market_row["ticker"],
+            trading_date=date.fromisoformat(market_row["trading_date"]),
+            observed_at=_required_datetime(market_row["observed_at"]),
+            session=MarketSession(market_row["session"]),
+            change_pct=market_row["change_pct"],
+            benchmark_change_pct=market_row["benchmark_change_pct"],
+            benchmark_symbol=market_row["benchmark_symbol"],
+            peer_changes=json.loads(market_row["peer_changes_json"]),
+        )
+        volume = None
+        if volume_row is not None:
+            volume = VolumeSnapshot(
+                observed_volume=volume_row["observed_volume"],
+                expected_volume=volume_row["expected_volume"],
+                baseline_sessions=volume_row["baseline_sessions"],
+                lookback_sessions=volume_row["lookback_sessions"],
+            )
+        return CloseMarketContext(snapshot=snapshot, volume=volume)
+
+    def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool:
+        payload_json = json.dumps(
+            alert.payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            inserted = bool(
+                connection.execute(
+                    "INSERT OR IGNORE INTO alerts "
+                    "(event_key, ticker, alert_type, created_at, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        alert.event_key,
+                        alert.ticker.upper(),
+                        alert.alert_type,
+                        _utc_iso(alert.created_at),
+                        payload_json,
+                    ),
+                ).rowcount
+            )
+            if inserted and enqueue:
+                connection.execute(
+                    "INSERT INTO outbox (event_key, payload_json, next_attempt_at) "
+                    "VALUES (?, ?, ?)",
+                    (alert.event_key, payload_json, _utc_iso(alert.created_at)),
+                )
+        return inserted
 
     def record_evidence_decisions(
         self,

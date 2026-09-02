@@ -120,6 +120,12 @@ class VolumeSnapshot:
 
 
 @dataclass(frozen=True)
+class CloseMarketContext:
+    snapshot: MarketSnapshot
+    volume: VolumeSnapshot | None
+
+
+@dataclass(frozen=True)
 class Catalyst:
     canonical_id: str
     headline: str

@@ -18,12 +18,13 @@
 - Stage 1 기반은 versioned SQLite, due-task planner, run/task checkpoint, outbox 상태 전이, `runtime-state` rolling snapshot으로 구현되어 있습니다.
 - Stage 2 시장 경로는 XNYS 휴장·조기폐장 캘린더, Yahoo 5분봉, 인증 multi-quote, 고정 전일 종가, SOXX/피어 상대 흐름, 동시간대 20세션 거래량과 intraday replay를 구현했습니다.
 - Stage 3 근거 경로는 Yahoo Search와 발행사 IR RSS, 결정론적 저가치 필터, 사건 클러스터링, 원문 근거 검증 AI 분석, SEC 403 Yahoo 미러 복구, 신규 공시 기준선과 재시도 ledger를 구현했습니다.
+- Stage 4의 일일 장마감 브리프는 실제 XNYS 마감 15분 후 한 번만 생성하며, 방향, SOXX, 피어 평균, 20거래일 거래량, 당일 핵심 근거 순서를 고정했습니다. 스케줄 누락 시 다음 거래일 장전까지 복구하며 weekly 브리프는 다음 개발 대상입니다.
 - SEC 인라인 XBRL의 숨김 메타데이터는 제거하고 10-Q/10-K의 실제 MD&A를 우선 추출합니다. 폼 번호만 있거나 본문을 확보하지 못한 공시는 알림으로 만들지 않습니다.
 - Form 4와 Yahoo 내부자 집계는 거래 코드를 구조화해 `P` 장내매수와 `S` 장내매도만 materiality 기준을 통과할 수 있습니다. `A` 보상, `M` 옵션 행사, `F` 세금 처리는 독립 알림 없이 ledger에만 저장합니다.
 - `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 계획 출력을 자동 검증하며, 수동 실행에서는 상태 진단과 snapshot 저장을 선택할 수 있습니다.
-- 동일 workflow는 DST 양쪽을 포괄하는 UTC 창에서 정각을 피한 5분 schedule로 market/news/SEC shadow tick을 실행하고 `runtime-state`를 checkpoint합니다. 예약 실행에서는 운영 의존성만 설치하며 전체 회귀 테스트는 push와 수동 실행에서 수행합니다. 개발 push도 Slack 없이 통합 shadow와 checkpoint를 한 번 실행해 provider·secret 회귀를 즉시 드러냅니다.
+- 동일 workflow는 DST 양쪽을 포괄하는 UTC 창에서 정각을 피한 5분 schedule로 market/news/SEC/close shadow tick을 실행하고 `runtime-state`를 checkpoint합니다. 예약 실행에서는 운영 의존성만 설치하며 전체 회귀 테스트는 push와 수동 실행에서 수행합니다. 개발 push도 Slack 없이 통합 shadow와 checkpoint를 한 번 실행해 provider·secret 회귀를 즉시 드러냅니다.
 - 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
-- production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 3~5 검증 전에는 v2로 전환하지 않습니다.
+- production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 4~5 검증 전에는 v2로 전환하지 않습니다.
 
 로컬에서 Stage 1 상태를 확인하려면:
 
