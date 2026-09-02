@@ -43,7 +43,23 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run live smoke checks
+      - name: Run full regression suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Run push live checks without Slack
+        if: github.event_name == 'push'
+        env:
+          SEC_CONTACT: ${{ secrets.SEC_CONTACT }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
+          SEC_API_KEY: ${{ secrets.SEC_API_KEY }}
+          SEC_DATA_MODE: yahoo
+          SEC_ARCHIVE_MODE: yahoo
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python live_smoke.py --no-slack
+
+      - name: Run manual live checks
+        if: github.event_name == 'workflow_dispatch'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
@@ -54,12 +70,4 @@ jobs:
           SEC_DATA_MODE: yahoo
           SEC_ARCHIVE_MODE: yahoo
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          python -m unittest discover -s tests -v
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.require_slack }}" != "true" ]; then
-            python live_smoke.py --no-slack
-            exit 0
-          fi
-
-          python live_smoke.py --require-slack
+        run: python live_smoke.py --${{ inputs.require_slack == 'true' && 'require-slack' || 'no-slack' }}

@@ -602,6 +602,16 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn("preview_change_pct=${PREVIEW_CHANGE:-4.0}", workflow)
         self.assertIn("[alert-preview]", smoke_workflow)
 
+    def test_live_smoke_push_cannot_send_slack(self):
+        workflow = Path(".github/workflows/live_smoke.yml").read_text()
+
+        push_step = workflow.split("- name: Run push live checks without Slack", 1)[1]
+        push_step = push_step.split("- name: Run manual live checks", 1)[0]
+        self.assertIn("if: github.event_name == 'push'", push_step)
+        self.assertIn("python live_smoke.py --no-slack", push_step)
+        self.assertNotIn("SLACK_WEBHOOK_URL", push_step)
+        self.assertNotIn("MARKET_SCAN_WEBHOOK", push_step)
+
     def test_primary_alert_uses_emoji_only_for_key_information(self):
         blocks = []
         blocks += hm.format_beta_block({
