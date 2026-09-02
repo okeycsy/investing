@@ -272,13 +272,15 @@ class ShadowWorkflowTest(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("push:", workflow)
         self.assertIn("schedule:", workflow)
-        self.assertIn("2-57/5 4-19 * * 1-5", workflow)
-        self.assertIn("America/New_York", workflow)
+        self.assertIn("3-58/5 8-23 * * 1-5", workflow)
+        self.assertIn("3-58/5 0-3 * * 2-6", workflow)
+        self.assertNotIn("timezone:", workflow)
         self.assertNotIn("hood_monitor.py", workflow)
         self.assertIn("persist_state", workflow)
         self.assertIn("unittest discover", workflow)
         self.assertIn("market-tick", workflow)
         self.assertIn("shadow-tick", workflow)
+        self.assertIn("github.event_name == 'push'", workflow)
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:

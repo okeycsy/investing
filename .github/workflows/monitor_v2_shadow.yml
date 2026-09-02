@@ -2,8 +2,10 @@ name: Monitor V2 Runtime Shadow
 
 on:
   schedule:
-    - cron: '2-57/5 4-19 * * 1-5'
-      timezone: 'America/New_York'
+    # UTC windows cover 04:00-20:00 New York across both DST offsets.
+    # TickPlanner applies the exchange calendar and exact active-session guard.
+    - cron: '3-58/5 8-23 * * 1-5'
+    - cron: '3-58/5 0-3 * * 2-6'
   push:
     branches:
       - main
@@ -79,7 +81,7 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db market-tick --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Run unified shadow tick
-        if: github.event_name == 'schedule' || inputs.mode == 'shadow'
+        if: github.event_name == 'schedule' || github.event_name == 'push' || inputs.mode == 'shadow'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SEC_CONTACT: maybe2213@naver.com
@@ -97,5 +99,5 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db doctor --require-secrets
 
       - name: Checkpoint runtime state
-        if: always() && (github.event_name == 'schedule' || inputs.persist_state)
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.persist_state)
         run: investing-monitor --db .runtime/monitor.db checkpoint-state --run-id "${{ github.run_id }}"

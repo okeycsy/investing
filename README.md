@@ -21,7 +21,7 @@
 - SEC 인라인 XBRL의 숨김 메타데이터는 제거하고 10-Q/10-K의 실제 MD&A를 우선 추출합니다. 폼 번호만 있거나 본문을 확보하지 못한 공시는 알림으로 만들지 않습니다.
 - Form 4와 Yahoo 내부자 집계는 거래 코드를 구조화해 `P` 장내매수와 `S` 장내매도만 materiality 기준을 통과할 수 있습니다. `A` 보상, `M` 옵션 행사, `F` 세금 처리는 독립 알림 없이 ledger에만 저장합니다.
 - `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 계획 출력을 자동 검증하며, 수동 실행에서는 상태 진단과 snapshot 저장을 선택할 수 있습니다.
-- 동일 workflow는 거래일 04:00-20:00 ET에 정각을 피한 5분 schedule로 market/news/SEC shadow tick을 실행하고 `runtime-state`를 checkpoint합니다. 예약 실행에서는 운영 의존성만 설치하며 전체 회귀 테스트는 push와 수동 실행에서 수행합니다.
+- 동일 workflow는 DST 양쪽을 포괄하는 UTC 창에서 정각을 피한 5분 schedule로 market/news/SEC shadow tick을 실행하고 `runtime-state`를 checkpoint합니다. 예약 실행에서는 운영 의존성만 설치하며 전체 회귀 테스트는 push와 수동 실행에서 수행합니다. 개발 push도 Slack 없이 통합 shadow와 checkpoint를 한 번 실행해 provider·secret 회귀를 즉시 드러냅니다.
 - 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
 - production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 3~5 검증 전에는 v2로 전환하지 않습니다.
 
