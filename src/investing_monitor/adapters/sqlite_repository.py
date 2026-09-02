@@ -31,6 +31,7 @@ from investing_monitor.domain.models import (
 )
 from investing_monitor.ports.repository import AlertRecord, PendingDelivery
 from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
+from investing_monitor.presentation.quality import require_valid_message
 
 
 SCHEMA_VERSION = 7
@@ -244,6 +245,7 @@ class SQLiteMonitorRepository:
         state: PriceBandState,
         payload: dict,
     ) -> bool:
+        require_valid_message("price_band", payload)
         payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         now = datetime.now(timezone.utc).isoformat()
         with closing(self._connect()) as connection, connection:
@@ -300,6 +302,8 @@ class SQLiteMonitorRepository:
         *,
         enqueue: bool = True,
     ) -> tuple[str, ...]:
+        for alert in alerts:
+            require_valid_message(alert.alert_type, alert.payload)
         ticker = ticker.upper()
         updated_at = datetime.now(timezone.utc).isoformat()
         inserted_events: list[str] = []
@@ -464,6 +468,7 @@ class SQLiteMonitorRepository:
         return tuple(context for context in contexts if context is not None)
 
     def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool:
+        require_valid_message(alert.alert_type, alert.payload)
         payload_json = json.dumps(
             alert.payload,
             ensure_ascii=False,
@@ -492,6 +497,39 @@ class SQLiteMonitorRepository:
                     (alert.event_key, payload_json, _utc_iso(alert.created_at)),
                 )
         return inserted
+
+    def recent_alerts(self, limit: int = 100) -> list[AlertRecord]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT event_key, ticker, alert_type, created_at, payload_json "
+                "FROM alerts ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            AlertRecord(
+                event_key=row["event_key"],
+                ticker=row["ticker"],
+                alert_type=row["alert_type"],
+                created_at=_required_datetime(row["created_at"]),
+                payload=json.loads(row["payload_json"]),
+            )
+            for row in rows
+        ]
+
+    def quality_status_counts(self) -> dict[str, dict[str, int]]:
+        with closing(self._connect()) as connection, connection:
+            outbox_rows = connection.execute(
+                "SELECT delivery_status, count(*) AS count FROM outbox "
+                "GROUP BY delivery_status"
+            ).fetchall()
+            evidence_rows = connection.execute(
+                "SELECT status, count(*) AS count FROM evidence_candidates "
+                "GROUP BY status"
+            ).fetchall()
+        return {
+            "outbox": {row["delivery_status"]: row["count"] for row in outbox_rows},
+            "evidence": {row["status"]: row["count"] for row in evidence_rows},
+        }
 
     def record_evidence_decisions(
         self,
@@ -673,6 +711,8 @@ class SQLiteMonitorRepository:
         *,
         enqueue: bool = True,
     ) -> bool:
+        if alert is not None:
+            require_valid_message(alert.alert_type, alert.payload)
         payload = _analysis_payload(analysis)
         analyzed_at_iso = _utc_iso(analyzed_at)
         inserted_alert = False

@@ -19,6 +19,7 @@ from investing_monitor.domain.models import (
     PriceBandState,
     VolumeSnapshot,
 )
+from investing_monitor.ports.runtime import RunCheckpoint
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,12 @@ class MonitorRepository(Protocol):
     ) -> tuple[CloseMarketContext, ...]: ...
 
     def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool: ...
+
+    def recent_alerts(self, limit: int = 100) -> list[AlertRecord]: ...
+
+    def quality_status_counts(self) -> dict[str, dict[str, int]]: ...
+
+    def recent_runs(self, limit: int = 10) -> list[RunCheckpoint]: ...
 
     def record_evidence_decisions(
         self,

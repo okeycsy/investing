@@ -36,6 +36,7 @@ from investing_monitor.application.briefs import (
 )
 from investing_monitor.application.evidence import EvidenceIngestionService
 from investing_monitor.application.monitor import MarketCycleService
+from investing_monitor.application.quality import QualityReportService
 from investing_monitor.application.sec_monitor import SecMonitorService
 from investing_monitor.presentation.evidence_messages import build_evidence_message
 from investing_monitor.runtime.tick import NEW_YORK, TickPlanner, TickRunner, TickTask
@@ -77,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
 
     subparsers.add_parser("status", help="show persisted runtime status")
+
+    quality = subparsers.add_parser(
+        "quality-report",
+        help="audit recent messages and runtime execution quality",
+    )
+    quality.add_argument("--limit", type=int, default=100)
 
     doctor = subparsers.add_parser("doctor", help="validate the GitHub runtime foundation")
     doctor.add_argument("--require-secrets", action="store_true")
@@ -367,6 +374,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             ],
         }
         return _emit(payload, args.summary_file)
+
+    if args.command == "quality-report":
+        report = QualityReportService(repository).build(limit=max(1, args.limit))
+        _emit(
+            {"command": args.command, **report.as_dict()},
+            args.summary_file,
+        )
+        return 0 if report.passed else 1
 
     if args.command == "doctor":
         with closing(sqlite3.connect(database_path)) as connection, connection:

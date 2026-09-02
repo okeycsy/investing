@@ -89,6 +89,10 @@ jobs:
           SEC_CONTACT: maybe2213@naver.com
         run: investing-monitor --db .runtime/monitor.db shadow-tick --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
+      - name: Build product quality report
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.mode == 'shadow')
+        run: investing-monitor --db .runtime/monitor.db quality-report
+
       - name: Show runtime status
         if: inputs.mode == 'status'
         run: investing-monitor --db .runtime/monitor.db status
