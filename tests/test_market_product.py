@@ -396,6 +396,54 @@ class MarketCycleServiceTest(unittest.TestCase):
             self.assertEqual(second.inserted_event_keys, ())
             self.assertIn("거래량 1.5배 확대", json.dumps(first.messages[0], ensure_ascii=False))
 
+    def test_shadow_records_alert_without_creating_delivery_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = MarketCycleService(repository, enqueue_alerts=False)
+
+            report = service.process(
+                self._cycle(change=4.2, minute=0, observed=100, expected=200)
+            )
+
+            self.assertEqual(len(report.inserted_event_keys), 1)
+            self.assertEqual(
+                repository.pending_deliveries(
+                    datetime(2026, 9, 3, tzinfo=timezone.utc)
+                ),
+                [],
+            )
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                self.assertEqual(
+                    connection.execute("SELECT count(*) FROM alerts").fetchone()[0],
+                    1,
+                )
+
+    def test_shadow_suppresses_deliveries_created_by_older_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            MarketCycleService(repository).process(
+                self._cycle(change=4.2, minute=0, observed=100, expected=200)
+            )
+
+            suppressed = repository.suppress_pending_deliveries(
+                datetime(2026, 9, 2, 15, tzinfo=timezone.utc),
+                "shadow migration",
+            )
+
+            self.assertEqual(suppressed, 1)
+            self.assertEqual(
+                repository.pending_deliveries(
+                    datetime(2026, 9, 3, tzinfo=timezone.utc)
+                ),
+                [],
+            )
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                status, error = connection.execute(
+                    "SELECT delivery_status, last_error FROM outbox"
+                ).fetchone()
+            self.assertEqual(status, "suppressed")
+            self.assertEqual(error, "shadow migration")
+
     @staticmethod
     def _cycle(
         *,

@@ -808,6 +808,41 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
             self.assertIn("Yahoo Finance 집계 보기", rendered)
             self.assertNotIn("옵션 행사로 추정", rendered)
 
+    def test_shadow_evidence_keeps_alert_for_review_without_outbox(self):
+        class Analyzer:
+            def analyze(self, _candidates, _profile):
+                raise AssertionError("structured insider transaction must bypass AI")
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+                enqueue_alerts=False,
+            )
+            report = service.ingest(
+                [
+                    raw(
+                        "Jane Doe — Open-market purchase",
+                        kind=EvidenceKind.INSIDER,
+                        metadata={
+                            "transaction_code": "P",
+                            "transaction_codes": ("P",),
+                            "insider_name": "Jane Doe",
+                            "position": "Director",
+                            "shares": 2_000,
+                            "value_usd": 250_000,
+                        },
+                    )
+                ],
+                NOW,
+            )
+
+            self.assertEqual(report.alerts, 1)
+            self.assertEqual(repository.pending_deliveries(NOW), [])
+
     def test_rsu_award_and_small_sale_are_ledger_only(self):
         class Analyzer:
             def analyze(self, _candidates, _profile):

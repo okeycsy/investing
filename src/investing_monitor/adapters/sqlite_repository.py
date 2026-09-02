@@ -275,6 +275,8 @@ class SQLiteMonitorRepository:
         state: PriceBandState,
         frames: Sequence[MarketFrame],
         alerts: Sequence[AlertRecord],
+        *,
+        enqueue: bool = True,
     ) -> tuple[str, ...]:
         ticker = ticker.upper()
         updated_at = datetime.now(timezone.utc).isoformat()
@@ -346,11 +348,12 @@ class SQLiteMonitorRepository:
                 ).rowcount
                 if not inserted:
                     continue
-                connection.execute(
-                    "INSERT INTO outbox (event_key, payload_json, next_attempt_at) "
-                    "VALUES (?, ?, ?)",
-                    (alert.event_key, payload_json, updated_at),
-                )
+                if enqueue:
+                    connection.execute(
+                        "INSERT INTO outbox (event_key, payload_json, next_attempt_at) "
+                        "VALUES (?, ?, ?)",
+                        (alert.event_key, payload_json, updated_at),
+                    )
                 inserted_events.append(alert.event_key)
         return tuple(inserted_events)
 
@@ -499,6 +502,8 @@ class SQLiteMonitorRepository:
         analysis: EvidenceAnalysis,
         analyzed_at: datetime,
         alert: AlertRecord | None = None,
+        *,
+        enqueue: bool = True,
     ) -> bool:
         payload = _analysis_payload(analysis)
         analyzed_at_iso = _utc_iso(analyzed_at)
@@ -536,13 +541,26 @@ class SQLiteMonitorRepository:
                         ),
                     ).rowcount
                 )
-                if inserted_alert:
+                if inserted_alert and enqueue:
                     connection.execute(
                         "INSERT INTO outbox (event_key, payload_json, next_attempt_at) "
                         "VALUES (?, ?, ?)",
                         (alert.event_key, alert_payload, analyzed_at_iso),
                     )
         return inserted_alert
+
+    def suppress_pending_deliveries(
+        self,
+        suppressed_at: datetime,
+        reason: str,
+    ) -> int:
+        with closing(self._connect()) as connection, connection:
+            return connection.execute(
+                "UPDATE outbox SET delivery_status = 'suppressed', attempted_at = ?, "
+                "last_error = ? WHERE delivered_at IS NULL "
+                "AND delivery_status IN ('pending', 'failed')",
+                (_utc_iso(suppressed_at), reason[:1000]),
+            ).rowcount
 
     def recent_catalysts(
         self,

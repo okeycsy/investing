@@ -98,9 +98,11 @@ class MarketCycleService:
         repository: MonitorRepository,
         *,
         price_policy: PriceBandPolicy | None = None,
+        enqueue_alerts: bool = True,
     ) -> None:
         self.repository = repository
         self.price_policy = price_policy or PriceBandPolicy()
+        self.enqueue_alerts = enqueue_alerts
 
     def process(
         self,
@@ -187,6 +189,7 @@ class MarketCycleService:
             state,
             cycle.frames,
             alerts,
+            enqueue=self.enqueue_alerts,
         )
         return MarketCycleReport(
             ticker=cycle.ticker,

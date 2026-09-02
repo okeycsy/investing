@@ -53,6 +53,8 @@ class MonitorRepository(Protocol):
         state: PriceBandState,
         frames: Sequence[MarketFrame],
         alerts: Sequence[AlertRecord],
+        *,
+        enqueue: bool = True,
     ) -> tuple[str, ...]: ...
 
     def record_evidence_decisions(
@@ -99,7 +101,15 @@ class MonitorRepository(Protocol):
         analysis: EvidenceAnalysis,
         analyzed_at: datetime,
         alert: AlertRecord | None = None,
+        *,
+        enqueue: bool = True,
     ) -> bool: ...
+
+    def suppress_pending_deliveries(
+        self,
+        suppressed_at: datetime,
+        reason: str,
+    ) -> int: ...
 
     def recent_catalysts(
         self,

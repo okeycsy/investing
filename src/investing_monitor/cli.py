@@ -141,7 +141,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile,
             quote_client=YahooQuoteClient(),
         )
-        service = MarketCycleService(repository)
+        suppressed_deliveries = repository.suppress_pending_deliveries(
+            now,
+            "v2 shadow runtime does not deliver Slack",
+        )
+        service = MarketCycleService(repository, enqueue_alerts=False)
         market_result: dict[str, object] = {}
         evidence_result: dict[str, object] = {}
 
@@ -178,6 +182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 article_text=YahooArticleTextClient(),
                 filing_text=SecFilingTextClient(evidence_profile.sec_contact),
                 alert_builder=build_evidence_message,
+                enqueue_alerts=False,
             )
             yahoo_news = YahooNewsAdapter()
             investor_relations = InvestorRelationsFeedAdapter()
@@ -248,6 +253,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 0,
                 int((now - scheduled_at).total_seconds()),
             ),
+            "suppressed_deliveries": suppressed_deliveries,
             "execution": execution.as_dict(),
             "market": market_result,
         }

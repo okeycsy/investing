@@ -315,6 +315,7 @@ class EvidenceIngestionService:
         lookback: timedelta = timedelta(hours=24),
         retry_delay: timedelta = timedelta(minutes=5),
         batch_limit: int = 5,
+        enqueue_alerts: bool = True,
     ) -> None:
         self.repository = repository
         self.profile = profile
@@ -325,6 +326,7 @@ class EvidenceIngestionService:
         self.lookback = lookback
         self.retry_delay = retry_delay
         self.batch_limit = batch_limit
+        self.enqueue_alerts = enqueue_alerts
 
     def ingest(
         self,
@@ -408,6 +410,7 @@ class EvidenceIngestionService:
                 analysis,
                 now,
                 alert,
+                enqueue=self.enqueue_alerts,
             )
             analyzed += 1
             relevant += 1
@@ -438,6 +441,7 @@ class EvidenceIngestionService:
                         analysis,
                         now,
                         alert,
+                        enqueue=self.enqueue_alerts,
                     )
                     analyzed += 1
                     relevant += int(analysis.relevant)
