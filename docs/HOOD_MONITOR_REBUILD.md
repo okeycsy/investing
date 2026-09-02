@@ -144,7 +144,7 @@ GitHub는 예약 이벤트가 고부하 때 지연되거나 누락될 수 있다
 
 ### Opportunities
 
-- WebSocket 시장 데이터로 예약 실행 자체를 없앨 수 있다.
+- 로컬 상주 worker의 2분 REST polling으로 GitHub 예약 실행 의존성을 없앨 수 있다.
 - SEC submissions API는 공시를 실시간으로 갱신하므로 안정된 IP에서 직접 감시할 수 있다.
 - AI는 뉴스 생성기가 아니라 관련성 분류와 근거 기반 요약기로 제한해 신뢰도를 높일 수 있다.
 - 동일 시간대 거래량 프로필을 사용하면 이전의 수급 알림을 더 정확하게 복원할 수 있다.
@@ -371,12 +371,13 @@ SEC 원문
 
 ### 사용자 SLO
 
-- 장중 임계치 감지부터 Slack 전송까지 p95 90초 이내
-- 핵심 worker 월 가용성 99.5% 이상
+- Mac과 네트워크가 정상인 동안 장중 임계치 발생부터 Slack 전송까지 p95 4분 이내
+- 정규장 quote polling 간격 2분, 연속 성공률 99% 이상
 - 동일 사건 중복 알림률 0.1% 미만
-- 확인된 신규 SEC 공시 감지 5분 이내
+- 확인된 신규 SEC 공시는 메타데이터 감지 10분, 분석 완료 20분 이내
 - AI가 실패한 이벤트를 성공 처리하거나 폐기하지 않음
 - 소스 장애를 `새 사건 없음`으로 오판하지 않음
+- Mac 절전이나 종료로 생긴 공백을 재기동 시 감지하고 복원 결과를 기록함
 
 ### 운영 지표
 
@@ -392,8 +393,10 @@ SEC 원문
 
 ```mermaid
 flowchart LR
-    A["Alpaca market stream"] --> B["Market normalizer"]
-    Y["Yahoo fallback and history"] --> B
+    L["macOS launchd"] --> W["Long-running Python worker"]
+    W --> P["Internal interval scheduler"]
+    P --> Y["Yahoo REST quote and history"]
+    Y --> B["Market normalizer"]
     S["SEC submissions and filings"] --> C["Catalyst normalizer"]
     N["Yahoo news and IR sources"] --> C
     C --> D["Evidence analyzer"]
@@ -410,33 +413,33 @@ flowchart LR
 
 ### 런타임
 
-- GitHub Actions는 test/build/deploy에만 사용한다.
-- 실제 모니터는 항상 실행되는 단일 Python worker다.
-- 시장 데이터는 WebSocket 이벤트를 받아 예약 실행을 제거한다.
+- GitHub Actions는 test와 수동 smoke test에만 사용하며 예약 실행은 production에서 제거한다.
+- 실제 모니터는 사용자의 Mac에서 `launchd`가 유지하는 단일 Python worker다.
+- 정규장 quote는 Yahoo REST를 2분마다 조회하고, 프리마켓과 애프터마켓도 2분을 기본값으로 한다.
 - SEC와 뉴스는 worker 내부의 주기 작업으로 실행하며 실패 시 backoff한다.
-- systemd 또는 컨테이너 restart policy가 프로세스를 자동 복구한다.
-
-Alpaca는 주식, 옵션, 뉴스용 실시간 WebSocket을 제공하고 REST polling보다 streaming 사용을 권장한다.
-
-- https://docs.alpaca.markets/us/docs/streaming-market-data
+- `launchd KeepAlive`가 비정상 종료를 복구하고 SQLite heartbeat로 절전 또는 종료 공백을 감지한다.
+- 잠든 Mac에서는 polling이 실행되지 않는다. 전원 연결 상태에서 자동 잠자기를 막는 설정을 운영 전제에 포함하고, 재기동 시 누락 구간을 Yahoo intraday history와 SEC/news cursor로 복원한다.
 
 ### 배포 권고
 
-단일 사용자, 단일 종목 제품이므로 Kubernetes나 메시지 브로커는 필요 없다. 고정 IP와 영속 디스크를 가진 1GB Linux 인스턴스 한 대가 적절하다.
+추가 비용을 만들지 않는다. 사용자의 Mac을 유일한 production host로 사용하고 GitHub는 소스와 CI만 담당한다.
 
-- 1순위: AWS Lightsail 1GB Linux, 월 7 USD
-- 이유: 항상 실행, 고정 IPv4, SQLite 영속 디스크, systemd, SEC 직접 호출 가능성, 단순한 운영
-- 공식 가격: https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-bundles.html
+- 프로세스 관리자: 사용자 LaunchAgent (`launchd`)
+- 영속 상태: `~/Library/Application Support/InvestingMonitor/monitor.db`
+- 로그: `~/Library/Logs/InvestingMonitor/`
+- 비밀값: macOS Keychain 우선, 평문을 저장해야 하면 repo 밖의 권한 `600` 파일만 허용
+- 배포: 테스트 통과 후 로컬 package를 갱신하고 worker를 재시작하는 단일 명령
 
-GitHub `push` 이벤트는 CI/CD로 계속 사용한다. 테스트 통과 후 SSH 배포하고 worker를 재시작한다. 예약 cron은 제거한다.
+Apple은 전원 어댑터 연결 중 디스플레이가 꺼져도 Mac이 자동 잠자기 하지 않도록 설정할 수 있다고 안내한다. 이 설정을 하지 않으면 제품은 절전 중 실시간 감지를 보장하지 않으며, 해당 구간은 복구 모드로 처리한다.
+
+- https://support.apple.com/en-gb/guide/mac-help/mchle41a6ccd/mac
 
 ### 데이터 공급자
 
-- 실시간 시장: Alpaca WebSocket 우선
-- 전일 종가/과거 OHLCV/보조 fallback: Yahoo
+- 장중 quote와 과거 OHLCV: Yahoo REST
 - 공시 메타데이터와 XBRL: SEC 공식 API
 - 공시 원문: SEC Archives, 속도 제한과 캐시 적용
-- 뉴스: Yahoo RSS + 회사 IR feed, 향후 유료 뉴스 API 교체 가능
+- 뉴스: Yahoo RSS + 회사 IR feed
 - 해석: Anthropic structured JSON
 - 전달: Slack
 
@@ -461,7 +464,6 @@ src/investing_monitor/
     notifier.py        # Slack 전달 인터페이스
     repository.py      # 상태, event, outbox 인터페이스
   adapters/
-    alpaca_market.py
     yahoo_market.py
     yahoo_news.py
     sec_edgar.py
@@ -470,7 +472,11 @@ src/investing_monitor/
     sqlite_repository.py
   presentation/
     slack_messages.py  # 순수 메시지 렌더러
-  worker.py            # 프로세스 수명주기와 periodic task
+  runtime/
+    scheduler.py       # session-aware periodic task
+    recovery.py        # 절전/종료 공백 복원
+    health.py          # heartbeat와 source health
+  worker.py            # 프로세스 수명주기
 ```
 
 의존 방향은 adapters -> application -> domain이다. domain은 requests, Slack Block Kit, 파일 경로를 알지 못한다.
@@ -548,7 +554,7 @@ src/investing_monitor/
 ### Phase 2: provider adapters
 
 - Yahoo, SEC, Anthropic, Slack 어댑터 구현
-- Alpaca WebSocket과 reconnect/backfill 구현
+- Yahoo 2분 polling, timeout/backoff, intraday backfill 구현
 - provider별 contract test 추가
 
 중단 조건: 하나의 provider 실패가 전체 worker를 종료하거나 `변화 없음`으로 바뀌면 다음 단계로 가지 않는다.
@@ -561,11 +567,11 @@ src/investing_monitor/
 
 중단 조건: 기존 버전보다 촉매 설명, 스캔 속도, 중복률 중 하나라도 나쁘면 production으로 전환하지 않는다.
 
-### Phase 4: 항상 실행 배포
+### Phase 4: 로컬 상시 실행 배포
 
-- Lightsail, Docker/systemd, persistent volume 구성
-- GitHub Actions는 push 기반 배포만 담당
-- health, restart, log rotation 구성
+- macOS LaunchAgent, 로컬 SQLite, Keychain 연동 구성
+- 전원 연결 중 자동 잠자기 방지 여부를 preflight에서 확인하고 사용자 동의 시 `caffeinate -s` wrapper 적용
+- health, restart, 절전 공백 감지, log rotation 구성
 
 중단 조건: worker 중단을 10분 이내 감지하지 못하면 production으로 전환하지 않는다.
 
@@ -579,7 +585,7 @@ src/investing_monitor/
 
 재개발은 코드가 실행된다고 완료되지 않는다. 다음을 모두 만족해야 한다.
 
-- GitHub scheduled event 없이 장중 모니터가 동작한다.
+- GitHub scheduled event 없이 Mac의 상주 worker가 장중 2분 REST polling으로 동작한다.
 - 실제 `+4 -> +5` 상태 전이가 재시작을 거쳐도 정확하다.
 - 가격 이상 알림 하나에서 상대 흐름, 거래량, 촉매를 함께 읽을 수 있다.
 - 촉매가 없으면 없다고 정직하게 말하고 억지 설명을 만들지 않는다.
@@ -589,3 +595,6 @@ src/investing_monitor/
 - 코드 변경은 자동 배포되지만 런타임 상태는 GitHub에 커밋되지 않는다.
 - 장애와 복구를 별도 경로에서 확인할 수 있다.
 - 최소 2일 shadow mode와 5일 production 관찰 결과를 남긴다.
+
+상세 기능 요구사항, polling cadence, 복구 정책과 release backlog는
+[`HOOD_MONITOR_PRD_V2.md`](HOOD_MONITOR_PRD_V2.md)를 단일 기준으로 사용한다.

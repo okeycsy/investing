@@ -10,7 +10,7 @@ Every visible alert must answer at least one question:
 
 1. What new fact appeared?
 2. Why does it matter to the configured investment thesis?
-3. Does the existing DCA plan remain intact?
+3. Does the new evidence strengthen, preserve, or weaken the investment thesis?
 4. What source or next event should be checked?
 
 ## Alert Contracts
@@ -40,7 +40,8 @@ Every visible alert must answer at least one question:
   equal-weight peer group; unavailable peers are excluded rather than treated as 0%.
 - Facts and AI interpretation must be visibly separated.
 - AI failure must not consume the news de-duplication key.
-- A partial source failure must be disclosed; it must not look like "no change".
+- A partial source failure must be recorded operationally and must not be converted
+  into "no change". Raw provider failures must not appear in investor alerts.
 - Technical indicators are secondary context. They must not say `Strong Buy`,
   `Buy`, or `Avoid`, and must not prescribe a dollar purchase amount.
   RSI or MACD conditions must never create a standalone intraday alert.
