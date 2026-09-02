@@ -14,6 +14,7 @@ sec_contact: maybe2213@naver.com
 
 # Investment thesis profile
 company_aliases: Vertiv, Vertiv Holdings
+ir_news_url: https://investors.vertiv.com/rss/pressrelease.aspx
 news_terms: data center cooling, liquid cooling, AI infrastructure, hyperscaler
 priority_keywords: backlog, orders, organic sales, guidance, operating margin, free cash flow
 risk_keywords: margin pressure, guidance cut, order cancellation, supply chain, tariff, customer concentration

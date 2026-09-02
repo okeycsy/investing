@@ -17,8 +17,10 @@
 - Stage 0 계약은 문서와 기존 제품 테스트로 동결되어 있습니다.
 - Stage 1 기반은 versioned SQLite, due-task planner, run/task checkpoint, outbox 상태 전이, `runtime-state` rolling snapshot으로 구현되어 있습니다.
 - Stage 2 시장 경로는 XNYS 휴장·조기폐장 캘린더, Yahoo 5분봉, 인증 multi-quote, 고정 전일 종가, SOXX/피어 상대 흐름, 동시간대 20세션 거래량과 intraday replay를 구현했습니다.
+- Stage 3 근거 경로는 Yahoo Search와 발행사 IR RSS, 결정론적 저가치 필터, 사건 클러스터링, 원문 근거 검증 AI 분석, SEC 403 Yahoo 미러 복구, 신규 공시 기준선과 재시도 ledger를 구현했습니다.
+- SEC 인라인 XBRL의 숨김 메타데이터는 제거하고 10-Q/10-K의 실제 MD&A를 우선 추출합니다. 폼 번호만 있거나 본문을 확보하지 못한 공시는 알림으로 만들지 않습니다.
 - `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 계획 출력을 자동 검증하며, 수동 실행에서는 상태 진단과 snapshot 저장을 선택할 수 있습니다.
-- 동일 workflow는 거래일 04:00-20:00 ET에 정각을 피한 5분 schedule로 market shadow tick을 실행하고 `runtime-state`를 checkpoint합니다.
+- 동일 workflow는 거래일 04:00-20:00 ET에 정각을 피한 5분 schedule로 market/news/SEC shadow tick을 실행하고 `runtime-state`를 checkpoint합니다. 예약 실행에서는 운영 의존성만 설치하며 전체 회귀 테스트는 push와 수동 실행에서 수행합니다.
 - 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
 - production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 3~5 검증 전에는 v2로 전환하지 않습니다.
 
@@ -30,6 +32,7 @@ investing-monitor plan
 investing-monitor status
 investing-monitor doctor
 investing-monitor market-tick --config monitor_config.md
+investing-monitor shadow-tick --config monitor_config.md
 ```
 
 ## 1차 정리 범위

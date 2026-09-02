@@ -6,20 +6,33 @@ import os
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
 from investing_monitor.adapters.git_state_branch import GitStateBranchStore
-from investing_monitor.adapters.config import load_instrument_profile
+from investing_monitor.adapters.anthropic_evidence import AnthropicEvidenceAnalyzer
+from investing_monitor.adapters.config import (
+    load_evidence_profile,
+    load_instrument_profile,
+)
+from investing_monitor.adapters.evidence_feeds import InvestorRelationsFeedAdapter
 from investing_monitor.adapters.exchange_calendar import XNYSCalendar
+from investing_monitor.adapters.sec_filings import (
+    ResilientSecFilingsAdapter,
+    SecFilingTextClient,
+)
 from investing_monitor.adapters.sqlite_repository import SCHEMA_VERSION, SQLiteMonitorRepository
 from investing_monitor.adapters.yahoo_market_data import (
     YahooChartClient,
     YahooMarketDataAdapter,
     YahooQuoteClient,
 )
+from investing_monitor.adapters.yahoo_news import YahooArticleTextClient, YahooNewsAdapter
+from investing_monitor.application.evidence import EvidenceIngestionService
 from investing_monitor.application.monitor import MarketCycleService
+from investing_monitor.application.sec_monitor import SecMonitorService
+from investing_monitor.presentation.evidence_messages import build_evidence_message
 from investing_monitor.runtime.tick import TickPlanner, TickRunner, TickTask
 
 
@@ -48,6 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
     market_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
     market_tick.add_argument("--scheduled-at", default="")
     market_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+
+    shadow_tick = subparsers.add_parser(
+        "shadow-tick",
+        help="run market, news, and SEC monitors without delivering Slack",
+    )
+    shadow_tick.add_argument("--config", default="monitor_config.md")
+    shadow_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
+    shadow_tick.add_argument("--scheduled-at", default="")
+    shadow_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
 
     subparsers.add_parser("status", help="show persisted runtime status")
 
@@ -104,7 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         return _emit(payload, args.summary_file)
 
-    if args.command == "market-tick":
+    if args.command in {"market-tick", "shadow-tick"}:
         now = _parse_timestamp(args.now) if args.now else datetime.now(timezone.utc)
         scheduled_at = (
             _parse_timestamp(args.scheduled_at)
@@ -121,13 +143,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         service = MarketCycleService(repository)
         market_result: dict[str, object] = {}
+        evidence_result: dict[str, object] = {}
 
         def handle_market(_task):
             cycle = adapter.fetch_cycle(
                 now,
                 last_observed_at=repository.latest_market_observation_at(profile.ticker),
             )
-            report = service.process(cycle)
+            report = service.process(
+                cycle,
+                repository.recent_catalysts(
+                    profile.ticker,
+                    now - timedelta(hours=24),
+                    limit=2,
+                ),
+            )
             market_result.update(report.as_dict())
             market_result["source_age_seconds"] = cycle.source_age_seconds
             return {
@@ -137,13 +167,73 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "source_age_seconds": cycle.source_age_seconds,
             }
 
+        handlers = {TickTask.MARKET: handle_market}
+        enabled_tasks = {TickTask.MARKET}
+        if args.command == "shadow-tick":
+            evidence_profile = load_evidence_profile(args.config)
+            ingestion = EvidenceIngestionService(
+                repository,
+                evidence_profile,
+                AnthropicEvidenceAnalyzer(os.environ.get("ANTHROPIC_API_KEY", "")),
+                article_text=YahooArticleTextClient(),
+                filing_text=SecFilingTextClient(evidence_profile.sec_contact),
+                alert_builder=build_evidence_message,
+            )
+            yahoo_news = YahooNewsAdapter()
+            investor_relations = InvestorRelationsFeedAdapter()
+
+            def handle_news(_task):
+                candidates = []
+                source_errors = {}
+                for source_name, source in (
+                    ("yahoo", yahoo_news),
+                    ("ir", investor_relations),
+                ):
+                    try:
+                        candidates.extend(source.fetch(evidence_profile))
+                    except Exception as exc:
+                        source_errors[source_name] = str(exc)
+                if not candidates:
+                    raise RuntimeError(
+                        "all news sources failed: "
+                        + "; ".join(
+                            f"{name}={error}" for name, error in source_errors.items()
+                        )
+                    )
+                report = ingestion.ingest(candidates, now)
+                evidence_result["news"] = {
+                    **report.as_dict(),
+                    "source_errors": source_errors,
+                }
+                return evidence_result["news"]
+
+            sec_service = SecMonitorService(
+                repository,
+                evidence_profile,
+                ResilientSecFilingsAdapter(),
+                ingestion,
+            )
+
+            def handle_sec(_task):
+                report = sec_service.poll(now)
+                evidence_result["sec"] = report.as_dict()
+                return evidence_result["sec"]
+
+            handlers.update(
+                {
+                    TickTask.NEWS: handle_news,
+                    TickTask.SEC: handle_sec,
+                }
+            )
+            enabled_tasks.update({TickTask.NEWS, TickTask.SEC})
+
         run_id = args.run_id or f"manual-{uuid.uuid4()}"
         execution = TickRunner(
             repository,
-            {TickTask.MARKET: handle_market},
+            handlers,
             planner=TickPlanner(
                 calendar=calendar,
-                enabled_tasks={TickTask.MARKET},
+                enabled_tasks=enabled_tasks,
             ),
             clock=lambda: now,
         ).run(run_id, scheduled_at=scheduled_at, started_at=now)
@@ -161,6 +251,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "execution": execution.as_dict(),
             "market": market_result,
         }
+        if args.command == "shadow-tick":
+            payload["evidence"] = evidence_result
         _emit(payload, args.summary_file)
         return 0 if execution.status == "success" else 1
 

@@ -102,7 +102,11 @@ class MarketCycleService:
         self.repository = repository
         self.price_policy = price_policy or PriceBandPolicy()
 
-    def process(self, cycle: MarketCycle) -> MarketCycleReport:
+    def process(
+        self,
+        cycle: MarketCycle,
+        catalysts: Sequence[Catalyst] = (),
+    ) -> MarketCycleReport:
         existing = self.repository.load_price_band_state(cycle.ticker)
         state = self._state_for_cycle(cycle, existing)
         if not cycle.frames:
@@ -133,7 +137,7 @@ class MarketCycleService:
                 assess_relative_performance(frame.snapshot),
                 cycle.volume,
                 volume_assessment,
-                (),
+                catalysts,
             )
             alerts.append(
                 AlertRecord(

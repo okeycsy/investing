@@ -4,7 +4,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, Sequence
 
-from investing_monitor.domain.models import MarketFrame, PriceBandSignal, PriceBandState
+from investing_monitor.domain.evidence import (
+    CandidateDecision,
+    EvidenceAnalysis,
+    EvidenceCandidate,
+)
+from investing_monitor.domain.models import (
+    Catalyst,
+    MarketFrame,
+    PriceBandSignal,
+    PriceBandState,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +54,66 @@ class MonitorRepository(Protocol):
         frames: Sequence[MarketFrame],
         alerts: Sequence[AlertRecord],
     ) -> tuple[str, ...]: ...
+
+    def record_evidence_decisions(
+        self,
+        decisions: Sequence[CandidateDecision],
+        cluster_keys: dict[str, str],
+        seen_at: datetime,
+    ) -> tuple[str, ...]: ...
+
+    def has_source_baseline(self, source_key: str) -> bool: ...
+
+    def record_evidence_baseline(
+        self,
+        source_key: str,
+        decisions: Sequence[CandidateDecision],
+        seen_at: datetime,
+    ) -> int: ...
+
+    def pending_evidence_candidates(
+        self,
+        now: datetime,
+        limit: int = 20,
+    ) -> list[EvidenceCandidate]: ...
+
+    def update_evidence_source_text(
+        self,
+        candidate_id: str,
+        source_text: str,
+    ) -> None: ...
+
+    def evidence_cluster_key(self, candidate_id: str) -> str: ...
+
+    def record_evidence_analysis(
+        self,
+        candidate_id: str,
+        analysis: EvidenceAnalysis,
+        analyzed_at: datetime,
+        alert: AlertRecord | None = None,
+    ) -> bool: ...
+
+    def recent_catalysts(
+        self,
+        ticker: str,
+        since: datetime,
+        limit: int = 2,
+    ) -> list[Catalyst]: ...
+
+    def mark_evidence_analyzed(
+        self,
+        candidate_id: str,
+        analysis: EvidenceAnalysis,
+        analyzed_at: datetime,
+    ) -> None: ...
+
+    def mark_evidence_failed(
+        self,
+        candidate_id: str,
+        attempted_at: datetime,
+        next_attempt_at: datetime,
+        error: str,
+    ) -> None: ...
 
     def pending_deliveries(self, now: datetime, limit: int = 20) -> list[PendingDelivery]: ...
 

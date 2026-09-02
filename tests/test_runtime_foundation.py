@@ -278,6 +278,7 @@ class ShadowWorkflowTest(unittest.TestCase):
         self.assertIn("persist_state", workflow)
         self.assertIn("unittest discover", workflow)
         self.assertIn("market-tick", workflow)
+        self.assertIn("shadow-tick", workflow)
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:

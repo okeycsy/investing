@@ -24,6 +24,7 @@ on:
           - status
           - doctor
           - market
+          - shadow
       persist_state:
         description: 'Checkpoint the SQLite snapshot to runtime-state'
         required: true
@@ -56,10 +57,14 @@ jobs:
 
       - name: Install package
         run: |
-          pip install -r requirements.txt
-          pip install -e .
+          pip install -e . yfinance
+
+      - name: Install legacy test dependencies
+        if: github.event_name != 'schedule'
+        run: pip install -r requirements.txt
 
       - name: Run full test suite
+        if: github.event_name != 'schedule'
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
 
       - name: Restore runtime state
@@ -70,8 +75,15 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db plan
 
       - name: Run market shadow tick
-        if: github.event_name == 'schedule' || inputs.mode == 'market'
+        if: inputs.mode == 'market'
         run: investing-monitor --db .runtime/monitor.db market-tick --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+
+      - name: Run unified shadow tick
+        if: github.event_name == 'schedule' || inputs.mode == 'shadow'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SEC_CONTACT: maybe2213@naver.com
+        run: investing-monitor --db .runtime/monitor.db shadow-tick --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Show runtime status
         if: inputs.mode == 'status'

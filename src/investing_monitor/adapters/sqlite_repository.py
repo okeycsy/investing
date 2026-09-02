@@ -7,12 +7,26 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from investing_monitor.domain.models import MarketFrame, PriceBandSignal, PriceBandState
+from investing_monitor.domain.evidence import (
+    CandidateDecision,
+    EvidenceAnalysis,
+    EvidenceCandidate,
+    EvidenceKind,
+    EvidenceStatus,
+    candidate_identity,
+)
+from investing_monitor.domain.models import (
+    Catalyst,
+    MarketFrame,
+    PriceBandSignal,
+    PriceBandState,
+    ThesisImpact,
+)
 from investing_monitor.ports.repository import AlertRecord, PendingDelivery
 from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -41,6 +55,41 @@ CREATE TABLE IF NOT EXISTS market_observations (
 
 CREATE INDEX IF NOT EXISTS idx_market_observations_ticker_time
 ON market_observations(ticker, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS evidence_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    headline TEXT NOT NULL DEFAULT '',
+    source_name TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    published_at TEXT,
+    source_text TEXT NOT NULL DEFAULT '',
+    external_id TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    cluster_key TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    status_reason TEXT NOT NULL DEFAULT '',
+    analysis_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_attempt_at TEXT,
+    next_attempt_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_candidates_pending
+ON evidence_candidates(status, next_attempt_at, published_at);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_candidates_cluster
+ON evidence_candidates(cluster_key, published_at);
+
+CREATE TABLE IF NOT EXISTS source_baselines (
+    source_key TEXT PRIMARY KEY,
+    initialized_at TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS alerts (
     event_key TEXT PRIMARY KEY,
@@ -305,6 +354,243 @@ class SQLiteMonitorRepository:
                 inserted_events.append(alert.event_key)
         return tuple(inserted_events)
 
+    def record_evidence_decisions(
+        self,
+        decisions: Sequence[CandidateDecision],
+        cluster_keys: dict[str, str],
+        seen_at: datetime,
+    ) -> tuple[str, ...]:
+        seen_at_iso = _utc_iso(seen_at)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            inserted_pending = _insert_evidence_decisions(
+                connection,
+                decisions,
+                cluster_keys,
+                seen_at_iso,
+            )
+        return inserted_pending
+
+    def has_source_baseline(self, source_key: str) -> bool:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT 1 FROM source_baselines WHERE source_key = ?",
+                (source_key,),
+            ).fetchone()
+        return row is not None
+
+    def record_evidence_baseline(
+        self,
+        source_key: str,
+        decisions: Sequence[CandidateDecision],
+        seen_at: datetime,
+    ) -> int:
+        seen_at_iso = _utc_iso(seen_at)
+        baseline_decisions = tuple(
+            CandidateDecision(
+                status=EvidenceStatus.BASELINE,
+                reason=f"initial source baseline: {source_key}",
+                candidate=decision.candidate,
+                raw=decision.raw,
+            )
+            if decision.candidate is not None
+            else decision
+            for decision in decisions
+        )
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            before = connection.total_changes
+            _insert_evidence_decisions(
+                connection,
+                baseline_decisions,
+                {},
+                seen_at_iso,
+            )
+            inserted = connection.total_changes - before
+            connection.execute(
+                "INSERT OR IGNORE INTO source_baselines "
+                "(source_key, initialized_at, candidate_count) VALUES (?, ?, ?)",
+                (source_key, seen_at_iso, inserted),
+            )
+        return inserted
+
+    def pending_evidence_candidates(
+        self,
+        now: datetime,
+        limit: int = 20,
+    ) -> list[EvidenceCandidate]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT candidate_id, ticker, source_kind, headline, source_name, "
+                "source_url, published_at, source_text, external_id, metadata_json "
+                "FROM evidence_candidates "
+                "WHERE status IN ('pending', 'failed') "
+                "AND next_attempt_at <= ? "
+                "ORDER BY published_at, first_seen_at LIMIT ?",
+                (_utc_iso(now), limit),
+            ).fetchall()
+        return [
+            EvidenceCandidate(
+                candidate_id=row["candidate_id"],
+                ticker=row["ticker"],
+                kind=EvidenceKind(row["source_kind"]),
+                headline=row["headline"],
+                source_name=row["source_name"],
+                source_url=row["source_url"],
+                published_at=_required_datetime(row["published_at"]),
+                source_text=row["source_text"],
+                external_id=row["external_id"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
+    def update_evidence_source_text(
+        self,
+        candidate_id: str,
+        source_text: str,
+    ) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "UPDATE evidence_candidates SET source_text = ? WHERE candidate_id = ?",
+                (source_text, candidate_id),
+            )
+
+    def evidence_cluster_key(self, candidate_id: str) -> str:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT ticker, cluster_key FROM evidence_candidates "
+                "WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+        if row is None:
+            return ""
+        return row["cluster_key"] or f"{row['ticker']}:evidence:{candidate_id}"
+
+    def record_evidence_analysis(
+        self,
+        candidate_id: str,
+        analysis: EvidenceAnalysis,
+        analyzed_at: datetime,
+        alert: AlertRecord | None = None,
+    ) -> bool:
+        payload = _analysis_payload(analysis)
+        analyzed_at_iso = _utc_iso(analyzed_at)
+        inserted_alert = False
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE evidence_candidates SET status = 'analyzed', status_reason = ?, "
+                "analysis_json = ?, last_attempt_at = ?, next_attempt_at = NULL, "
+                "attempt_count = attempt_count + 1, last_error = '' WHERE candidate_id = ?",
+                (
+                    "relevant" if analysis.relevant else "not relevant",
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    analyzed_at_iso,
+                    candidate_id,
+                ),
+            )
+            if alert is not None:
+                alert_payload = json.dumps(
+                    alert.payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                inserted_alert = bool(
+                    connection.execute(
+                        "INSERT OR IGNORE INTO alerts "
+                        "(event_key, ticker, alert_type, created_at, payload_json) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            alert.event_key,
+                            alert.ticker.upper(),
+                            alert.alert_type,
+                            _utc_iso(alert.created_at),
+                            alert_payload,
+                        ),
+                    ).rowcount
+                )
+                if inserted_alert:
+                    connection.execute(
+                        "INSERT INTO outbox (event_key, payload_json, next_attempt_at) "
+                        "VALUES (?, ?, ?)",
+                        (alert.event_key, alert_payload, analyzed_at_iso),
+                    )
+        return inserted_alert
+
+    def recent_catalysts(
+        self,
+        ticker: str,
+        since: datetime,
+        limit: int = 2,
+    ) -> list[Catalyst]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT candidate_id, cluster_key, headline, source_name, source_url, "
+                "published_at, source_kind, analysis_json FROM evidence_candidates "
+                "WHERE ticker = ? AND status = 'analyzed' AND published_at >= ? "
+                "AND json_extract(analysis_json, '$.relevant') = 1 "
+                "ORDER BY published_at DESC LIMIT 30",
+                (ticker.upper(), _utc_iso(since)),
+            ).fetchall()
+        catalysts = []
+        for row in rows:
+            payload = json.loads(row["analysis_json"])
+            catalysts.append(
+                Catalyst(
+                    canonical_id=row["cluster_key"] or row["candidate_id"],
+                    headline=payload["headline_ko"],
+                    summary=payload["summary_ko"],
+                    source_name=row["source_name"],
+                    source_url=row["source_url"],
+                    published_at=_required_datetime(row["published_at"]),
+                    impact=ThesisImpact(payload["thesis_impact"]),
+                    confidence=payload["confidence"],
+                    facts=tuple(
+                        fact["fact_ko"] for fact in payload.get("facts") or []
+                    ),
+                )
+            )
+        impact_rank = {
+            ThesisImpact.DAMAGE: 4,
+            ThesisImpact.RISK: 3,
+            ThesisImpact.STRENGTHEN: 2,
+            ThesisImpact.NEUTRAL: 1,
+        }
+        catalysts.sort(
+            key=lambda item: (impact_rank[item.impact], item.published_at),
+            reverse=True,
+        )
+        return catalysts[:limit]
+
+    def mark_evidence_analyzed(
+        self,
+        candidate_id: str,
+        analysis: EvidenceAnalysis,
+        analyzed_at: datetime,
+    ) -> None:
+        self.record_evidence_analysis(candidate_id, analysis, analyzed_at)
+
+    def mark_evidence_failed(
+        self,
+        candidate_id: str,
+        attempted_at: datetime,
+        next_attempt_at: datetime,
+        error: str,
+    ) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "UPDATE evidence_candidates SET status = 'failed', last_attempt_at = ?, "
+                "next_attempt_at = ?, attempt_count = attempt_count + 1, last_error = ? "
+                "WHERE candidate_id = ?",
+                (
+                    _utc_iso(attempted_at),
+                    _utc_iso(next_attempt_at),
+                    error[:1000],
+                    candidate_id,
+                ),
+            )
+
     def pending_deliveries(self, now: datetime, limit: int = 20) -> list[PendingDelivery]:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
@@ -526,6 +812,98 @@ def _utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("runtime timestamps must be timezone-aware")
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _insert_evidence_decisions(
+    connection: sqlite3.Connection,
+    decisions: Sequence[CandidateDecision],
+    cluster_keys: Mapping[str, str],
+    seen_at_iso: str,
+) -> tuple[str, ...]:
+    inserted_pending: list[str] = []
+    for decision in decisions:
+        candidate = decision.candidate
+        raw = decision.raw
+        if candidate is not None:
+            candidate_id = candidate.candidate_id
+            ticker = candidate.ticker.upper()
+            source_kind = candidate.kind.value
+            headline = candidate.headline
+            source_name = candidate.source_name
+            source_url = candidate.source_url
+            published_at = _utc_iso(candidate.published_at)
+            source_text = candidate.source_text
+            external_id = candidate.external_id
+            metadata = dict(candidate.metadata)
+        elif raw is not None:
+            candidate_id = candidate_identity(raw)
+            ticker = raw.ticker.upper()
+            source_kind = raw.kind.value
+            headline = raw.headline
+            source_name = raw.source_name
+            source_url = raw.source_url
+            published_at = (
+                _utc_iso(raw.published_at)
+                if raw.published_at is not None and raw.published_at.tzinfo
+                else None
+            )
+            source_text = raw.source_text
+            external_id = raw.external_id
+            metadata = dict(raw.metadata)
+        else:
+            continue
+        inserted = connection.execute(
+            "INSERT OR IGNORE INTO evidence_candidates "
+            "(candidate_id, ticker, source_kind, headline, source_name, "
+            "source_url, published_at, source_text, external_id, metadata_json, "
+            "cluster_key, status, status_reason, first_seen_at, last_seen_at, "
+            "next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                candidate_id,
+                ticker,
+                source_kind,
+                headline,
+                source_name,
+                source_url,
+                published_at,
+                source_text,
+                external_id,
+                json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+                cluster_keys.get(candidate_id, ""),
+                decision.status.value,
+                decision.reason,
+                seen_at_iso,
+                seen_at_iso,
+                seen_at_iso if decision.status is EvidenceStatus.PENDING else None,
+            ),
+        ).rowcount
+        if inserted and decision.status is EvidenceStatus.PENDING:
+            inserted_pending.append(candidate_id)
+        if not inserted:
+            connection.execute(
+                "UPDATE evidence_candidates SET last_seen_at = ?, "
+                "cluster_key = CASE WHEN cluster_key = '' THEN ? ELSE cluster_key END "
+                "WHERE candidate_id = ?",
+                (seen_at_iso, cluster_keys.get(candidate_id, ""), candidate_id),
+            )
+    return tuple(inserted_pending)
+
+
+def _analysis_payload(analysis: EvidenceAnalysis) -> dict[str, object]:
+    return {
+        "candidate_id": analysis.candidate_id,
+        "relevant": analysis.relevant,
+        "headline_ko": analysis.headline_ko,
+        "summary_ko": analysis.summary_ko,
+        "facts": [
+            {"source_text": fact.source_text, "fact_ko": fact.fact_ko}
+            for fact in analysis.facts
+        ],
+        "interpretation_ko": analysis.interpretation_ko,
+        "thesis_impact": analysis.thesis_impact,
+        "impact_reason_ko": analysis.impact_reason_ko,
+        "confidence": analysis.confidence,
+    }
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
