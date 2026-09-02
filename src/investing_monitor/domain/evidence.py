@@ -136,6 +136,13 @@ class EvidenceDocument:
     metadata: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AnalyzedEvidence:
+    candidate: EvidenceCandidate
+    analysis: EvidenceAnalysis
+    cluster_key: str
+
+
 def candidate_identity(raw: RawEvidenceCandidate) -> str:
     parts = urlsplit(raw.source_url.strip())
     canonical_url = urlunsplit(

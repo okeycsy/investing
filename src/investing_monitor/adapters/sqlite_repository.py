@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from investing_monitor.domain.evidence import (
+    AnalyzedEvidence,
     CandidateDecision,
     EvidenceAnalysis,
     EvidenceCandidate,
     EvidenceKind,
     EvidenceStatus,
+    GroundedFact,
     candidate_identity,
 )
 from investing_monitor.domain.models import (
@@ -496,6 +498,38 @@ class SQLiteMonitorRepository:
             return ""
         return row["cluster_key"] or f"{row['ticker']}:evidence:{candidate_id}"
 
+    def link_evidence_cluster(self, candidate_id: str, cluster_key: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "UPDATE evidence_candidates SET cluster_key = ? WHERE candidate_id = ?",
+                (cluster_key, candidate_id),
+            )
+
+    def recent_analyzed_evidence(
+        self,
+        ticker: str,
+        since: datetime,
+        limit: int = 30,
+    ) -> list[AnalyzedEvidence]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT candidate_id, ticker, source_kind, headline, source_name, "
+                "source_url, published_at, source_text, external_id, metadata_json, "
+                "cluster_key, analysis_json FROM evidence_candidates "
+                "WHERE ticker = ? AND status = 'analyzed' AND published_at >= ? "
+                "AND json_extract(analysis_json, '$.relevant') = 1 "
+                "ORDER BY published_at DESC LIMIT ?",
+                (ticker.upper(), _utc_iso(since), limit),
+            ).fetchall()
+        return [
+            AnalyzedEvidence(
+                candidate=_candidate_from_row(row),
+                analysis=_analysis_from_payload(json.loads(row["analysis_json"])),
+                cluster_key=row["cluster_key"] or row["candidate_id"],
+            )
+            for row in rows
+        ]
+
     def record_evidence_analysis(
         self,
         candidate_id: str,
@@ -948,6 +982,42 @@ def _analysis_payload(analysis: EvidenceAnalysis) -> dict[str, object]:
         "impact_reason_ko": analysis.impact_reason_ko,
         "confidence": analysis.confidence,
     }
+
+
+def _analysis_from_payload(payload: Mapping[str, object]) -> EvidenceAnalysis:
+    return EvidenceAnalysis(
+        candidate_id=str(payload.get("candidate_id") or ""),
+        relevant=bool(payload.get("relevant")),
+        headline_ko=str(payload.get("headline_ko") or ""),
+        summary_ko=str(payload.get("summary_ko") or ""),
+        facts=tuple(
+            GroundedFact(
+                source_text=str(fact.get("source_text") or ""),
+                fact_ko=str(fact.get("fact_ko") or ""),
+            )
+            for fact in payload.get("facts") or []
+            if isinstance(fact, dict)
+        ),
+        interpretation_ko=str(payload.get("interpretation_ko") or ""),
+        thesis_impact=str(payload.get("thesis_impact") or "neutral"),
+        impact_reason_ko=str(payload.get("impact_reason_ko") or ""),
+        confidence=str(payload.get("confidence") or "medium"),
+    )
+
+
+def _candidate_from_row(row: sqlite3.Row) -> EvidenceCandidate:
+    return EvidenceCandidate(
+        candidate_id=row["candidate_id"],
+        ticker=row["ticker"],
+        kind=EvidenceKind(row["source_kind"]),
+        headline=row["headline"],
+        source_name=row["source_name"],
+        source_url=row["source_url"],
+        published_at=_required_datetime(row["published_at"]),
+        source_text=row["source_text"],
+        external_id=row["external_id"],
+        metadata=json.loads(row["metadata_json"]),
+    )
 
 
 def _parse_datetime(value: str | None) -> datetime | None:

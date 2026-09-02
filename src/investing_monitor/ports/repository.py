@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Mapping, Protocol, Sequence
 
 from investing_monitor.domain.evidence import (
+    AnalyzedEvidence,
     CandidateDecision,
     EvidenceAnalysis,
     EvidenceCandidate,
@@ -94,6 +95,15 @@ class MonitorRepository(Protocol):
     ) -> None: ...
 
     def evidence_cluster_key(self, candidate_id: str) -> str: ...
+
+    def link_evidence_cluster(self, candidate_id: str, cluster_key: str) -> None: ...
+
+    def recent_analyzed_evidence(
+        self,
+        ticker: str,
+        since: datetime,
+        limit: int = 30,
+    ) -> list[AnalyzedEvidence]: ...
 
     def record_evidence_analysis(
         self,

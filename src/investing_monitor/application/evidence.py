@@ -104,6 +104,12 @@ STOP_WORDS = {
     "the",
     "to",
     "with",
+    "ai",
+    "announce",
+    "center",
+    "data",
+    "vertiv",
+    "vrt",
 }
 
 
@@ -242,11 +248,12 @@ def _representative(candidates: list[EvidenceCandidate]) -> EvidenceCandidate:
 
 def _event_tokens(value: str) -> set[str]:
     camel_split = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value)
-    tokens = re.findall(r"[a-z0-9]+", camel_split.lower())
+    tokens = re.findall(r"[a-z0-9가-힣]+", camel_split.lower())
     return {
-        TOKEN_ALIASES.get(token, token)
+        normalized
         for token in tokens
-        if token not in STOP_WORDS and len(token) > 1
+        if len(token) > 1
+        if (normalized := TOKEN_ALIASES.get(token, token)) not in STOP_WORDS
     }
 
 
@@ -254,6 +261,39 @@ def _overlap(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
     return len(left & right) / min(len(left), len(right))
+
+
+def same_evidence_event(
+    left_candidate: EvidenceCandidate,
+    left_analysis: EvidenceAnalysis,
+    right_candidate: EvidenceCandidate,
+    right_analysis: EvidenceAnalysis,
+    *,
+    window: timedelta = timedelta(hours=24),
+) -> bool:
+    if abs(left_candidate.published_at - right_candidate.published_at) > window:
+        return False
+    similarities = []
+    for left in _event_signatures(left_candidate, left_analysis):
+        for right in _event_signatures(right_candidate, right_analysis):
+            shared = left & right
+            if len(shared) >= 2:
+                similarities.append(_overlap(left, right))
+    return bool(similarities) and max(similarities) >= 0.5
+
+
+def _event_signatures(
+    candidate: EvidenceCandidate,
+    analysis: EvidenceAnalysis,
+) -> tuple[set[str], ...]:
+    return tuple(
+        tokens
+        for tokens in (
+            _event_tokens(candidate.headline),
+            _event_tokens(analysis.headline_ko),
+        )
+        if tokens
+    )
 
 
 def _canonical_url(value: str) -> str:
@@ -582,6 +622,21 @@ class EvidenceIngestionService:
     ) -> AlertRecord | None:
         if not analysis.relevant or self.alert_builder is None:
             return None
+        for existing in self.repository.recent_analyzed_evidence(
+            candidate.ticker,
+            candidate.published_at - timedelta(hours=24),
+        ):
+            if same_evidence_event(
+                candidate,
+                analysis,
+                existing.candidate,
+                existing.analysis,
+            ):
+                self.repository.link_evidence_cluster(
+                    candidate.candidate_id,
+                    existing.cluster_key,
+                )
+                return None
         return AlertRecord(
             event_key=self.repository.evidence_cluster_key(candidate.candidate_id),
             ticker=candidate.ticker,

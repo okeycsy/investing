@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -40,6 +42,7 @@ from investing_monitor.adapters.yahoo_news import (
 from investing_monitor.application.evidence import (
     EvidenceIngestionService,
     cluster_candidates,
+    same_evidence_event,
     screen_candidate,
 )
 from investing_monitor.application.sec_monitor import SecMonitorService
@@ -287,6 +290,75 @@ class EvidenceClusteringTest(unittest.TestCase):
         cluster = cluster_candidates([official, wire])[0]
 
         self.assertEqual(cluster.representative.source_name, "PR Newswire")
+
+    def test_news_and_sec_analysis_of_same_acquisition_match(self):
+        news = screen_candidate(
+            raw(
+                "Vertiv Announces Agreement to Acquire UtilityInnovation Group",
+                source_text=(
+                    "Vertiv will acquire UtilityInnovation Group for $1.45 billion."
+                ),
+            ),
+            PROFILE,
+        ).candidate
+        filing = screen_candidate(
+            raw(
+                "Current report",
+                kind=EvidenceKind.SEC,
+                source_name="SEC EDGAR",
+                source_url="https://www.sec.gov/acquisition",
+                source_text=(
+                    "Item 7.01. Vertiv entered an agreement to acquire "
+                    "UtilityInnovation Group for $1.45 billion. " * 5
+                ),
+                metadata={"form": "8-K", "items": ("7.01", "9.01")},
+            ),
+            PROFILE,
+        ).candidate
+        news_analysis = EvidenceAnalysis(
+            candidate_id=news.candidate_id,
+            relevant=True,
+            headline_ko="버티브, UtilityInnovation Group 14.5억 달러에 인수",
+        )
+        filing_analysis = EvidenceAnalysis(
+            candidate_id=filing.candidate_id,
+            relevant=True,
+            headline_ko="버티브, UtilityInnovation 인수 계약 공시",
+        )
+
+        self.assertTrue(
+            same_evidence_event(news, news_analysis, filing, filing_analysis)
+        )
+
+    def test_different_same_day_events_do_not_match(self):
+        acquisition = screen_candidate(
+            raw("Vertiv acquires UtilityInnovation Group"),
+            PROFILE,
+        ).candidate
+        earnings = screen_candidate(
+            raw(
+                "Vertiv raises full-year guidance after quarterly earnings",
+                source_url="https://example.com/earnings",
+            ),
+            PROFILE,
+        ).candidate
+
+        self.assertFalse(
+            same_evidence_event(
+                acquisition,
+                EvidenceAnalysis(
+                    candidate_id=acquisition.candidate_id,
+                    relevant=True,
+                    headline_ko="버티브, 유틸리티이노베이션 인수",
+                ),
+                earnings,
+                EvidenceAnalysis(
+                    candidate_id=earnings.candidate_id,
+                    relevant=True,
+                    headline_ko="버티브, 연간 가이던스 상향",
+                ),
+            )
+        )
 
 
 class EvidenceFeedTest(unittest.TestCase):
@@ -648,6 +720,78 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
 
 
 class EvidenceIngestionServiceTest(unittest.TestCase):
+    def test_later_sec_filing_links_to_news_event_without_second_alert(self):
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                analyses = {}
+                for candidate in candidates:
+                    is_filing = candidate.kind is EvidenceKind.SEC
+                    fact_text = (
+                        "UtilityInnovation Group for $1.45 billion"
+                        if is_filing
+                        else "acquire UtilityInnovation Group for $1.45 billion"
+                    )
+                    analyses[candidate.candidate_id] = EvidenceAnalysis(
+                        candidate_id=candidate.candidate_id,
+                        relevant=True,
+                        headline_ko=(
+                            "버티브, UtilityInnovation 인수 계약 공시"
+                            if is_filing
+                            else "버티브, UtilityInnovation 14.5억 달러에 인수"
+                        ),
+                        summary_ko="유틸리티이노베이션 인수 계약을 발표했다.",
+                        facts=(GroundedFact(fact_text, "인수 계약을 체결했다."),),
+                        interpretation_ko="전력 솔루션 범위가 확대된다.",
+                        thesis_impact="strengthen",
+                        impact_reason_ko="AI 전력 병목 대응 범위가 넓어진다.",
+                        confidence="high",
+                    )
+                return EvidenceAnalysisBatch(analyses=analyses, errors={})
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+            )
+            news = raw(
+                "Vertiv to acquire UtilityInnovation Group for $1.45 billion",
+                source_text=(
+                    "Vertiv agreed to acquire UtilityInnovation Group for "
+                    "$1.45 billion."
+                ),
+            )
+            filing = raw(
+                "Current report",
+                kind=EvidenceKind.SEC,
+                minute=30,
+                source_name="SEC EDGAR",
+                source_url="https://www.sec.gov/acquisition",
+                source_text=(
+                    "Item 7.01. Vertiv entered an agreement to acquire "
+                    "UtilityInnovation Group for $1.45 billion. " * 5
+                ),
+                metadata={"form": "8-K", "items": ("7.01", "9.01")},
+            )
+
+            news_report = service.ingest([news], NOW)
+            filing_report = service.ingest([filing], NOW + timedelta(minutes=30))
+
+            self.assertEqual(news_report.alerts, 1)
+            self.assertEqual(filing_report.alerts, 0)
+            self.assertEqual(len(repository.pending_deliveries(NOW + timedelta(hours=1))), 1)
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                clusters = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT cluster_key FROM evidence_candidates "
+                        "WHERE status = 'analyzed'"
+                    )
+                }
+            self.assertEqual(len(clusters), 1)
+
     def test_cluster_duplicate_is_not_analyzed_and_representative_is_enriched(self):
         class Analyzer:
             def __init__(self):
