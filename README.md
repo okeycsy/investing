@@ -1,5 +1,11 @@
 # Ticker Thesis Monitor
 
+> `hood_monitor`는 현재 안정성 중심으로 재개발 중입니다. 제품 진단, 알림 계약,
+> 목표 아키텍처와 단계별 전환 기준은
+> [HOOD Monitor 재개발 기준서](docs/HOOD_MONITOR_REBUILD.md)를 따릅니다.
+> `src/investing_monitor`는 기존 운영 경로와 분리된 새 코어이며 아직 production
+> Slack을 대신하지 않습니다.
+
 GitHub Actions 기반 단일 종목 투자 논지 모니터입니다. 현재 기본 종목은 `$VRT`입니다. 가격 화면이 아니라 중요 뉴스, 발행사 SEC 공시, 내부자 거래, 장마감 상대 성과와 주간 논지 변화를 Slack으로 전달합니다.
 
 제품 동작과 표시 금지사항은 `HOOD_MONITOR_PRODUCT.md`에 고정되어 있습니다.

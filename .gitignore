@@ -6,3 +6,6 @@ __pycache__/
 venv/
 outputs/
 *.log
+*.db
+*.db-shm
+*.db-wal
