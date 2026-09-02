@@ -151,6 +151,11 @@ class QualityReportTest(unittest.TestCase):
             self.assertEqual(report.runtime["max_schedule_start_delay_seconds"], 12 * 60)
             self.assertEqual(report.runtime["schedule_starts_over_10_minutes"], 1)
             self.assertEqual(report.runtime["max_schedule_interval_seconds"], 0)
+            self.assertEqual(report.shadow_validation["status"], "observing")
+            self.assertIn(
+                "scheduler_cadence_within_slo",
+                report.shadow_validation["blocked_reasons"],
+            )
             self.assertEqual(report.runtime["planned_tasks"], {"market": 1})
             self.assertEqual(report.runtime["succeeded_tasks"], {"market": 1})
             self.assertEqual(
@@ -194,12 +199,13 @@ class QualityReportTest(unittest.TestCase):
             self.assertEqual(report.runtime["scheduler_status"], "unobserved")
             self.assertEqual(report.runtime["schedule_runs_checked"], 0)
             self.assertIsNone(report.runtime["latest_schedule_started_at"])
+            self.assertEqual(report.shadow_validation["status"], "blocked")
 
     def test_scheduler_health_uses_real_same_session_run_intervals(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
             for run_id, started_at in (
-                ("schedule-1", NOW - timedelta(minutes=20)),
+                ("schedule-1", NOW - timedelta(minutes=25)),
                 ("schedule-2", NOW),
             ):
                 repository.start_run(
@@ -218,8 +224,66 @@ class QualityReportTest(unittest.TestCase):
             report = QualityReportService(repository).build()
 
             self.assertEqual(report.runtime["scheduler_status"], "degraded")
-            self.assertEqual(report.runtime["max_schedule_interval_seconds"], 20 * 60)
+            self.assertEqual(report.runtime["max_schedule_interval_seconds"], 25 * 60)
+            self.assertEqual(report.runtime["p95_schedule_interval_seconds"], 25 * 60)
             self.assertEqual(report.runtime["schedule_intervals_over_15_minutes"], 1)
+
+    def test_two_complete_shadow_days_unlock_test_slack_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            repository.record_alert(
+                AlertRecord(
+                    event_key="VRT:2026-09-02:close",
+                    ticker="VRT",
+                    alert_type="daily_close",
+                    created_at=NOW,
+                    payload=valid_close_payload(),
+                ),
+                enqueue=False,
+            )
+            for day in (1, 2):
+                session_start = datetime(2026, 9, day, 13, 30, tzinfo=timezone.utc)
+                for index in range(37):
+                    started_at = session_start + timedelta(minutes=index * 10)
+                    repository.start_run(
+                        f"schedule-{day}-{index}",
+                        scheduled_at=started_at,
+                        started_at=started_at,
+                        gap_seconds=0,
+                    )
+                    repository.finish_run(
+                        f"schedule-{day}-{index}",
+                        completed_at=started_at + timedelta(seconds=2),
+                        status="success",
+                        summary={
+                            "trigger": "schedule",
+                            "plan": {"tasks": []},
+                            "details": {
+                                "market": {
+                                    "task": "market",
+                                    "status": "success",
+                                    "duration_ms": 10,
+                                    "metadata": {
+                                        "providers": {
+                                            "yahoo_market": {
+                                                "status": "success",
+                                                "latency_ms": 8,
+                                            }
+                                        }
+                                    },
+                                }
+                            },
+                        },
+                    )
+
+            report = QualityReportService(repository).build()
+
+            self.assertEqual(report.runtime["scheduler_status"], "healthy")
+            self.assertEqual(report.runtime["median_schedule_interval_seconds"], 600)
+            self.assertEqual(report.runtime["p95_schedule_interval_seconds"], 600)
+            self.assertIn("yahoo_market", report.runtime["scheduled_provider_health"])
+            self.assertEqual(report.shadow_validation["full_shadow_days"], 2)
+            self.assertEqual(report.shadow_validation["status"], "ready_for_test_slack")
 
 
 if __name__ == "__main__":
