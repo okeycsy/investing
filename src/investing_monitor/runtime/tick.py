@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone
+from enum import Enum
+from typing import Protocol
+from zoneinfo import ZoneInfo
+
+from investing_monitor.ports.runtime import RuntimeRepository, TaskCheckpoint
+
+
+NEW_YORK = ZoneInfo("America/New_York")
+SEOUL = ZoneInfo("Asia/Seoul")
+
+
+class TickTask(str, Enum):
+    RECOVERY = "recovery"
+    MARKET = "market"
+    NEWS = "news"
+    SEC = "sec"
+    CLOSE = "close"
+    WEEKLY = "weekly"
+    THIRTEEN_F = "13f"
+    DELIVERY = "delivery"
+
+
+@dataclass(frozen=True)
+class PlannedTask:
+    name: TickTask
+    checkpoint_key: str
+    due_since: datetime | None = None
+
+
+@dataclass(frozen=True)
+class TickPlan:
+    now: datetime
+    gap_seconds: int
+    tasks: tuple[PlannedTask, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "now": self.now.astimezone(timezone.utc).isoformat(),
+            "gap_seconds": self.gap_seconds,
+            "tasks": [
+                {
+                    "name": task.name.value,
+                    "checkpoint_key": task.checkpoint_key,
+                    "due_since": (
+                        task.due_since.astimezone(timezone.utc).isoformat()
+                        if task.due_since
+                        else None
+                    ),
+                }
+                for task in self.tasks
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class TickSchedule:
+    market_interval: timedelta = timedelta(minutes=5)
+    active_news_interval: timedelta = timedelta(minutes=5)
+    active_sec_interval: timedelta = timedelta(minutes=10)
+    off_hours_source_interval: timedelta = timedelta(minutes=30)
+    recovery_gap: timedelta = timedelta(minutes=10)
+    close_delay: timedelta = timedelta(minutes=15)
+    stale_close_after: timedelta = timedelta(hours=16)
+
+
+class TradingCalendar(Protocol):
+    def is_trading_day(self, value: date) -> bool: ...
+
+    def regular_close(self, value: date) -> datetime: ...
+
+
+class WeekdayTradingCalendar:
+    """Fallback calendar used until the exchange-calendar adapter is connected."""
+
+    def is_trading_day(self, value: date) -> bool:
+        return value.weekday() < 5
+
+    def regular_close(self, value: date) -> datetime:
+        return datetime.combine(value, time(16, 0), tzinfo=NEW_YORK)
+
+
+class TickPlanner:
+    def __init__(
+        self,
+        *,
+        schedule: TickSchedule | None = None,
+        calendar: TradingCalendar | None = None,
+    ) -> None:
+        self.schedule = schedule or TickSchedule()
+        self.calendar = calendar or WeekdayTradingCalendar()
+
+    def plan(
+        self,
+        now: datetime,
+        checkpoints: Mapping[str, TaskCheckpoint],
+        *,
+        last_completed_run_at: datetime | None,
+    ) -> TickPlan:
+        now = _aware_utc(now)
+        gap_seconds = _gap_seconds(now, last_completed_run_at)
+        tasks: list[PlannedTask] = []
+
+        if last_completed_run_at and gap_seconds >= int(self.schedule.recovery_gap.total_seconds()):
+            tasks.append(
+                PlannedTask(
+                    TickTask.RECOVERY,
+                    f"recovery:{int(last_completed_run_at.timestamp())}",
+                    last_completed_run_at,
+                )
+            )
+
+        ny_now = now.astimezone(NEW_YORK)
+        trading_day = self.calendar.is_trading_day(ny_now.date())
+        active_session = trading_day and time(4, 0) <= ny_now.time() < time(20, 0)
+
+        if active_session and _is_due(
+            checkpoints.get(TickTask.MARKET.value),
+            now,
+            self.schedule.market_interval,
+        ):
+            tasks.append(PlannedTask(TickTask.MARKET, TickTask.MARKET.value))
+
+        news_interval = (
+            self.schedule.active_news_interval
+            if active_session
+            else self.schedule.off_hours_source_interval
+        )
+        if _is_due(checkpoints.get(TickTask.NEWS.value), now, news_interval):
+            tasks.append(PlannedTask(TickTask.NEWS, TickTask.NEWS.value))
+
+        sec_interval = (
+            self.schedule.active_sec_interval
+            if active_session
+            else self.schedule.off_hours_source_interval
+        )
+        if _is_due(checkpoints.get(TickTask.SEC.value), now, sec_interval):
+            tasks.append(PlannedTask(TickTask.SEC, TickTask.SEC.value))
+
+        close_date = self._due_close_date(ny_now)
+        if close_date is not None:
+            close_key = f"close:{close_date.isoformat()}"
+            if not _was_successful(checkpoints.get(close_key)):
+                close_at = self.calendar.regular_close(close_date) + self.schedule.close_delay
+                tasks.append(PlannedTask(TickTask.CLOSE, close_key, close_at))
+
+        seoul_now = now.astimezone(SEOUL)
+        weekly_key = f"weekly:{seoul_now.strftime('%G-W%V')}"
+        if (
+            seoul_now.weekday() == 0
+            and seoul_now.time() >= time(8, 10)
+            and not _was_successful(checkpoints.get(weekly_key))
+        ):
+            tasks.append(PlannedTask(TickTask.WEEKLY, weekly_key))
+
+        thirteen_f_key = f"13f:{seoul_now.strftime('%G-W%V')}"
+        if (
+            seoul_now.weekday() == 5
+            and seoul_now.time() >= time(19, 0)
+            and not _was_successful(checkpoints.get(thirteen_f_key))
+        ):
+            tasks.append(PlannedTask(TickTask.THIRTEEN_F, thirteen_f_key))
+
+        tasks.append(PlannedTask(TickTask.DELIVERY, TickTask.DELIVERY.value))
+        return TickPlan(now=now, gap_seconds=gap_seconds, tasks=tuple(tasks))
+
+    def _due_close_date(self, ny_now: datetime) -> date | None:
+        candidate = ny_now.date()
+        if not self.calendar.is_trading_day(candidate) or ny_now.time() < time(4, 0):
+            candidate = self._previous_trading_day(candidate)
+        close_at = self.calendar.regular_close(candidate) + self.schedule.close_delay
+        if ny_now < close_at or ny_now - close_at > self.schedule.stale_close_after:
+            return None
+        return candidate
+
+    def _previous_trading_day(self, value: date) -> date:
+        candidate = value - timedelta(days=1)
+        while not self.calendar.is_trading_day(candidate):
+            candidate -= timedelta(days=1)
+        return candidate
+
+
+TaskHandler = Callable[[PlannedTask], Mapping[str, object] | None]
+
+
+@dataclass(frozen=True)
+class TickExecutionReport:
+    run_id: str
+    status: str
+    plan: TickPlan
+    succeeded: tuple[str, ...] = ()
+    failed: Mapping[str, str] = field(default_factory=dict)
+    skipped: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "plan": self.plan.as_dict(),
+            "succeeded": list(self.succeeded),
+            "failed": dict(self.failed),
+            "skipped": list(self.skipped),
+        }
+
+
+class TickRunner:
+    def __init__(
+        self,
+        repository: RuntimeRepository,
+        handlers: Mapping[TickTask, TaskHandler],
+        *,
+        planner: TickPlanner | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.repository = repository
+        self.handlers = handlers
+        self.planner = planner or TickPlanner()
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def run(
+        self,
+        run_id: str,
+        *,
+        scheduled_at: datetime,
+        started_at: datetime | None = None,
+    ) -> TickExecutionReport:
+        started_at = _aware_utc(started_at or self.clock())
+        last_run = self.repository.last_completed_run_at()
+        plan = self.planner.plan(
+            started_at,
+            self.repository.task_checkpoints(),
+            last_completed_run_at=last_run,
+        )
+        self.repository.start_run(
+            run_id,
+            scheduled_at=_aware_utc(scheduled_at),
+            started_at=started_at,
+            gap_seconds=plan.gap_seconds,
+        )
+
+        succeeded: list[str] = []
+        failed: dict[str, str] = {}
+        skipped: list[str] = []
+        for task in plan.tasks:
+            handler = self.handlers.get(task.name)
+            if handler is None:
+                skipped.append(task.checkpoint_key)
+                continue
+            attempted_at = _aware_utc(self.clock())
+            self.repository.mark_task_started(task.checkpoint_key, task.name.value, attempted_at)
+            try:
+                metadata = handler(task) or {}
+            except Exception as exc:  # task isolation is the runtime contract
+                failed[task.checkpoint_key] = str(exc)
+                self.repository.mark_task_failed(
+                    task.checkpoint_key,
+                    task.name.value,
+                    attempted_at,
+                    str(exc),
+                )
+                continue
+            completed_at = _aware_utc(self.clock())
+            self.repository.mark_task_succeeded(
+                task.checkpoint_key,
+                task.name.value,
+                completed_at,
+                metadata,
+            )
+            succeeded.append(task.checkpoint_key)
+
+        status = "partial" if failed or skipped else "success"
+        report = TickExecutionReport(
+            run_id=run_id,
+            status=status,
+            plan=plan,
+            succeeded=tuple(succeeded),
+            failed=failed,
+            skipped=tuple(skipped),
+        )
+        self.repository.finish_run(
+            run_id,
+            completed_at=_aware_utc(self.clock()),
+            status=status,
+            summary=report.as_dict(),
+        )
+        return report
+
+
+def _is_due(checkpoint: TaskCheckpoint | None, now: datetime, interval: timedelta) -> bool:
+    if checkpoint is None or checkpoint.last_success_at is None:
+        return True
+    return now - checkpoint.last_success_at.astimezone(timezone.utc) >= interval
+
+
+def _was_successful(checkpoint: TaskCheckpoint | None) -> bool:
+    return checkpoint is not None and checkpoint.last_success_at is not None
+
+
+def _gap_seconds(now: datetime, last_completed_run_at: datetime | None) -> int:
+    if last_completed_run_at is None:
+        return 0
+    return max(
+        0,
+        int((now - last_completed_run_at.astimezone(timezone.utc)).total_seconds()),
+    )
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("tick timestamps must be timezone-aware")
+    return value.astimezone(timezone.utc)

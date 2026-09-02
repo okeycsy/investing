@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from investing_monitor.adapters.sqlite_repository import SQLiteMonitorRepository
-from investing_monitor.application.monitor import MarketMonitorService
+from investing_monitor.application.monitor import MarketMonitorService, OutboxDeliveryService
 from investing_monitor.domain.models import (
     Catalyst,
     Direction,
@@ -28,6 +30,7 @@ from investing_monitor.domain.policies import (
     assess_intraday_volume,
     assess_relative_performance,
 )
+from investing_monitor.ports.providers import DeliveryOutcomeUnknown
 from investing_monitor.presentation.slack_messages import build_price_band_message
 
 
@@ -195,6 +198,33 @@ class RepositoryContractTest(unittest.TestCase):
             self.assertEqual(before_retry, [])
             self.assertEqual(at_retry[0].attempts, 1)
             self.assertIn("-4% 하락 구간 진입", json.dumps(at_retry[0].payload, ensure_ascii=False))
+
+
+class DeliveryContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_ambiguous_provider_failure_is_not_retried_automatically(self):
+        class AmbiguousNotifier:
+            async def send(self, _payload):
+                raise DeliveryOutcomeUnknown("timeout after request body was sent")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            repository = SQLiteMonitorRepository(path)
+            MarketMonitorService(repository).handle_snapshot(snapshot(4.4))
+            service = OutboxDeliveryService(repository, AmbiguousNotifier())
+
+            delivered = await service.deliver_pending()
+
+            self.assertEqual(delivered, 0)
+            self.assertEqual(
+                repository.pending_deliveries(OBSERVED_AT + timedelta(days=1)),
+                [],
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                status, attempts = connection.execute(
+                    "SELECT delivery_status, attempts FROM outbox"
+                ).fetchone()
+            self.assertEqual(status, "delivery_unknown")
+            self.assertEqual(attempts, 1)
 
 
 if __name__ == "__main__":

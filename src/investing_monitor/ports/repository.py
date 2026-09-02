@@ -13,6 +13,7 @@ class PendingDelivery:
     event_key: str
     payload: dict
     attempts: int
+    status: str = "pending"
 
 
 class MonitorRepository(Protocol):
@@ -27,6 +28,10 @@ class MonitorRepository(Protocol):
 
     def pending_deliveries(self, now: datetime, limit: int = 20) -> list[PendingDelivery]: ...
 
+    def mark_sending(self, outbox_id: int, attempted_at: datetime) -> None: ...
+
     def mark_delivered(self, outbox_id: int, delivered_at: datetime, receipt: str = "") -> None: ...
 
     def mark_failed(self, outbox_id: int, next_attempt_at: datetime, error: str) -> None: ...
+
+    def mark_delivery_unknown(self, outbox_id: int, attempted_at: datetime, error: str) -> None: ...

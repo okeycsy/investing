@@ -9,3 +9,5 @@ outputs/
 *.db
 *.db-shm
 *.db-wal
+.runtime/
+*.egg-info/

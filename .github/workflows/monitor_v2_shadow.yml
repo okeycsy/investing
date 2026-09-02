@@ -1,0 +1,81 @@
+name: Monitor V2 Runtime Shadow
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/monitor_v2_shadow.yml'
+      - 'src/investing_monitor/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Foundation check to run'
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - status
+          - doctor
+      persist_state:
+        description: 'Checkpoint the SQLite snapshot to runtime-state'
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: ticker-monitor-v2-state
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install package
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run full test suite
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+
+      - name: Restore runtime state
+        run: investing-monitor --db .runtime/monitor.db restore-state
+
+      - name: Plan due tasks
+        if: github.event_name == 'push' || inputs.mode == 'plan'
+        run: investing-monitor --db .runtime/monitor.db plan
+
+      - name: Show runtime status
+        if: inputs.mode == 'status'
+        run: investing-monitor --db .runtime/monitor.db status
+
+      - name: Run foundation doctor
+        if: inputs.mode == 'doctor'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: investing-monitor --db .runtime/monitor.db doctor --require-secrets
+
+      - name: Checkpoint runtime state
+        if: inputs.persist_state
+        run: investing-monitor --db .runtime/monitor.db checkpoint-state --run-id "${{ github.run_id }}"

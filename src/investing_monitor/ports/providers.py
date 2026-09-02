@@ -7,6 +7,10 @@ from typing import Protocol
 from investing_monitor.domain.models import Catalyst, MarketSnapshot
 
 
+class DeliveryOutcomeUnknown(RuntimeError):
+    """The provider may have accepted a notification before the request failed."""
+
+
 class MarketDataPort(Protocol):
     def stream(self) -> AsyncIterator[MarketSnapshot]: ...
 

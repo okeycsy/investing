@@ -9,7 +9,7 @@ from investing_monitor.domain.policies import (
     assess_intraday_volume,
     assess_relative_performance,
 )
-from investing_monitor.ports.providers import NotificationPort
+from investing_monitor.ports.providers import DeliveryOutcomeUnknown, NotificationPort
 from investing_monitor.ports.repository import MonitorRepository
 from investing_monitor.presentation.slack_messages import build_price_band_message
 
@@ -66,8 +66,12 @@ class OutboxDeliveryService:
         now = datetime.now(timezone.utc)
         delivered = 0
         for item in self.repository.pending_deliveries(now, limit=limit):
+            self.repository.mark_sending(item.outbox_id, now)
             try:
                 receipt = await self.notifier.send(item.payload)
+            except DeliveryOutcomeUnknown as exc:
+                self.repository.mark_delivery_unknown(item.outbox_id, now, str(exc))
+                continue
             except Exception as exc:
                 delay_seconds = min(30 * (2 ** item.attempts), 15 * 60)
                 self.repository.mark_failed(

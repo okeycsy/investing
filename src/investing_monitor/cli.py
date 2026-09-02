@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Sequence
+
+from investing_monitor.adapters.git_state_branch import GitStateBranchStore
+from investing_monitor.adapters.sqlite_repository import SCHEMA_VERSION, SQLiteMonitorRepository
+from investing_monitor.runtime.tick import TickPlanner
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="investing-monitor")
+    parser.add_argument(
+        "--db",
+        default=os.environ.get("MONITOR_DB_PATH", ".runtime/monitor.db"),
+        help="runtime SQLite path",
+    )
+    parser.add_argument(
+        "--summary-file",
+        default=os.environ.get("GITHUB_STEP_SUMMARY", ""),
+        help="optional GitHub Actions Job Summary path",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    plan = subparsers.add_parser("plan", help="show due tasks without executing providers")
+    plan.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
+
+    subparsers.add_parser("status", help="show persisted runtime status")
+
+    doctor = subparsers.add_parser("doctor", help="validate the GitHub runtime foundation")
+    doctor.add_argument("--require-secrets", action="store_true")
+
+    restore = subparsers.add_parser("restore-state", help="restore the runtime-state branch")
+    _add_git_state_arguments(restore)
+
+    checkpoint = subparsers.add_parser(
+        "checkpoint-state",
+        help="write a rolling snapshot to the runtime-state branch",
+    )
+    _add_git_state_arguments(checkpoint)
+    checkpoint.add_argument(
+        "--run-id",
+        default=os.environ.get("GITHUB_RUN_ID", "manual"),
+    )
+    return parser
+
+
+def _add_git_state_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repository", default=".")
+    parser.add_argument("--remote", default="origin")
+    parser.add_argument("--branch", default="runtime-state")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    database_path = Path(args.db)
+
+    if args.command == "restore-state":
+        store = _state_store(args)
+        result = store.restore(database_path)
+        if not result.restored:
+            SQLiteMonitorRepository(database_path)
+        payload = {
+            "command": args.command,
+            "restored": result.restored,
+            "commit_sha": result.commit_sha,
+            "database_sha256": result.database_sha256,
+        }
+        return _emit(payload, args.summary_file)
+
+    repository = SQLiteMonitorRepository(database_path)
+
+    if args.command == "checkpoint-state":
+        result = _state_store(args).checkpoint(database_path, run_id=args.run_id)
+        payload = {
+            "command": args.command,
+            "commit_sha": result.commit_sha,
+            "previous_commit_sha": result.previous_commit_sha,
+            "database_sha256": result.database_sha256,
+        }
+        return _emit(payload, args.summary_file)
+
+    if args.command == "plan":
+        now = _parse_timestamp(args.now) if args.now else datetime.now(timezone.utc)
+        plan = TickPlanner().plan(
+            now,
+            repository.task_checkpoints(),
+            last_completed_run_at=repository.last_completed_run_at(),
+        )
+        return _emit({"command": args.command, **plan.as_dict()}, args.summary_file)
+
+    if args.command == "status":
+        checkpoints = repository.task_checkpoints()
+        payload = {
+            "command": args.command,
+            "database": str(database_path),
+            "last_completed_run_at": _iso(repository.last_completed_run_at()),
+            "task_checkpoints": {
+                key: {
+                    "task_name": item.task_name,
+                    "last_success_at": _iso(item.last_success_at),
+                    "last_attempt_at": _iso(item.last_attempt_at),
+                    "last_error": item.last_error,
+                    "metadata": dict(item.metadata),
+                }
+                for key, item in sorted(checkpoints.items())
+            },
+            "recent_runs": [
+                {
+                    "run_id": run.run_id,
+                    "scheduled_at": _iso(run.scheduled_at),
+                    "started_at": _iso(run.started_at),
+                    "completed_at": _iso(run.completed_at),
+                    "status": run.status,
+                    "gap_seconds": run.gap_seconds,
+                }
+                for run in repository.recent_runs()
+            ],
+        }
+        return _emit(payload, args.summary_file)
+
+    if args.command == "doctor":
+        with closing(sqlite3.connect(database_path)) as connection, connection:
+            quick_check = connection.execute("PRAGMA quick_check").fetchone()[0]
+            schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        required_secrets = ("SLACK_WEBHOOK_URL", "ANTHROPIC_API_KEY")
+        secret_presence = {name: bool(os.environ.get(name)) for name in required_secrets}
+        checks = {
+            "database_quick_check": quick_check,
+            "schema_version": schema_version,
+            "expected_schema_version": SCHEMA_VERSION,
+            "secrets_present": secret_presence,
+            "github_actions": bool(os.environ.get("GITHUB_ACTIONS")),
+        }
+        ok = quick_check == "ok" and schema_version == SCHEMA_VERSION
+        if args.require_secrets:
+            ok = ok and all(secret_presence.values())
+        _emit({"command": args.command, "ok": ok, "checks": checks}, args.summary_file)
+        return 0 if ok else 1
+
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _state_store(args: argparse.Namespace) -> GitStateBranchStore:
+    return GitStateBranchStore(
+        args.repository,
+        remote=args.remote,
+        branch=args.branch,
+    )
+
+
+def _parse_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.astimezone(timezone.utc).isoformat() if value else None
+
+
+def _emit(payload: dict[str, object], summary_file: str) -> int:
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    print(rendered)
+    if summary_file:
+        path = Path(summary_file)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("## Investing Monitor v2\n\n```json\n")
+            handle.write(rendered)
+            handle.write("\n```\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -12,6 +12,23 @@
 
 제품 동작과 표시 금지사항은 `HOOD_MONITOR_PRODUCT.md`에 고정되어 있습니다.
 
+## v2 개발 상태
+
+- Stage 0 계약은 문서와 기존 제품 테스트로 동결되어 있습니다.
+- Stage 1 기반은 versioned SQLite, due-task planner, run/task checkpoint, outbox 상태 전이, `runtime-state` rolling snapshot으로 구현되어 있습니다.
+- `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 계획 출력을 자동 검증하며, 수동 실행에서는 상태 진단과 snapshot 저장을 선택할 수 있습니다.
+- 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
+- production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 2~5 검증 전에는 v2로 전환하지 않습니다.
+
+로컬에서 Stage 1 상태를 확인하려면:
+
+```bash
+pip install -e .
+investing-monitor plan
+investing-monitor status
+investing-monitor doctor
+```
+
 ## 1차 정리 범위
 
 - `monitor_config.md`에서 기본 종목, 회사명, CIK, 벤치마크, 피어 종목을 읽습니다.
