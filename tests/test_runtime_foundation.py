@@ -142,9 +142,10 @@ class TickRunnerTest(unittest.TestCase):
                 monotonic=lambda: next(monotonic_values),
             )
 
-            report = runner.run("observed-run", scheduled_at=NOW)
+            report = runner.run("observed-run", scheduled_at=NOW, trigger="schedule")
 
             detail = report.details["news"]
+            self.assertEqual(report.trigger, "schedule")
             self.assertEqual(detail["status"], "success")
             self.assertEqual(detail["duration_ms"], 125)
             self.assertEqual(
@@ -155,6 +156,7 @@ class TickRunnerTest(unittest.TestCase):
                 repository.recent_runs()[0].summary["details"]["news"]["duration_ms"],
                 125,
             )
+            self.assertEqual(repository.recent_runs()[0].summary["trigger"], "schedule")
 
     def test_task_failure_does_not_block_later_tasks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -364,6 +366,7 @@ class ShadowWorkflowTest(unittest.TestCase):
         self.assertIn("quality-report", workflow)
         self.assertIn("replay-market --days 3", workflow)
         self.assertIn("github.event_name == 'push'", workflow)
+        self.assertIn('--trigger "${{ github.event_name }}"', workflow)
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:

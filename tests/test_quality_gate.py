@@ -115,6 +115,7 @@ class QualityReportTest(unittest.TestCase):
                 completed_at=NOW + timedelta(seconds=5),
                 status="success",
                 summary={
+                    "trigger": "schedule",
                     "plan": {
                         "tasks": [
                             {"name": "market", "checkpoint_key": "market"},
@@ -144,8 +145,10 @@ class QualityReportTest(unittest.TestCase):
             self.assertTrue(report.passed)
             self.assertEqual(report.messages_checked, 1)
             self.assertEqual(report.runtime["runs_checked"], 1)
-            self.assertEqual(report.runtime["max_schedule_delay_seconds"], 12 * 60)
-            self.assertEqual(report.runtime["gap_runs_over_10_minutes"], 1)
+            self.assertEqual(report.runtime["trigger_counts"], {"schedule": 1})
+            self.assertEqual(report.runtime["scheduler_status"], "insufficient_history")
+            self.assertEqual(report.runtime["schedule_runs_checked"], 1)
+            self.assertEqual(report.runtime["max_schedule_interval_seconds"], 0)
             self.assertEqual(report.runtime["planned_tasks"], {"market": 1})
             self.assertEqual(report.runtime["succeeded_tasks"], {"market": 1})
             self.assertEqual(
@@ -166,6 +169,55 @@ class QualityReportTest(unittest.TestCase):
                 report.recent_messages[0]["fallback_text"],
                 "$VRT 09/02 장 마감 브리프",
             )
+
+    def test_push_runs_do_not_masquerade_as_scheduler_health(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            repository.start_run(
+                "push-run",
+                scheduled_at=NOW - timedelta(hours=3),
+                started_at=NOW,
+                gap_seconds=3 * 60 * 60,
+            )
+            repository.finish_run(
+                "push-run",
+                completed_at=NOW + timedelta(seconds=2),
+                status="success",
+                summary={"trigger": "push", "plan": {"tasks": []}},
+            )
+
+            report = QualityReportService(repository).build()
+
+            self.assertEqual(report.runtime["trigger_counts"], {"push": 1})
+            self.assertEqual(report.runtime["scheduler_status"], "unobserved")
+            self.assertEqual(report.runtime["schedule_runs_checked"], 0)
+            self.assertIsNone(report.runtime["latest_schedule_started_at"])
+
+    def test_scheduler_health_uses_real_same_session_run_intervals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            for run_id, started_at in (
+                ("schedule-1", NOW - timedelta(minutes=20)),
+                ("schedule-2", NOW),
+            ):
+                repository.start_run(
+                    run_id,
+                    scheduled_at=started_at,
+                    started_at=started_at,
+                    gap_seconds=0,
+                )
+                repository.finish_run(
+                    run_id,
+                    completed_at=started_at + timedelta(seconds=2),
+                    status="success",
+                    summary={"trigger": "schedule", "plan": {"tasks": []}},
+                )
+
+            report = QualityReportService(repository).build()
+
+            self.assertEqual(report.runtime["scheduler_status"], "degraded")
+            self.assertEqual(report.runtime["max_schedule_interval_seconds"], 20 * 60)
+            self.assertEqual(report.runtime["schedule_intervals_over_15_minutes"], 1)
 
 
 if __name__ == "__main__":

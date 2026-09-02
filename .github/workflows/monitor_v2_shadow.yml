@@ -81,14 +81,14 @@ jobs:
 
       - name: Run market shadow tick
         if: inputs.mode == 'market'
-        run: investing-monitor --db .runtime/monitor.db market-tick --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+        run: investing-monitor --db .runtime/monitor.db market-tick --trigger "${{ github.event_name }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Run unified shadow tick
         if: github.event_name == 'schedule' || github.event_name == 'push' || inputs.mode == 'shadow'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SEC_CONTACT: maybe2213@naver.com
-        run: investing-monitor --db .runtime/monitor.db shadow-tick --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+        run: investing-monitor --db .runtime/monitor.db shadow-tick --trigger "${{ github.event_name }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Build product quality report
         if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.mode == 'shadow')

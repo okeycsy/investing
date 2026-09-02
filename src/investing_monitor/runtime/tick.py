@@ -217,6 +217,7 @@ class TickExecutionReport:
     run_id: str
     status: str
     plan: TickPlan
+    trigger: str = "manual"
     succeeded: tuple[str, ...] = ()
     failed: Mapping[str, str] = field(default_factory=dict)
     skipped: tuple[str, ...] = ()
@@ -226,6 +227,7 @@ class TickExecutionReport:
         return {
             "run_id": self.run_id,
             "status": self.status,
+            "trigger": self.trigger,
             "plan": self.plan.as_dict(),
             "succeeded": list(self.succeeded),
             "failed": dict(self.failed),
@@ -256,6 +258,7 @@ class TickRunner:
         *,
         scheduled_at: datetime,
         started_at: datetime | None = None,
+        trigger: str = "manual",
     ) -> TickExecutionReport:
         started_at = _aware_utc(started_at or self.clock())
         last_run = self.repository.last_completed_run_at()
@@ -333,6 +336,7 @@ class TickRunner:
             run_id=run_id,
             status=status,
             plan=plan,
+            trigger=trigger.strip().lower() or "manual",
             succeeded=tuple(succeeded),
             failed=failed,
             skipped=tuple(skipped),

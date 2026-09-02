@@ -70,6 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     market_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
     market_tick.add_argument("--scheduled-at", default="")
     market_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+    market_tick.add_argument(
+        "--trigger",
+        default=os.environ.get("GITHUB_EVENT_NAME", "manual"),
+    )
 
     shadow_tick = subparsers.add_parser(
         "shadow-tick",
@@ -79,6 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
     shadow_tick.add_argument("--scheduled-at", default="")
     shadow_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+    shadow_tick.add_argument(
+        "--trigger",
+        default=os.environ.get("GITHUB_EVENT_NAME", "manual"),
+    )
 
     replay = subparsers.add_parser(
         "replay-market",
@@ -410,7 +418,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 enabled_tasks=enabled_tasks,
             ),
             clock=lambda: now,
-        ).run(run_id, scheduled_at=scheduled_at, started_at=now)
+        ).run(
+            run_id,
+            scheduled_at=scheduled_at,
+            started_at=now,
+            trigger=args.trigger,
+        )
         payload = {
             "command": args.command,
             "profile": {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from investing_monitor.ports.repository import MonitorRepository
 from investing_monitor.presentation.quality import audit_message
@@ -118,19 +120,42 @@ class QualityReportService:
                         sample[provider_status] += 1
                     sample["total_ms"] += latency_ms
                     sample["max_ms"] = max(sample["max_ms"], latency_ms)
-        delays = [
-            max(0, int((run.started_at - run.scheduled_at).total_seconds()))
-            for run in runs
+        trigger_counts = Counter(_run_trigger(run.summary) for run in runs)
+        scheduled_runs = [
+            run for run in runs if _run_trigger(run.summary) == "schedule"
         ]
+        schedule_intervals = _same_session_intervals(
+            [run.started_at for run in scheduled_runs]
+        )
+        if not scheduled_runs:
+            scheduler_status = "unobserved"
+        elif not schedule_intervals:
+            scheduler_status = "insufficient_history"
+        elif max(schedule_intervals) > 15 * 60:
+            scheduler_status = "degraded"
+        else:
+            scheduler_status = "healthy"
         runtime = {
             "runs_checked": len(runs),
             "successful_runs": sum(run.status == "success" for run in runs),
             "partial_runs": sum(run.status != "success" for run in runs),
-            "max_schedule_delay_seconds": max(delays, default=0),
-            "average_schedule_delay_seconds": (
-                int(sum(delays) / len(delays)) if delays else 0
+            "trigger_counts": dict(sorted(trigger_counts.items())),
+            "scheduler_status": scheduler_status,
+            "schedule_runs_checked": len(scheduled_runs),
+            "latest_schedule_started_at": (
+                max(run.started_at for run in scheduled_runs).isoformat()
+                if scheduled_runs
+                else None
             ),
-            "gap_runs_over_10_minutes": sum(run.gap_seconds >= 600 for run in runs),
+            "max_schedule_interval_seconds": max(schedule_intervals, default=0),
+            "average_schedule_interval_seconds": (
+                int(sum(schedule_intervals) / len(schedule_intervals))
+                if schedule_intervals
+                else 0
+            ),
+            "schedule_intervals_over_15_minutes": sum(
+                interval > 15 * 60 for interval in schedule_intervals
+            ),
             "planned_tasks": dict(sorted(planned.items())),
             "succeeded_tasks": dict(sorted(succeeded.items())),
             "task_execution": _finalize_latency_samples(task_samples),
@@ -159,3 +184,23 @@ def _finalize_latency_samples(
         }
         finalized[name]["average_ms"] = int(sample["total_ms"] / calls) if calls else 0
     return finalized
+
+
+def _run_trigger(summary: object) -> str:
+    if not isinstance(summary, dict):
+        return "unknown"
+    trigger = str(summary.get("trigger") or "unknown").strip().lower()
+    return trigger or "unknown"
+
+
+def _same_session_intervals(starts: list[datetime]) -> list[int]:
+    eastern = ZoneInfo("America/New_York")
+    ordered = sorted(starts)
+    intervals = []
+    for previous, current in zip(ordered, ordered[1:]):
+        previous_local = previous.astimezone(eastern)
+        current_local = current.astimezone(eastern)
+        if previous_local.date() != current_local.date():
+            continue
+        intervals.append(max(0, int((current - previous).total_seconds())))
+    return intervals
