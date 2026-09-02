@@ -23,6 +23,11 @@ def build_evidence_message(
         EvidenceKind.INSIDER: ("👤", "중요 내부자 거래"),
     }[candidate.kind]
     timestamp = candidate.published_at.astimezone(KST).strftime("%m/%d %H:%M KST")
+    context_parts = [candidate.source_name]
+    form = str(candidate.metadata.get("form") or "")
+    if candidate.kind is EvidenceKind.SEC and form:
+        context_parts.append(form)
+    context_parts.append(timestamp)
     impact_icon, impact_label = {
         "strengthen": ("🟢", "논지 강화 근거"),
         "neutral": ("⚪", "중립적 변화"),
@@ -43,7 +48,7 @@ def build_evidence_message(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"{candidate.source_name} · {timestamp}",
+                    "text": " · ".join(context_parts),
                 }
             ],
         },
@@ -54,7 +59,6 @@ def build_evidence_message(
         _section(f"*확인된 사실*\n{facts}"),
         _section(
             f"{impact_icon} *{impact_label}*\n"
-            f"{_clip(analysis.interpretation_ko, 400)}\n"
             f"{_clip(analysis.impact_reason_ko, 300)}"
         ),
         {
@@ -62,7 +66,10 @@ def build_evidence_message(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"<{candidate.source_url}|원문 보기>",
+                    "text": (
+                        f"<{candidate.source_url}|"
+                        f"{'SEC 원문 보기' if candidate.kind is EvidenceKind.SEC else '원문 보기'}>"
+                    ),
                 }
             ],
         },

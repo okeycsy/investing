@@ -24,6 +24,7 @@ from investing_monitor.application.insider import (
     assess_insider_materiality,
     build_insider_analysis,
 )
+from investing_monitor.application.filings import assess_filing_materiality
 from investing_monitor.ports.repository import AlertRecord, MonitorRepository
 
 
@@ -149,6 +150,14 @@ def screen_candidate(
         )
     if candidate.kind is EvidenceKind.INSIDER:
         assessment = assess_insider_materiality(candidate)
+        if assessment is not None and not assessment.material:
+            return CandidateDecision(
+                status=EvidenceStatus.FILTERED,
+                reason=assessment.reason,
+                candidate=candidate,
+            )
+    if candidate.kind is EvidenceKind.SEC:
+        assessment = assess_filing_materiality(candidate, profile)
         if assessment is not None and not assessment.material:
             return CandidateDecision(
                 status=EvidenceStatus.FILTERED,
@@ -555,6 +564,11 @@ class EvidenceIngestionService:
                     enriched += 1
             if candidate.kind is EvidenceKind.INSIDER:
                 assessment = assess_insider_materiality(candidate)
+                if assessment is not None and not assessment.material:
+                    filtered[candidate.candidate_id] = assessment.reason
+                    continue
+            if candidate.kind is EvidenceKind.SEC:
+                assessment = assess_filing_materiality(candidate, self.profile)
                 if assessment is not None and not assessment.material:
                     filtered[candidate.candidate_id] = assessment.reason
                     continue

@@ -139,6 +139,21 @@ class CandidateScreeningTest(unittest.TestCase):
 
         self.assertEqual(decision.status, EvidenceStatus.FILTERED)
 
+    def test_non_material_8k_item_is_filtered_before_body_fetch(self):
+        decision = screen_candidate(
+            raw(
+                "Submission of matters to a vote",
+                kind=EvidenceKind.SEC,
+                source_name="SEC EDGAR",
+                source_text="Current report | 5.07",
+                metadata={"form": "8-K", "items": "5.07"},
+            ),
+            PROFILE,
+        )
+
+        self.assertEqual(decision.status, EvidenceStatus.FILTERED)
+        self.assertIn("8-K", decision.reason)
+
     def test_routine_ir_dividend_is_filtered_before_ai(self):
         decision = screen_candidate(
             raw(
@@ -570,6 +585,42 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
             "risk",
         )
 
+    def test_periodic_filing_requires_two_grounded_facts(self):
+        candidate = screen_candidate(
+            raw(
+                "Quarterly report",
+                kind=EvidenceKind.SEC,
+                source_name="SEC EDGAR",
+                source_text="Backlog increased 20 percent. Guidance was raised.",
+                metadata={"form": "10-Q"},
+            ),
+            PROFILE,
+        ).candidate
+        response = json.dumps(
+            [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "relevant": True,
+                    "headline_ko": "분기 보고서",
+                    "summary_ko": "백로그가 증가했다.",
+                    "facts": [
+                        {
+                            "source_text": "Backlog increased 20 percent.",
+                            "fact_ko": "백로그가 20% 증가했다.",
+                        }
+                    ],
+                    "interpretation_ko": "수요가 견조하다.",
+                    "thesis_impact": "strengthen",
+                    "impact_reason_ko": "수요 가시성이 개선됐다.",
+                    "confidence": "high",
+                }
+            ]
+        )
+
+        batch = parse_analysis_response(response, [candidate])
+
+        self.assertIn("at least two", batch.errors[candidate.candidate_id])
+
     def test_evidence_message_user_text_stays_below_limit(self):
         analysis = EvidenceAnalysis(
             candidate_id=self.candidate.candidate_id,
@@ -593,6 +644,7 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
         )
 
         self.assertLessEqual(len(visible_text), 2_900)
+        self.assertNotIn("긴 해석", visible_text)
 
 
 class EvidenceIngestionServiceTest(unittest.TestCase):
@@ -926,6 +978,102 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
             self.assertEqual(report.filtered, 1)
             self.assertEqual(report.analyzed, 0)
             self.assertEqual(repository.pending_deliveries(NOW), [])
+
+    def test_routine_dividend_8k_is_filtered_after_body_enrichment(self):
+        class Analyzer:
+            def analyze(self, _candidates, _profile):
+                raise AssertionError("routine dividend must not reach AI")
+
+        class FilingText:
+            def fetch(self, _candidate):
+                return EvidenceDocument(
+                    source_text=(
+                        "Item 8.01 Other Events. Vertiv declares quarterly cash "
+                        "dividend. Item 9.01 Financial Statements and Exhibits. "
+                        + "Routine filing text. " * 20
+                    ),
+                    metadata={"items": ("8.01", "9.01")},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                filing_text=FilingText(),
+            )
+            report = service.ingest(
+                [
+                    raw(
+                        "Current report",
+                        kind=EvidenceKind.SEC,
+                        source_name="SEC EDGAR",
+                        source_text="8-K filing",
+                        metadata={"form": "8-K"},
+                    )
+                ],
+                NOW,
+            )
+
+            self.assertEqual(report.enriched, 1)
+            self.assertEqual(report.filtered, 1)
+            self.assertEqual(report.analyzed, 0)
+
+    def test_acquisition_8k_reaches_analyzer_after_body_enrichment(self):
+        class Analyzer:
+            def __init__(self):
+                self.called = False
+
+            def analyze(self, candidates, _profile):
+                self.called = True
+                return EvidenceAnalysisBatch(
+                    analyses={
+                        candidate.candidate_id: EvidenceAnalysis(
+                            candidate_id=candidate.candidate_id,
+                            relevant=False,
+                        )
+                        for candidate in candidates
+                    },
+                    errors={},
+                )
+
+        class FilingText:
+            def fetch(self, _candidate):
+                return EvidenceDocument(
+                    source_text=(
+                        "Item 7.01 Regulation FD. Vertiv completes acquisition of "
+                        "a thermal management business. "
+                        + "Material filing text. " * 20
+                    ),
+                    metadata={"items": ("7.01", "9.01")},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            analyzer = Analyzer()
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                analyzer,
+                filing_text=FilingText(),
+            )
+            report = service.ingest(
+                [
+                    raw(
+                        "Current report",
+                        kind=EvidenceKind.SEC,
+                        source_name="SEC EDGAR",
+                        source_text="8-K filing",
+                        metadata={"form": "8-K"},
+                    )
+                ],
+                NOW,
+            )
+
+            self.assertTrue(analyzer.called)
+            self.assertEqual(report.filtered, 0)
+            self.assertEqual(report.analyzed, 1)
 
 
 class InsiderTransactionTest(unittest.TestCase):

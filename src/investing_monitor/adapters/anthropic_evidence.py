@@ -11,6 +11,7 @@ import requests
 from investing_monitor.domain.evidence import (
     EvidenceAnalysis,
     EvidenceCandidate,
+    EvidenceKind,
     EvidenceProfile,
     GroundedFact,
 )
@@ -168,6 +169,15 @@ def _validated_analysis(
         facts.append(GroundedFact(source_text=quote, fact_ko=fact_ko))
     if not facts:
         raise EvidenceValidationError("relevant analysis requires at least one grounded fact")
+    form = str(candidate.metadata.get("form") or "").upper()
+    if (
+        candidate.kind is EvidenceKind.SEC
+        and form.startswith(("10-Q", "10-K", "20-F"))
+        and len(facts) < 2
+    ):
+        raise EvidenceValidationError(
+            "periodic filing analysis requires at least two grounded facts"
+        )
     if impact == "damage" and confidence != "high":
         impact = "risk"
     return EvidenceAnalysis(
@@ -192,6 +202,8 @@ def _analysis_prompt(
             "candidate_id": candidate.candidate_id,
             "source_kind": candidate.kind.value,
             "publisher": candidate.source_name,
+            "form": candidate.metadata.get("form", ""),
+            "items": candidate.metadata.get("items", ()),
             "headline": candidate.headline,
             "source_text": candidate.source_text[:12_000],
         }
@@ -212,6 +224,7 @@ def _analysis_prompt(
 5. headline_ko, summary_ko, fact_ko, interpretation_ko, impact_reason_ko는 한국어로 쓴다.
 6. damage는 회사가 확인한 가이던스 하향, 핵심 수요·수익성 훼손, 회계 문제 또는 중대 규제 조치에만 사용한다.
 7. 현재 주가, 목표주가, 정확한 일일 등락률은 출력하지 않는다.
+8. 10-Q, 10-K, 20-F는 비교 기간이 드러나는 핵심 KPI 또는 명확한 정성 변화의 원문 근거를 최소 2개 제시한다.
 
 JSON 배열만 반환한다:
 [

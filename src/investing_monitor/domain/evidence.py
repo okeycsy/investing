@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -151,3 +152,9 @@ def candidate_identity(raw: RawEvidenceCandidate) -> str:
         )
     )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def extract_filing_items(value: str) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(re.findall(r"\b(?:item\s+)?(\d\.\d{2})\b", value, re.I))
+    )

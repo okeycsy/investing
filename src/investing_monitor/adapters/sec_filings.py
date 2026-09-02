@@ -20,6 +20,7 @@ from investing_monitor.domain.evidence import (
     EvidenceCandidate,
     EvidenceProfile,
     RawEvidenceCandidate,
+    extract_filing_items,
 )
 
 
@@ -439,7 +440,10 @@ class SecFilingTextClient:
                 "SEC filing body unavailable: "
                 + ("; ".join(errors[-3:]) or "insufficient document text")
             )
-        return combined
+        return EvidenceDocument(
+            source_text=combined,
+            metadata={"items": extract_filing_items(combined)},
+        )
 
 
 def parse_form4_document(payload: str) -> EvidenceDocument | None:
