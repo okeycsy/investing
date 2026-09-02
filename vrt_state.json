@@ -1,5 +1,16 @@
 {
   "last_news_hashes": [
+    "0c3b2e1ba238",
+    "24989262b86c",
+    "379b5808cfdf",
+    "f24babf39e00",
+    "8eb8c87fc65c",
+    "3d5d416ce767",
+    "8bdcb90e3ada",
+    "1be74c662ee6",
+    "5b9fc6e42188",
+    "8f59f6d4202e",
+    "39a0095d2702",
     "df96298c7874",
     "55d8499d5434",
     "b86091764e0a",
@@ -48,8 +59,7 @@
     "700c6984ee2b",
     "de4d186d7a5c",
     "e20aec43e6d3",
-    "c49fd7f072b5",
-    "4151a9ff1a64"
+    "c49fd7f072b5"
   ],
   "last_insider_hashes": [
     "f76f2de69f87",
@@ -83,7 +93,6 @@
   ],
   "last_13f_positions": {},
   "price_history": [
-    300.57,
     289.52,
     280.98,
     297.88,
@@ -141,7 +150,8 @@
     263.81,
     269.28,
     258.72,
-    255.97
+    255.97,
+    256.2
   ],
   "price_alert_max_pct": 0,
   "price_alert_direction": "",

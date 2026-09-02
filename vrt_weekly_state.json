@@ -2,17 +2,44 @@
   "week_start": "2026-08-31",
   "alerts_fired": [],
   "insider_trades": [],
-  "news_headlines": [],
+  "news_headlines": [
+    "Vertiv, 마이크로그리드 사업 진출 위한 1.45억 달러 인수",
+    "Vertiv, Utility Innovation 최대 2.6억 달러 인수 합의",
+    "Vertiv, 분기 배당금 선언",
+    "Vertiv, UtilityInnovation Group 인수 계약 발표"
+  ],
   "company_filings": [],
-  "thesis_impacts": [],
-  "thesis_events": [],
+  "thesis_impacts": [
+    "strengthen",
+    "strengthen",
+    "neutral",
+    "strengthen"
+  ],
+  "thesis_events": [
+    {
+      "impact": "strengthen",
+      "title": "Vertiv, 마이크로그리드 사업 진출 위한 1.45억 달러 인수",
+      "detail": "Vertiv이 데이터센터 전력 공급 대기시간 단축을 위해 1.45억 달러 규모의 인수를 진행 중이다. AI 데이터센터의 전력 인프라 강화를 통한 전략적 확장으로 보인다.\n판단 근거: AI 데이터센터 전력 인프라 포트폴리오 확대를 통해 핵심 사업 영역 강화"
+    },
+    {
+      "impact": "strengthen",
+      "title": "Vertiv, Utility Innovation 최대 2.6억 달러 인수 합의",
+      "detail": "Vertiv이 Utility Innovation을 최대 2.6억 달러에 인수하기로 합의했다. 거래 규모와 정확한 비즈니스 시너지는 본문이 불완전하여 확인할 수 없다.\n판단 근거: 전략적 M&A를 통한 AI 데이터센터 전력 솔루션 포트폴리오 확대"
+    },
+    {
+      "impact": "strengthen",
+      "title": "Vertiv, UtilityInnovation Group 인수 계약 발표",
+      "detail": "Vertiv이 AI 데이터센터 전력 공급 시간 단축을 위해 UtilityInnovation Group 인수 계약을 체결했다. 전략적 인수로 데이터센터 전력 솔루션 경쟁력 강화를 목표로 한다.\n판단 근거: AI 데이터센터 고객의 시간-대-전력(Time to Power) 요구 충족을 위한 전략적 인수"
+    }
+  ],
   "rsi_readings": [
     42.16,
     43.38,
     43.12,
     41.58,
     42.26,
-    42.06
+    42.06,
+    42.42
   ],
   "pcr_readings": [
     0.775,
