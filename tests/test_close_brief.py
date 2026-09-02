@@ -38,6 +38,14 @@ OPEN_AT = datetime(2026, 9, 2, 13, 30, tzinfo=timezone.utc)
 CREATED_AT = datetime(2026, 9, 2, 20, 15, tzinfo=timezone.utc)
 
 
+def visible_text(payload: dict) -> str:
+    return payload["text"] + "".join(
+        block.get("text", {}).get("text", "")
+        + "".join(element.get("text", "") for element in block.get("elements", []))
+        for block in payload["blocks"]
+    )
+
+
 def market_cycle() -> MarketCycle:
     snapshot = MarketSnapshot(
         ticker="VRT",
@@ -168,6 +176,33 @@ class CloseMessageTest(unittest.TestCase):
         rendered_medium = json.dumps(medium_payload, ensure_ascii=False)
         self.assertIn("주요 이벤트", rendered_medium)
         self.assertNotIn("논지 훼손 근거", rendered_medium)
+
+    def test_close_message_stays_within_slack_text_budget(self):
+        cycle = market_cycle()
+        snapshot = cycle.frames[-1].snapshot
+        catalysts = tuple(
+            Catalyst(
+                canonical_id=f"long-{index}",
+                headline="아주 긴 핵심 사건 제목 " * 100,
+                summary="검증된 사실을 설명하는 긴 문장 " * 300,
+                source_name="공식 회사 발표 " * 30,
+                source_url=f"https://example.com/long-{index}",
+                published_at=CREATED_AT,
+                impact=ThesisImpact.RISK,
+                confidence="high",
+            )
+            for index in range(2)
+        )
+
+        payload = build_close_message(
+            snapshot,
+            assess_relative_performance(snapshot),
+            cycle.volume,
+            assess_intraday_volume(cycle.volume),
+            catalysts,
+        )
+
+        self.assertLessEqual(len(visible_text(payload)), 2_900)
 
 
 if __name__ == "__main__":

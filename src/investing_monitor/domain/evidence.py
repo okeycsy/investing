@@ -8,6 +8,8 @@ from enum import Enum
 from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
+from investing_monitor.domain.models import OfficialEvent
+
 
 class EvidenceKind(str, Enum):
     IR = "ir"
@@ -128,6 +130,7 @@ class EvidenceAnalysis:
     thesis_impact: str = "neutral"
     impact_reason_ko: str = ""
     confidence: str = "medium"
+    official_events: tuple[OfficialEvent, ...] = ()
 
 
 @dataclass(frozen=True)

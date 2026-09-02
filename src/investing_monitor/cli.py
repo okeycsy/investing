@@ -6,7 +6,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -29,12 +29,16 @@ from investing_monitor.adapters.yahoo_market_data import (
     YahooQuoteClient,
 )
 from investing_monitor.adapters.yahoo_news import YahooArticleTextClient, YahooNewsAdapter
-from investing_monitor.application.briefs import CloseBriefService
+from investing_monitor.application.briefs import (
+    CloseBriefService,
+    WeeklyBriefService,
+    WeeklyBriefUnavailable,
+)
 from investing_monitor.application.evidence import EvidenceIngestionService
 from investing_monitor.application.monitor import MarketCycleService
 from investing_monitor.application.sec_monitor import SecMonitorService
 from investing_monitor.presentation.evidence_messages import build_evidence_message
-from investing_monitor.runtime.tick import TickPlanner, TickRunner, TickTask
+from investing_monitor.runtime.tick import NEW_YORK, TickPlanner, TickRunner, TickTask
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -150,6 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         market_result: dict[str, object] = {}
         evidence_result: dict[str, object] = {}
         close_result: dict[str, object] = {}
+        weekly_result: dict[str, object] = {}
 
         def handle_market(_task):
             cycle = adapter.fetch_cycle(
@@ -227,6 +232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return evidence_result["sec"]
 
             close_service = CloseBriefService(repository, enqueue_alerts=False)
+            weekly_service = WeeklyBriefService(repository, enqueue_alerts=False)
 
             def handle_close(task):
                 close_date = date.fromisoformat(task.checkpoint_key.rsplit(":", 1)[-1])
@@ -243,14 +249,53 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "catalyst_count": report.catalyst_count,
                 }
 
+            def handle_weekly(_task):
+                ny_date = now.astimezone(NEW_YORK).date()
+                period_end = calendar.previous_trading_day(ny_date)
+                period_start = period_end - timedelta(days=period_end.weekday())
+                evidence_since = datetime.combine(
+                    period_start,
+                    time.min,
+                    NEW_YORK,
+                ).astimezone(timezone.utc)
+                try:
+                    report = weekly_service.process(
+                        profile.ticker,
+                        period_start,
+                        period_end,
+                        evidence_since=evidence_since,
+                        created_at=now,
+                    )
+                except WeeklyBriefUnavailable as exc:
+                    weekly_result.update(
+                        {
+                            "period_start": period_start.isoformat(),
+                            "period_end": period_end.isoformat(),
+                            "skipped": str(exc),
+                        }
+                    )
+                    return weekly_result
+                weekly_result.update(report.as_dict())
+                return {
+                    "event_key": report.event_key,
+                    "inserted": report.inserted,
+                    "market_sessions": report.market_sessions,
+                    "strengthening_count": report.strengthening_count,
+                    "risk_count": report.risk_count,
+                    "upcoming_event_count": report.upcoming_event_count,
+                }
+
             handlers.update(
                 {
                     TickTask.NEWS: handle_news,
                     TickTask.SEC: handle_sec,
                     TickTask.CLOSE: handle_close,
+                    TickTask.WEEKLY: handle_weekly,
                 }
             )
-            enabled_tasks.update({TickTask.NEWS, TickTask.SEC, TickTask.CLOSE})
+            enabled_tasks.update(
+                {TickTask.NEWS, TickTask.SEC, TickTask.CLOSE, TickTask.WEEKLY}
+            )
 
         run_id = args.run_id or f"manual-{uuid.uuid4()}"
         execution = TickRunner(
@@ -280,6 +325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "shadow-tick":
             payload["evidence"] = evidence_result
             payload["close"] = close_result
+            payload["weekly"] = weekly_result
         _emit(payload, args.summary_file)
         return 0 if execution.status == "success" else 1
 

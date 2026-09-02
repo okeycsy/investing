@@ -109,6 +109,19 @@ class TickPlannerTest(unittest.TestCase):
 
         self.assertEqual([task.checkpoint_key for task in plan.tasks], ["close:2026-11-27"])
 
+    def test_weekly_review_is_due_monday_morning_kst_once(self):
+        now = datetime(2026, 9, 6, 23, 13, tzinfo=timezone.utc)
+        planner = TickPlanner(enabled_tasks={TickTask.WEEKLY})
+
+        first = planner.plan(now, {}, last_completed_run_at=None)
+        completed = {
+            "weekly:2026-W37": checkpoint("weekly:2026-W37", now),
+        }
+        second = planner.plan(now + timedelta(minutes=20), completed, last_completed_run_at=now)
+
+        self.assertEqual([task.checkpoint_key for task in first.tasks], ["weekly:2026-W37"])
+        self.assertEqual(second.tasks, ())
+
 
 class TickRunnerTest(unittest.TestCase):
     def test_task_failure_does_not_block_later_tasks(self):
@@ -309,6 +322,7 @@ class ShadowWorkflowTest(unittest.TestCase):
         self.assertIn("schedule:", workflow)
         self.assertIn("3-58/5 8-23 * * 1-5", workflow)
         self.assertIn("3-58/5 0-3 * * 2-6", workflow)
+        self.assertIn("13 23 * * 0", workflow)
         self.assertNotIn("timezone:", workflow)
         self.assertNotIn("hood_monitor.py", workflow)
         self.assertIn("persist_state", workflow)

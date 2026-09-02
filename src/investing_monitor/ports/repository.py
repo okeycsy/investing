@@ -14,6 +14,7 @@ from investing_monitor.domain.models import (
     Catalyst,
     CloseMarketContext,
     MarketFrame,
+    OfficialEvent,
     PriceBandSignal,
     PriceBandState,
     VolumeSnapshot,
@@ -66,6 +67,13 @@ class MonitorRepository(Protocol):
         ticker: str,
         trading_date: date,
     ) -> CloseMarketContext | None: ...
+
+    def load_close_market_contexts(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> tuple[CloseMarketContext, ...]: ...
 
     def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool: ...
 
@@ -138,6 +146,14 @@ class MonitorRepository(Protocol):
         since: datetime,
         limit: int = 2,
     ) -> list[Catalyst]: ...
+
+    def upcoming_official_events(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 5,
+    ) -> list[OfficialEvent]: ...
 
     def mark_evidence_analyzed(
         self,

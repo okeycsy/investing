@@ -68,6 +68,13 @@ LOW_VALUE_PATTERNS = (
     "집단소송",
 )
 
+CALENDAR_ONLY_PATTERNS = (
+    "announces date of",
+    "participate in upcoming investor conference",
+    "participate in upcoming investor conferences",
+    "to host investor conference",
+)
+
 TOKEN_ALIASES = {
     "acquisition": "acquire",
     "acquisitions": "acquire",
@@ -146,9 +153,17 @@ def screen_candidate(
         metadata=dict(raw.metadata),
     )
     title = f" {candidate.headline.lower()} "
+    calendar_only = candidate.kind is EvidenceKind.IR and any(
+        pattern in title for pattern in CALENDAR_ONLY_PATTERNS
+    )
+    if calendar_only:
+        candidate = replace(
+            candidate,
+            metadata={**candidate.metadata, "calendar_only": True},
+        )
     if candidate.kind in {EvidenceKind.NEWS, EvidenceKind.IR} and any(
         pattern in title for pattern in LOW_VALUE_PATTERNS
-    ):
+    ) and not calendar_only:
         return CandidateDecision(
             status=EvidenceStatus.FILTERED,
             reason="deterministic low-value title rule",
@@ -620,7 +635,11 @@ class EvidenceIngestionService:
         candidate: EvidenceCandidate,
         analysis: EvidenceAnalysis,
     ) -> AlertRecord | None:
-        if not analysis.relevant or self.alert_builder is None:
+        if (
+            not analysis.relevant
+            or self.alert_builder is None
+            or candidate.metadata.get("calendar_only")
+        ):
             return None
         for existing in self.repository.recent_analyzed_evidence(
             candidate.ticker,

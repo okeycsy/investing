@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -60,6 +60,7 @@ from investing_monitor.domain.models import (
     MarketFrame,
     MarketSession,
     MarketSnapshot,
+    OfficialEvent,
 )
 from investing_monitor.application.monitor import MarketCycleService
 from investing_monitor.presentation.evidence_messages import build_evidence_message
@@ -168,6 +169,20 @@ class CandidateScreeningTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.status, EvidenceStatus.FILTERED)
+
+    def test_official_ir_calendar_notice_is_kept_without_becoming_a_catalyst(self):
+        decision = screen_candidate(
+            raw(
+                "Vertiv Announces Date of Third Quarter 2026 Earnings",
+                kind=EvidenceKind.IR,
+                source_name="Vertiv IR",
+                source_url="https://investors.vertiv.com/earnings-date",
+            ),
+            PROFILE,
+        )
+
+        self.assertEqual(decision.status, EvidenceStatus.PENDING)
+        self.assertTrue(decision.candidate.metadata["calendar_only"])
 
     def test_canonical_identity_ignores_tracking_query(self):
         first = screen_candidate(raw("Vertiv expands capacity"), PROFILE).candidate
@@ -657,6 +672,58 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
             "risk",
         )
 
+    def test_official_ir_event_requires_a_grounded_date_excerpt(self):
+        candidate = screen_candidate(
+            raw(
+                "Vertiv Announces Date of Third Quarter 2026 Earnings",
+                kind=EvidenceKind.IR,
+                source_name="Vertiv IR",
+                source_url="https://investors.vertiv.com/earnings-date",
+                source_text=(
+                    "Vertiv will report third quarter results before market open "
+                    "on October 21, 2026, followed by a call at 11:00 a.m. ET."
+                ),
+            ),
+            PROFILE,
+        ).candidate
+        response = json.dumps(
+            [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "relevant": True,
+                    "headline_ko": "버티브, 3분기 실적 발표 일정 공지",
+                    "summary_ko": "버티브가 3분기 실적 발표일을 확정했다.",
+                    "facts": [
+                        {
+                            "source_text": "before market open on October 21, 2026",
+                            "fact_ko": "10월 21일 장전 실적을 발표한다.",
+                        }
+                    ],
+                    "interpretation_ko": "공식 확인 일정이다.",
+                    "thesis_impact": "neutral",
+                    "impact_reason_ko": "일정 공지 자체는 논지 변화가 아니다.",
+                    "confidence": "high",
+                    "official_events": [
+                        {
+                            "title_ko": "3분기 실적 발표 및 컨퍼런스콜",
+                            "date": "2026-10-21",
+                            "time_et": "11:00",
+                            "source_text": "October 21, 2026, followed by a call at 11:00 a.m. ET",
+                        }
+                    ],
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+        batch = parse_analysis_response(response, [candidate])
+
+        self.assertEqual(batch.errors, {})
+        event = batch.analyses[candidate.candidate_id].official_events[0]
+        self.assertEqual(event.event_date, date(2026, 10, 21))
+        self.assertEqual(event.time_et, "11:00")
+        self.assertEqual(event.source_url, candidate.source_url)
+
     def test_periodic_filing_requires_two_grounded_facts(self):
         candidate = screen_candidate(
             raw(
@@ -720,6 +787,71 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
 
 
 class EvidenceIngestionServiceTest(unittest.TestCase):
+    def test_calendar_only_ir_notice_is_stored_without_independent_alert(self):
+        event = OfficialEvent(
+            event_date=date(2026, 10, 21),
+            title_ko="3분기 실적 발표 및 컨퍼런스콜",
+            source_url="https://investors.vertiv.com/earnings-date",
+            source_text="October 21, 2026 at 11:00 a.m. ET",
+            time_et="11:00",
+        )
+
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                candidate = candidates[0]
+                return EvidenceAnalysisBatch(
+                    analyses={
+                        candidate.candidate_id: EvidenceAnalysis(
+                            candidate_id=candidate.candidate_id,
+                            relevant=True,
+                            headline_ko="버티브, 3분기 실적 일정 공지",
+                            summary_ko="공식 실적 발표 일정을 확정했다.",
+                            facts=(
+                                GroundedFact(event.source_text, "10월 21일 발표한다."),
+                            ),
+                            interpretation_ko="공식 일정이다.",
+                            thesis_impact="neutral",
+                            impact_reason_ko="일정 자체는 논지 변화가 아니다.",
+                            confidence="high",
+                            official_events=(event,),
+                        )
+                    },
+                    errors={},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+            )
+            notice = raw(
+                "Vertiv Announces Date of Third Quarter 2026 Earnings",
+                kind=EvidenceKind.IR,
+                source_name="Vertiv IR",
+                source_url=event.source_url,
+                source_text=event.source_text,
+            )
+
+            report = service.ingest([notice], NOW)
+            stored = repository.upcoming_official_events(
+                "VRT",
+                date(2026, 10, 19),
+                date(2026, 10, 25),
+            )
+            catalysts = repository.recent_catalysts(
+                "VRT",
+                NOW - timedelta(days=1),
+                limit=10,
+            )
+
+            self.assertEqual(report.alerts, 0)
+            self.assertEqual(stored, [event])
+            self.assertEqual(catalysts, [])
+            self.assertEqual(repository.pending_deliveries(NOW), [])
+
     def test_later_sec_filing_links_to_news_event_without_second_alert(self):
         class Analyzer:
             def analyze(self, candidates, _profile):

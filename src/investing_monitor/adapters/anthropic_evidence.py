@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import requests
@@ -15,6 +16,7 @@ from investing_monitor.domain.evidence import (
     EvidenceProfile,
     GroundedFact,
 )
+from investing_monitor.domain.models import OfficialEvent
 
 
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
@@ -180,6 +182,38 @@ def _validated_analysis(
         )
     if impact == "damage" and confidence != "high":
         impact = "risk"
+    official_events = []
+    if candidate.kind is EvidenceKind.IR:
+        for item in (row.get("official_events") or [])[:3]:
+            if not isinstance(item, dict):
+                raise EvidenceValidationError("official_events must contain objects")
+            title_ko = str(item.get("title_ko") or "").strip()
+            date_text = str(item.get("date") or "").strip()
+            time_et = str(item.get("time_et") or "").strip()
+            source_text = str(item.get("source_text") or "").strip()
+            if not title_ko or not date_text or not source_text:
+                raise EvidenceValidationError(
+                    "each official event requires title_ko, date, and source_text"
+                )
+            try:
+                event_date = date.fromisoformat(date_text)
+            except ValueError as exc:
+                raise EvidenceValidationError("official event date must be YYYY-MM-DD") from exc
+            if time_et and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_et):
+                raise EvidenceValidationError("official event time_et must be HH:MM")
+            if _normalize_source(source_text) not in source_corpus:
+                raise EvidenceValidationError(
+                    "official event source_text is not present in source"
+                )
+            official_events.append(
+                OfficialEvent(
+                    event_date=event_date,
+                    title_ko=title_ko,
+                    source_url=candidate.source_url,
+                    source_text=source_text,
+                    time_et=time_et,
+                )
+            )
     return EvidenceAnalysis(
         candidate_id=candidate.candidate_id,
         relevant=True,
@@ -190,6 +224,7 @@ def _validated_analysis(
         thesis_impact=impact,
         impact_reason_ko=required["impact_reason_ko"],
         confidence=confidence,
+        official_events=tuple(official_events),
     )
 
 
@@ -206,6 +241,7 @@ def _analysis_prompt(
             "items": candidate.metadata.get("items", ()),
             "headline": candidate.headline,
             "source_text": candidate.source_text[:12_000],
+            "calendar_only": bool(candidate.metadata.get("calendar_only")),
         }
         for candidate in candidates
     ]
@@ -225,6 +261,8 @@ def _analysis_prompt(
 6. damage는 회사가 확인한 가이던스 하향, 핵심 수요·수익성 훼손, 회계 문제 또는 중대 규제 조치에만 사용한다.
 7. 현재 주가, 목표주가, 정확한 일일 등락률은 출력하지 않는다.
 8. 10-Q, 10-K, 20-F는 비교 기간이 드러나는 핵심 KPI 또는 명확한 정성 변화의 원문 근거를 최소 2개 제시한다.
+9. calendar_only=true인 공식 IR 공지는 독립 투자 촉매가 아니라 일정 ledger용이다. 원문에 날짜가 명시된 실적 발표나 투자자 행사만 official_events에 기록한다.
+10. official_events의 source_text는 행사 날짜가 포함된 원문 그대로의 짧은 구절이어야 한다. 날짜를 추정하지 않는다. 시간은 명시된 경우에만 미국 동부시간 24시간제 HH:MM으로 쓴다.
 
 JSON 배열만 반환한다:
 [
@@ -237,7 +275,8 @@ JSON 배열만 반환한다:
     "interpretation_ko": "장기 투자 관점의 해석 1문장",
     "thesis_impact": "strengthen|neutral|risk|damage",
     "impact_reason_ko": "분류 이유 1문장",
-    "confidence": "high|medium|low"
+    "confidence": "high|medium|low",
+    "official_events": [{{"title_ko": "공식 행사명", "date": "YYYY-MM-DD", "time_et": "HH:MM 또는 빈 문자열", "source_text": "날짜가 포함된 원문 그대로"}}]
   }},
   {{"candidate_id": "입력 ID", "relevant": false}}
 ]

@@ -23,6 +23,7 @@ from investing_monitor.domain.models import (
     MarketFrame,
     MarketSession,
     MarketSnapshot,
+    OfficialEvent,
     PriceBandSignal,
     PriceBandState,
     ThesisImpact,
@@ -443,6 +444,25 @@ class SQLiteMonitorRepository:
             )
         return CloseMarketContext(snapshot=snapshot, volume=volume)
 
+    def load_close_market_contexts(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> tuple[CloseMarketContext, ...]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT DISTINCT trading_date FROM market_observations "
+                "WHERE ticker = ? AND trading_date BETWEEN ? AND ? "
+                "AND session = 'regular' ORDER BY trading_date",
+                (ticker.upper(), start_date.isoformat(), end_date.isoformat()),
+            ).fetchall()
+        contexts = [
+            self.load_close_market_context(ticker, date.fromisoformat(row["trading_date"]))
+            for row in rows
+        ]
+        return tuple(context for context in contexts if context is not None)
+
     def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool:
         payload_json = json.dumps(
             alert.payload,
@@ -722,6 +742,7 @@ class SQLiteMonitorRepository:
                 "published_at, source_kind, analysis_json FROM evidence_candidates "
                 "WHERE ticker = ? AND status = 'analyzed' AND published_at >= ? "
                 "AND json_extract(analysis_json, '$.relevant') = 1 "
+                "AND COALESCE(json_extract(metadata_json, '$.calendar_only'), 0) = 0 "
                 "ORDER BY published_at DESC LIMIT 30",
                 (ticker.upper(), _utc_iso(since)),
             ).fetchall()
@@ -741,6 +762,7 @@ class SQLiteMonitorRepository:
                     facts=tuple(
                         fact["fact_ko"] for fact in payload.get("facts") or []
                     ),
+                    source_kind=row["source_kind"],
                 )
             )
         impact_rank = {
@@ -754,6 +776,43 @@ class SQLiteMonitorRepository:
             reverse=True,
         )
         return catalysts[:limit]
+
+    def upcoming_official_events(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 5,
+    ) -> list[OfficialEvent]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT source_url, analysis_json FROM evidence_candidates "
+                "WHERE ticker = ? AND source_kind = 'ir' AND status = 'analyzed' "
+                "ORDER BY published_at DESC",
+                (ticker.upper(),),
+            ).fetchall()
+        events = {}
+        for row in rows:
+            payload = json.loads(row["analysis_json"])
+            for item in payload.get("official_events") or []:
+                try:
+                    event_date = date.fromisoformat(item["date"])
+                    event = OfficialEvent(
+                        event_date=event_date,
+                        title_ko=item["title_ko"],
+                        source_url=row["source_url"],
+                        source_text=item["source_text"],
+                        time_et=item.get("time_et", ""),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if start_date <= event.event_date <= end_date:
+                    key = (event.event_date, event.title_ko.casefold())
+                    events.setdefault(key, event)
+        return sorted(
+            events.values(),
+            key=lambda item: (item.event_date, item.time_et, item.title_ko),
+        )[:limit]
 
     def mark_evidence_analyzed(
         self,
@@ -1095,6 +1154,16 @@ def _analysis_payload(analysis: EvidenceAnalysis) -> dict[str, object]:
         "thesis_impact": analysis.thesis_impact,
         "impact_reason_ko": analysis.impact_reason_ko,
         "confidence": analysis.confidence,
+        "official_events": [
+            {
+                "title_ko": event.title_ko,
+                "date": event.event_date.isoformat(),
+                "time_et": event.time_et,
+                "source_text": event.source_text,
+                "source_url": event.source_url,
+            }
+            for event in analysis.official_events
+        ],
     }
 
 
@@ -1116,6 +1185,17 @@ def _analysis_from_payload(payload: Mapping[str, object]) -> EvidenceAnalysis:
         thesis_impact=str(payload.get("thesis_impact") or "neutral"),
         impact_reason_ko=str(payload.get("impact_reason_ko") or ""),
         confidence=str(payload.get("confidence") or "medium"),
+        official_events=tuple(
+            OfficialEvent(
+                event_date=date.fromisoformat(str(event.get("date") or "")),
+                title_ko=str(event.get("title_ko") or ""),
+                source_url=str(event.get("source_url") or "https://example.invalid"),
+                source_text=str(event.get("source_text") or ""),
+                time_et=str(event.get("time_et") or ""),
+            )
+            for event in payload.get("official_events") or []
+            if isinstance(event, dict)
+        ),
     )
 
 

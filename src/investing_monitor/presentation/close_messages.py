@@ -33,7 +33,12 @@ def build_close_message(
             },
         },
         _section(f"{direction_icon} *종목 방향 · {direction_label}*"),
-        _section(_outcome_line(f"반도체 지수({relative.benchmark_symbol})", relative.benchmark.value)),
+        _section(
+            _outcome_line(
+                f"반도체 지수({relative.benchmark_symbol})",
+                relative.benchmark.value,
+            )
+        ),
     ]
 
     if relative.peers.value != "unavailable":
@@ -44,7 +49,11 @@ def build_close_message(
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0
-        status = "🔥 거래량 터짐" if volume_assessment.is_exploded else "📊 거래량 평시 범위"
+        status = (
+            "🔥 거래량 터짐"
+            if volume_assessment.is_exploded
+            else "📊 거래량 평시 범위"
+        )
         blocks.append(
             _section(
                 f"*{status}*\n"
@@ -86,11 +95,18 @@ def _catalyst_text(catalyst: Catalyst) -> str:
             ThesisImpact.DAMAGE: ("🔴", "논지 훼손 근거"),
         }[catalyst.impact]
     return (
-        f"{icon} *{label} · <{catalyst.source_url}|{catalyst.headline}>*\n"
-        f"{catalyst.summary}\n"
-        f"_{catalyst.source_name}_"
+        f"{icon} *{label} · <{catalyst.source_url}|{_clip(catalyst.headline, 180)}>*\n"
+        f"{_clip(catalyst.summary, 420)}\n"
+        f"_{_clip(catalyst.source_name, 100)}_"
     )
 
 
 def _section(text: str) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def _clip(value: str, limit: int) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1].rstrip() + "…"

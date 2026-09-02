@@ -126,6 +126,21 @@ class CloseMarketContext:
 
 
 @dataclass(frozen=True)
+class OfficialEvent:
+    event_date: date
+    title_ko: str
+    source_url: str
+    source_text: str
+    time_et: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title_ko.strip() or not self.source_text.strip():
+            raise ValueError("official event title and source text are required")
+        if not self.source_url.startswith(("https://", "http://")):
+            raise ValueError("official event source_url is required")
+
+
+@dataclass(frozen=True)
 class Catalyst:
     canonical_id: str
     headline: str
@@ -136,6 +151,7 @@ class Catalyst:
     impact: ThesisImpact = ThesisImpact.NEUTRAL
     confidence: str = "medium"
     facts: tuple[str, ...] = ()
+    source_kind: str = ""
 
     def __post_init__(self) -> None:
         if not self.canonical_id:
