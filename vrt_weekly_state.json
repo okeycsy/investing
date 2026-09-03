@@ -1,7 +1,9 @@
 {
   "week_start": "2026-08-31",
   "alerts_fired": [],
-  "insider_trades": [],
+  "insider_trades": [
+    "Sale: MONSER EDWARD L 15,287주 대규모"
+  ],
   "news_headlines": [
     "Vertiv, 마이크로그리드 사업 진출 위한 1.45억 달러 인수",
     "Vertiv, Utility Innovation 최대 2.6억 달러 인수 합의",
@@ -9,13 +11,16 @@
     "Vertiv, UtilityInnovation Group 인수 계약 발표",
     "AI 데이터센터용 전력망·마이크로그리드 솔루션에 26억 달러 투자"
   ],
-  "company_filings": [],
+  "company_filings": [
+    "8-K: 중요 계약 체결 (2026-09-02)"
+  ],
   "thesis_impacts": [
     "strengthen",
     "strengthen",
     "neutral",
     "strengthen",
-    "strengthen"
+    "strengthen",
+    "neutral"
   ],
   "thesis_events": [
     {
@@ -37,6 +42,11 @@
       "impact": "strengthen",
       "title": "AI 데이터센터용 전력망·마이크로그리드 솔루션에 26억 달러 투자",
       "detail": "Vertiv가 AI 데이터센터를 위한 그리드 및 마이크로그리드 솔루션에 26억 달러를 투자한다. 이는 하이퍼스케일 고객들의 전력 인프라 수요 확대에 대응하기 위한 전략적 투자로, 회사의 핵심 사업 영역인 데이터센터 인프라 확장을 의미한다.\n판단 근거: AI 데이터센터 전력 인프라 사업 확대를 통해 장기 성장성 강화 및 하이퍼스케일 고객 대응 역량 입증"
+    },
+    {
+      "impact": "risk",
+      "title": "대규모 내부자 장내 매도",
+      "detail": "MONSER EDWARD L가 15,287주를 장내 매도했습니다. 단독으로 논지 훼손을 뜻하지는 않지만 배경 확인이 필요합니다."
     }
   ],
   "rsi_readings": [
@@ -48,6 +58,7 @@
     42.06,
     42.42,
     41.95,
+    42.91,
     42.91
   ],
   "pcr_readings": [
