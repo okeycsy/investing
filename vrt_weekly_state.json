@@ -11,7 +11,9 @@
     "Vertiv, Utility Innovation 최대 2.6억 달러 인수 합의",
     "Vertiv, 분기 배당금 선언",
     "Vertiv, UtilityInnovation Group 인수 계약 발표",
-    "AI 데이터센터용 전력망·마이크로그리드 솔루션에 26억 달러 투자"
+    "AI 데이터센터용 전력망·마이크로그리드 솔루션에 26억 달러 투자",
+    "Vertiv, UIG 인수로 최대 26억 달러 투자",
+    "Vertiv UIG 인수로 AI 파워 경쟁력 강화"
   ],
   "company_filings": [
     "8-K: 중요 계약 체결 (2026-09-02)"
@@ -22,7 +24,9 @@
     "neutral",
     "strengthen",
     "strengthen",
-    "neutral"
+    "neutral",
+    "strengthen",
+    "strengthen"
   ],
   "thesis_events": [
     {
@@ -49,6 +53,16 @@
       "impact": "risk",
       "title": "대규모 내부자 장내 매도",
       "detail": "MONSER EDWARD L가 15,287주를 장내 매도했습니다. 단독으로 논지 훼손을 뜻하지는 않지만 배경 확인이 필요합니다."
+    },
+    {
+      "impact": "strengthen",
+      "title": "Vertiv, UIG 인수로 최대 26억 달러 투자",
+      "detail": "Vertiv가 AI 데이터센터의 주요 병목(냉각)을 해결하기 위해 UIG 인수에 최대 26억 달러를 투자하는 거대 베팅을 단행했다. 이는 액체냉각 등 열관리 인프라 역량 강화를 통해 AI 인프라 사업 확대를 의도한 전략적 M&A로 평가된다.\n판단 근거: 핵심 사업인 데이터센터 냉각/열관리 인프라 역량 강화를 통해 시장 우위 확대 및 성장 가능성 상승"
+    },
+    {
+      "impact": "strengthen",
+      "title": "Vertiv UIG 인수로 AI 파워 경쟁력 강화",
+      "detail": "Vertiv의 UIG 인수 거래가 APH, SMCI 등 경쟁사 대비 AI 파워 인프라 사업에서 경쟁 우위를 더욱 심화시킬 수 있는지에 대한 분석이다. 해당 거래를 통해 Vertiv의 AI 데이터센터 파워 및 냉각 솔루션 통합 역량이 강화될 것으로 예상된다.\n판단 근거: 경쟁사 대비 AI 인프라 통합 솔루션 경쟁력 강화로 시장 점유율 확대 가능성 상승"
     }
   ],
   "rsi_readings": [
@@ -61,7 +75,8 @@
     42.42,
     41.95,
     42.91,
-    42.91
+    42.91,
+    50.22
   ],
   "pcr_readings": [
     0.775,
