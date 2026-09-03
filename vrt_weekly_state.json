@@ -1,6 +1,8 @@
 {
   "week_start": "2026-08-31",
-  "alerts_fired": [],
+  "alerts_fired": [
+    "큰 폭 양전"
+  ],
   "insider_trades": [
     "Sale: MONSER EDWARD L 15,287주 대규모"
   ],

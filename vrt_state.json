@@ -94,7 +94,6 @@
   ],
   "last_13f_positions": {},
   "price_history": [
-    289.52,
     280.98,
     297.88,
     302.87,
@@ -153,10 +152,11 @@
     257.08,
     258.72,
     255.97,
-    256.7
+    256.7,
+    269.61
   ],
-  "price_alert_max_pct": 0,
-  "price_alert_direction": "",
+  "price_alert_max_pct": 5,
+  "price_alert_direction": "up",
   "price_alert_date": "2026-09-03",
   "volume_alert_date": "",
   "pending_morning_alert": null
