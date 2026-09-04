@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from investing_monitor.cli import _build_slack_canary, build_parser, main
 from investing_monitor.adapters.sqlite_repository import SQLiteMonitorRepository
+from investing_monitor.presentation.previews import PREVIEW_KINDS, build_preview_message
 from investing_monitor.presentation.quality import audit_message
 from investing_monitor.ports.repository import AlertRecord
 from investing_monitor.runtime.tick import PlannedTask, TickPlan, TickTask
@@ -49,6 +50,89 @@ def product_payload() -> dict:
 
 
 class ProductionCliTest(unittest.TestCase):
+    def test_empty_successful_news_polls_are_not_runtime_failures(self):
+        class NewsOnlyPlanner:
+            def plan(self, now, _checkpoints, *, last_completed_run_at):
+                return TickPlan(
+                    now=now,
+                    gap_seconds=0,
+                    tasks=(PlannedTask(TickTask.NEWS, "news"),),
+                )
+
+        class EmptySource:
+            def fetch(self, _profile):
+                return []
+
+        class EmptyReport:
+            failed = 0
+            analyzed = 0
+
+            def as_dict(self):
+                return {
+                    "seen": 0,
+                    "inserted_pending": 0,
+                    "filtered": 0,
+                    "quarantined": 0,
+                    "enriched": 0,
+                    "analyzed": 0,
+                    "relevant": 0,
+                    "failed": 0,
+                    "alerts": 0,
+                    "reclassified_low_value": 0,
+                    "reconciled_clusters": 0,
+                }
+
+        class Ingestion:
+            called = False
+
+            def ingest(self, candidates, _now):
+                self.called = True
+                self.candidates = candidates
+                return EmptyReport()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            ingestion = Ingestion()
+            output = io.StringIO()
+            with (
+                patch(
+                    "investing_monitor.cli.TickPlanner",
+                    side_effect=lambda **_kwargs: NewsOnlyPlanner(),
+                ),
+                patch("investing_monitor.cli.YahooNewsAdapter", return_value=EmptySource()),
+                patch(
+                    "investing_monitor.cli.InvestorRelationsFeedAdapter",
+                    return_value=EmptySource(),
+                ),
+                patch(
+                    "investing_monitor.cli.EvidenceIngestionService",
+                    return_value=ingestion,
+                ),
+                redirect_stdout(output),
+            ):
+                result = main(
+                    [
+                        "--db",
+                        str(path),
+                        "shadow-tick",
+                        "--config",
+                        str(ROOT / "monitor_config.md"),
+                        "--now",
+                        NOW.isoformat(),
+                        "--scheduled-at",
+                        NOW.isoformat(),
+                        "--run-id",
+                        "empty-news",
+                        "--trigger",
+                        "schedule",
+                    ]
+                )
+
+            self.assertEqual(result, 0, output.getvalue())
+            self.assertTrue(ingestion.called)
+            self.assertEqual(ingestion.candidates, [])
+            self.assertEqual(SQLiteMonitorRepository(path).recent_runs()[0].status, "success")
+
     def test_canary_is_labeled_without_mutating_product_message(self):
         source = product_payload()
         original = copy.deepcopy(source)
@@ -87,9 +171,28 @@ class ProductionCliTest(unittest.TestCase):
         canary = parser.parse_args(
             ["slack-canary", "--repository", "/tmp/repository"]
         )
+        preview = parser.parse_args(
+            ["slack-preview", "--repository", "/tmp/repository"]
+        )
 
         self.assertEqual(production.repository, "/tmp/repository")
         self.assertEqual(canary.repository, "/tmp/repository")
+        self.assertEqual(preview.repository, "/tmp/repository")
+
+    def test_all_preview_fixtures_are_labeled_and_quality_approved(self):
+        for kind in PREVIEW_KINDS:
+            with self.subTest(kind=kind):
+                payload = build_preview_message(
+                    kind,
+                    ticker="VRT",
+                    benchmark="SOXX",
+                    peers=("ETN", "GEV", "NVT"),
+                    now=NOW,
+                )
+
+                self.assertTrue(payload["text"].startswith("[V2 미리보기]"))
+                self.assertIn("실제 투자 신호가 아닙니다", str(payload["blocks"][1]))
+                self.assertTrue(audit_message("delivery_canary", payload).passed)
 
     def test_production_tick_delivers_outbox_with_remote_checkpoints(self):
         class DeliveryOnlyPlanner:
@@ -192,6 +295,8 @@ class ProductionWorkflowTest(unittest.TestCase):
         self.assertIn("13 8 * * 1", workflow)
         self.assertIn("timezone: 'Asia/Seoul'", workflow)
         self.assertIn("slack-canary", workflow)
+        self.assertIn("slack-preview", workflow)
+        self.assertIn("preview_kind", workflow)
         self.assertIn("production-tick", workflow)
         self.assertIn("github.event_name == 'schedule'", workflow)
         self.assertIn("V2_PRODUCTION_ENABLED: 'true'", workflow)
@@ -200,6 +305,21 @@ class ProductionWorkflowTest(unittest.TestCase):
         self.assertIn("group: ticker-monitor-v2-state", workflow)
         self.assertNotIn("\n  schedule:", shadow)
         self.assertNotIn("\n  schedule:", legacy)
+
+    def test_daily_state_backup_is_isolated_and_retained_for_seven_days(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "monitor_v2_backup.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("schedule:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("group: ticker-monitor-v2-state", workflow)
+        self.assertIn("restore-state", workflow)
+        self.assertIn("quality-report", workflow)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertIn("path: .runtime/monitor.db", workflow)
+        self.assertIn("retention-days: 7", workflow)
+        self.assertNotIn("SLACK_WEBHOOK_URL", workflow)
 
 
 if __name__ == "__main__":

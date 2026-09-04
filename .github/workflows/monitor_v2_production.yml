@@ -21,9 +21,23 @@ on:
         default: canary
         options:
           - canary
+          - preview
           - tick
           - doctor
           - status
+      preview_kind:
+        description: 'Fixture message to preview'
+        required: true
+        type: choice
+        default: move-up
+        options:
+          - move-up
+          - move-down
+          - volume
+          - catalyst
+          - filing
+          - close
+          - weekly
 
 concurrency:
   group: ticker-monitor-v2-state
@@ -74,6 +88,12 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: investing-monitor --db .runtime/monitor.db slack-canary --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
+      - name: Send one labeled Slack message preview
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'preview'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: investing-monitor --db .runtime/monitor.db slack-preview --kind "${{ inputs.preview_kind }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
+
       - name: Run one production tick
         if: github.event_name == 'schedule' || inputs.mode == 'tick'
         env:
@@ -100,5 +120,5 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db quality-report
 
       - name: Checkpoint runtime state
-        if: always() && (github.event_name == 'schedule' || inputs.mode == 'canary' || inputs.mode == 'tick')
+        if: always() && (github.event_name == 'schedule' || inputs.mode == 'canary' || inputs.mode == 'preview' || inputs.mode == 'tick')
         run: investing-monitor --db .runtime/monitor.db checkpoint-state --run-id "${{ github.run_id }}-final"

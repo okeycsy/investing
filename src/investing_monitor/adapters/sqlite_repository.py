@@ -1100,6 +1100,25 @@ class SQLiteMonitorRepository:
             for row in rows
         ]
 
+    def pending_delivery(self, event_key: str, now: datetime) -> PendingDelivery | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT id, event_key, payload_json, attempts, delivery_status FROM outbox "
+                "WHERE event_key = ? AND delivered_at IS NULL "
+                "AND delivery_status IN ('pending', 'failed') "
+                "AND next_attempt_at <= ?",
+                (event_key, now.astimezone(timezone.utc).isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        return PendingDelivery(
+            outbox_id=row["id"],
+            event_key=row["event_key"],
+            payload=json.loads(row["payload_json"]),
+            attempts=row["attempts"],
+            status=row["delivery_status"],
+        )
+
     def mark_sending(self, outbox_id: int, attempted_at: datetime) -> None:
         with closing(self._connect()) as connection, connection:
             connection.execute(
@@ -1284,15 +1303,25 @@ class SQLiteMonitorRepository:
         task_name: str,
         attempted_at: datetime,
         error: str,
+        metadata: Mapping[str, object] | None = None,
     ) -> None:
+        serialized = json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":"))
         with closing(self._connect()) as connection, connection:
             connection.execute(
                 "INSERT INTO task_checkpoints "
-                "(checkpoint_key, task_name, last_attempt_at, last_error) VALUES (?, ?, ?, ?) "
+                "(checkpoint_key, task_name, last_attempt_at, last_error, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(checkpoint_key) DO UPDATE SET "
                 "task_name = excluded.task_name, "
-                "last_attempt_at = excluded.last_attempt_at, last_error = excluded.last_error",
-                (checkpoint_key, task_name, _utc_iso(attempted_at), error[:1000]),
+                "last_attempt_at = excluded.last_attempt_at, last_error = excluded.last_error, "
+                "metadata_json = excluded.metadata_json",
+                (
+                    checkpoint_key,
+                    task_name,
+                    _utc_iso(attempted_at),
+                    error[:1000],
+                    serialized,
+                ),
             )
 
     def recent_runs(self, limit: int = 10) -> list[RunCheckpoint]:

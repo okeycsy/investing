@@ -31,6 +31,7 @@ from investing_monitor.domain.policies import (
     assess_relative_performance,
 )
 from investing_monitor.ports.providers import DeliveryOutcomeUnknown
+from investing_monitor.ports.repository import AlertRecord
 from investing_monitor.presentation.slack_messages import build_price_band_message
 
 
@@ -211,6 +212,49 @@ class RepositoryContractTest(unittest.TestCase):
 
 
 class DeliveryContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_targeted_test_delivery_does_not_consume_product_outbox(self):
+        class Notifier:
+            def __init__(self):
+                self.payloads = []
+
+            async def send(self, payload):
+                self.payloads.append(payload)
+                return "ok"
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            repository = SQLiteMonitorRepository(path)
+            for event_key, change in (("product", 4.2), ("preview", -4.2)):
+                repository.record_alert(
+                    AlertRecord(
+                        event_key=event_key,
+                        ticker="VRT",
+                        alert_type="price_band",
+                        created_at=OBSERVED_AT,
+                        payload=build_price_band_message(
+                            PriceBandPolicy().evaluate(snapshot(change), None)[0],
+                            assess_relative_performance(snapshot(change)),
+                            None,
+                            assess_intraday_volume(None),
+                            (),
+                        ),
+                    )
+                )
+            notifier = Notifier()
+
+            report = await OutboxDeliveryService(
+                repository,
+                notifier,
+            ).deliver_pending(event_key="preview")
+
+            self.assertEqual(report.selected, 1)
+            self.assertEqual(report.delivered, 1)
+            self.assertIn("-4.0%", notifier.payloads[0]["text"])
+            self.assertEqual(
+                [item.event_key for item in repository.pending_deliveries(OBSERVED_AT)],
+                ["product"],
+            )
+
     async def test_ambiguous_provider_failure_is_not_retried_automatically(self):
         class AmbiguousNotifier:
             async def send(self, _payload):
@@ -224,7 +268,9 @@ class DeliveryContractTest(unittest.IsolatedAsyncioTestCase):
 
             delivered = await service.deliver_pending()
 
-            self.assertEqual(delivered, 0)
+            self.assertEqual(delivered.delivered, 0)
+            self.assertEqual(delivered.outcome_unknown, 1)
+            self.assertTrue(delivered.attention_required)
             self.assertEqual(
                 repository.pending_deliveries(OBSERVED_AT + timedelta(days=1)),
                 [],
@@ -261,7 +307,8 @@ class DeliveryContractTest(unittest.IsolatedAsyncioTestCase):
                 checkpoint=checkpoint_state,
             ).deliver_pending()
 
-            self.assertEqual(delivered, 1)
+            self.assertEqual(delivered.delivered, 1)
+            self.assertFalse(delivered.attention_required)
             self.assertEqual(
                 transitions,
                 [

@@ -212,6 +212,17 @@ class TickPlanner:
 TaskHandler = Callable[[PlannedTask], Mapping[str, object] | None]
 
 
+class TaskExecutionError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.metadata = dict(metadata or {})
+
+
 @dataclass(frozen=True)
 class TickExecutionReport:
     run_id: str
@@ -294,6 +305,9 @@ class TickRunner:
             try:
                 metadata = handler(task) or {}
             except Exception as exc:  # task isolation is the runtime contract
+                failure_metadata = (
+                    exc.metadata if isinstance(exc, TaskExecutionError) else {}
+                )
                 duration_ms = max(
                     0,
                     int((self.monotonic() - started_monotonic) * 1_000),
@@ -305,11 +319,14 @@ class TickRunner:
                     "duration_ms": duration_ms,
                     "error": str(exc),
                 }
+                if failure_metadata:
+                    details[task.checkpoint_key]["metadata"] = failure_metadata
                 self.repository.mark_task_failed(
                     task.checkpoint_key,
                     task.name.value,
                     attempted_at,
                     str(exc),
+                    failure_metadata,
                 )
                 continue
             completed_at = _aware_utc(self.clock())

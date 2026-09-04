@@ -1084,6 +1084,10 @@ Slack canary run `33870909963`에서 `accepted` 응답 및 원격 outbox `delive
 | E-05 golden message tests | P0 | screenshots and text fixtures |
 | E-06 preview dispatch | P1 | fixture message preview workflow |
 
+구현 기록 (2026-09-04): A-06의 사람이 읽는 Job Summary와 7일 production DB
+artifact, E-06의 7종 Slack fixture preview를 production workflow에 추가했다. test
+delivery는 지정한 event key만 소비하므로 기존 production outbox를 먼저 전송하지 않는다.
+
 ### Epic F: Verification and migration
 
 | Task | 우선순위 | 산출물 |

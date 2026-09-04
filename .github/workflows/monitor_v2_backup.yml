@@ -1,0 +1,52 @@
+name: Monitor V2 State Backup
+
+on:
+  schedule:
+    - cron: '37 21 * * 1-5'
+      timezone: 'America/New_York'
+  workflow_dispatch:
+
+concurrency:
+  group: ticker-monitor-v2-state
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Restore production runtime state
+        run: investing-monitor --db .runtime/monitor.db restore-state
+
+      - name: Verify database
+        run: investing-monitor --db .runtime/monitor.db doctor
+
+      - name: Build operations report
+        continue-on-error: true
+        run: investing-monitor --db .runtime/monitor.db quality-report
+
+      - name: Upload recovery snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-v2-state-${{ github.run_id }}
+          path: .runtime/monitor.db
+          if-no-files-found: error
+          retention-days: 7

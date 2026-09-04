@@ -232,6 +232,8 @@ class QualityReportService:
         scheduled_runs = [
             run for run in runs if _run_trigger(run.summary) == "schedule"
         ]
+        provider_state = _current_provider_state(scheduled_runs)
+        status_counts = self.repository.quality_status_counts()
         current_build_scheduled_runs = [
             run
             for run in scheduled_runs
@@ -277,7 +279,56 @@ class QualityReportService:
             current_build_scheduler_status = "insufficient_history"
         else:
             current_build_scheduler_status = "healthy"
+        latest_scheduled_run = scheduled_runs[0] if scheduled_runs else None
+        incidents = []
+        if latest_scheduled_run and latest_scheduled_run.gap_seconds >= 15 * 60:
+            incidents.append(
+                {
+                    "type": "schedule_gap",
+                    "severity": "incident",
+                    "gap_seconds": latest_scheduled_run.gap_seconds,
+                    "run_id": latest_scheduled_run.run_id,
+                }
+            )
+        for provider_name, state in provider_state.items():
+            if state["consecutive_failures"] >= 3:
+                incidents.append(
+                    {
+                        "type": "provider_failure",
+                        "severity": "incident",
+                        "provider": provider_name,
+                        "consecutive_failures": state["consecutive_failures"],
+                    }
+                )
+        outbox_counts = status_counts.get("outbox", {})
+        delivery_attention = sum(
+            int(outbox_counts.get(status, 0))
+            for status in ("failed", "delivery_unknown", "discarded")
+        )
+        latest_partial = bool(
+            latest_scheduled_run and latest_scheduled_run.status != "success"
+        )
+        if incidents:
+            operational_status = "incident"
+        elif not scheduled_runs:
+            operational_status = "unobserved"
+        elif (
+            scheduler_status == "degraded"
+            or latest_partial
+            or delivery_attention
+            or any(
+                state["latest_status"] in {"failed", "degraded"}
+                for state in provider_state.values()
+            )
+        ):
+            operational_status = "degraded"
+        elif scheduler_status == "insufficient_history":
+            operational_status = "observing"
+        else:
+            operational_status = "healthy"
         runtime = {
+            "operational_status": operational_status,
+            "incidents": incidents,
             "runs_checked": len(runs),
             "successful_runs": sum(run.status == "success" for run in runs),
             "partial_runs": sum(run.status != "success" for run in runs),
@@ -333,6 +384,8 @@ class QualityReportService:
             "current_build_scheduled_provider_health": _finalize_latency_samples(
                 current_build_scheduled_provider_samples
             ),
+            "provider_state": provider_state,
+            "delivery_attention_count": delivery_attention,
             "market_recovery": market_recovery,
         }
         poll_coverage = _regular_session_coverage(
@@ -435,7 +488,7 @@ class QualityReportService:
             runtime=runtime,
             product_quality=product_quality,
             shadow_validation=shadow_validation,
-            status_counts=self.repository.quality_status_counts(),
+            status_counts=status_counts,
         )
 
 
@@ -523,6 +576,50 @@ def _run_trigger(summary: object) -> str:
         return "unknown"
     trigger = str(summary.get("trigger") or "unknown").strip().lower()
     return trigger or "unknown"
+
+
+def _current_provider_state(
+    runs: list[RunCheckpoint],
+) -> dict[str, dict[str, object]]:
+    histories: dict[str, list[tuple[str, RunCheckpoint]]] = {}
+    for run in runs:
+        details = run.summary.get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        for detail in details.values():
+            if not isinstance(detail, dict):
+                continue
+            metadata = detail.get("metadata") or {}
+            providers = metadata.get("providers") if isinstance(metadata, dict) else None
+            if not isinstance(providers, dict):
+                continue
+            for provider_name, provider in providers.items():
+                if not isinstance(provider, dict):
+                    continue
+                histories.setdefault(str(provider_name), []).append(
+                    (str(provider.get("status") or "unknown"), run)
+                )
+
+    result: dict[str, dict[str, object]] = {}
+    for provider_name, history in sorted(histories.items()):
+        consecutive_failures = 0
+        last_success_at = None
+        counting_failures = True
+        for status, run in history:
+            if last_success_at is None and status in {"success", "recovered"}:
+                last_success_at = run.started_at.isoformat()
+            if counting_failures and status in {"failed", "degraded"}:
+                consecutive_failures += 1
+            else:
+                counting_failures = False
+        latest_status, latest_run = history[0]
+        result[provider_name] = {
+            "latest_status": latest_status,
+            "latest_observed_at": latest_run.started_at.isoformat(),
+            "last_success_at": last_success_at,
+            "consecutive_failures": consecutive_failures,
+        }
+    return result
 
 
 def _same_session_intervals(starts: list[datetime]) -> list[int]:

@@ -128,7 +128,9 @@ class DeliveryRejectionStateTest(unittest.IsolatedAsyncioTestCase):
                 checkpoint=checkpoints.append,
             ).deliver_pending()
 
-            self.assertEqual(delivered, 0)
+            self.assertEqual(delivered.delivered, 0)
+            self.assertEqual(delivered.discarded, 1)
+            self.assertTrue(delivered.attention_required)
             self.assertEqual(
                 [item.split(":", 1)[0] for item in checkpoints],
                 ["sending", "delivery-discarded"],

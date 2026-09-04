@@ -23,6 +23,9 @@
 - `replay-market`은 운영 DB와 Slack을 사용하지 않는 격리 DB에서 완료된 거래일의 Yahoo 5분봉을 재생합니다. 동일 방향 최고 구간 압축, 양·음 방향 반전, 재실행 중복 0건, 상대 흐름·실제 baseline 거래량과 메시지 품질을 검증합니다.
 - 품질 리포트의 Stage 5 판정은 GitHub `schedule` poll coverage와 Yahoo 5분봉 복구 coverage를 분리합니다. 스케줄 지연은 감추지 않고 advisory로 남기되, XNYS 조기폐장을 포함한 세션별 5분 구간을 모두 복원했는지로 전체 거래일을 계산합니다. 출시 게이트는 현재 build SHA가 직접 만든 schedule/provider 기록, 메시지, 시장 관측, 근거 알림만 사용하며 이전 빌드의 정상 이력을 승계하지 않습니다. 현재 빌드의 완전한 거래일 2개, 거래일당 비정기 알림 0~3건, 저가치·중복 근거 0건을 채우기 전에는 `blocked` 또는 `observing`이며 production 전환을 허용하지 않습니다.
 - production 전달 코어는 Slack 호출 전에 outbox를 `sending`으로 원격 checkpoint하고, 호출 결과를 `delivered`, `failed`, `discarded`, `delivery_unknown`으로 구분해 다시 checkpoint합니다. timeout처럼 수락 여부가 모호한 요청은 자동 재발송하지 않습니다. 2026-09-04 canary run `33870909963`에서 Slack `accepted`와 최종 `delivered` checkpoint를 확인했습니다.
+- production과 품질 리포트는 schedule gap, task 결과, provider별 최근 성공과 연속 실패, Slack 전송의 성공·재시도·결과 불명·영구 거절을 사람이 읽는 Actions Summary로 제공합니다. 15분 schedule gap 또는 같은 provider 3회 연속 실패는 투자 채널과 분리된 workflow warning으로 표시합니다.
+- `Monitor V2 Production`의 `preview` 모드는 MOVE 상승·하락, 거래량, 회사 사건, SEC 공시, 장 마감, 주간 리뷰 fixture를 production과 같은 Slack adapter로 전송합니다. 모두 `미리보기`와 `실제 투자 신호가 아님`을 명시하며 지정한 preview event만 전송해 기존 outbox를 소비하지 않습니다.
+- `Monitor V2 State Backup`은 평일 장 종료 후 production SQLite snapshot을 검증해 GitHub artifact로 보관하고 7일 뒤 자동 삭제합니다. production state branch와 같은 concurrency group을 사용해 checkpoint 도중의 DB를 읽지 않습니다.
 - SEC 인라인 XBRL의 숨김 메타데이터는 제거하고 10-Q/10-K의 실제 MD&A를 우선 추출합니다. 폼 번호만 있거나 본문을 확보하지 못한 공시는 알림으로 만들지 않습니다.
 - Form 4와 Yahoo 내부자 집계는 거래 코드를 구조화해 `P` 장내매수와 `S` 장내매도만 materiality 기준을 통과할 수 있습니다. `A` 보상, `M` 옵션 행사, `F` 세금 처리는 독립 알림 없이 ledger에만 저장합니다.
 - `Monitor V2 Production`은 New York 시간대 기준 장중 5분, 장외 30분, 주말 2시간 schedule로 동일한 production tick을 실행합니다. close와 weekly는 별도 구현을 중복 호출하지 않고 저장된 due-state로 처리합니다.
@@ -48,6 +51,7 @@ investing-monitor market-tick --config monitor_config.md
 investing-monitor shadow-tick --config monitor_config.md
 investing-monitor quality-report
 investing-monitor replay-market --days 3
+investing-monitor slack-preview --kind move-up
 ```
 
 ## 1차 정리 범위

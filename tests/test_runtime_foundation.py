@@ -20,7 +20,12 @@ from investing_monitor.adapters.git_state_branch import (
 from investing_monitor.adapters.exchange_calendar import XNYSCalendar
 from investing_monitor.adapters.sqlite_repository import SCHEMA_VERSION, SQLiteMonitorRepository
 from investing_monitor.ports.runtime import TaskCheckpoint
-from investing_monitor.runtime.tick import TickPlanner, TickRunner, TickTask
+from investing_monitor.runtime.tick import (
+    TaskExecutionError,
+    TickPlanner,
+    TickRunner,
+    TickTask,
+)
 
 
 NOW = datetime(2026, 9, 2, 14, 31, tzinfo=timezone.utc)
@@ -124,6 +129,35 @@ class TickPlannerTest(unittest.TestCase):
 
 
 class TickRunnerTest(unittest.TestCase):
+    def test_structured_failure_keeps_provider_health_in_run_and_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+
+            def fail_news(_task):
+                raise TaskExecutionError(
+                    "all news sources failed",
+                    metadata={
+                        "providers": {
+                            "yahoo": {"status": "failed", "latency_ms": 120}
+                        }
+                    },
+                )
+
+            report = TickRunner(
+                repository,
+                {TickTask.NEWS: fail_news},
+                planner=TickPlanner(enabled_tasks={TickTask.NEWS}),
+                clock=lambda: NOW,
+            ).run("failed-news", scheduled_at=NOW, trigger="schedule")
+
+            expected = {
+                "providers": {
+                    "yahoo": {"status": "failed", "latency_ms": 120}
+                }
+            }
+            self.assertEqual(report.details["news"]["metadata"], expected)
+            self.assertEqual(repository.task_checkpoints()["news"].metadata, expected)
+
     def test_run_summary_keeps_task_duration_and_provider_health(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")

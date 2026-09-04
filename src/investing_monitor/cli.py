@@ -45,9 +45,21 @@ from investing_monitor.application.quality import QualityReportService
 from investing_monitor.application.replay import MarketReplayLab
 from investing_monitor.application.sec_monitor import SecMonitorService
 from investing_monitor.presentation.evidence_messages import build_evidence_message
+from investing_monitor.presentation.operations import (
+    build_quality_summary,
+    build_tick_summary,
+    quality_annotations,
+)
+from investing_monitor.presentation.previews import PREVIEW_KINDS, build_preview_message
 from investing_monitor.presentation.quality import audit_message
 from investing_monitor.ports.repository import AlertRecord
-from investing_monitor.runtime.tick import NEW_YORK, TickPlanner, TickRunner, TickTask
+from investing_monitor.runtime.tick import (
+    NEW_YORK,
+    TaskExecutionError,
+    TickPlanner,
+    TickRunner,
+    TickTask,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +108,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("GITHUB_RUN_ID", ""),
     )
     _add_git_state_arguments(slack_canary)
+
+    slack_preview = subparsers.add_parser(
+        "slack-preview",
+        help="send one labeled fixture message through the production Slack adapter",
+    )
+    slack_preview.add_argument("--config", default="monitor_config.md")
+    slack_preview.add_argument("--kind", choices=PREVIEW_KINDS, default="move-up")
+    slack_preview.add_argument(
+        "--run-id",
+        default=os.environ.get("GITHUB_RUN_ID", ""),
+    )
+    _add_git_state_arguments(slack_preview)
 
     replay = subparsers.add_parser(
         "replay-market",
@@ -184,50 +208,62 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "slack-canary":
         run_id = args.run_id or f"manual-{uuid.uuid4()}"
         profile = load_instrument_profile(args.config)
-        notifier = SlackWebhookNotifier(os.environ.get("SLACK_WEBHOOK_URL", ""))
         source = _latest_valid_product_alert(repository)
         payload = _build_slack_canary(source.payload)
         event_key = f"delivery-canary:{run_id}"
-        inserted = repository.record_alert(
-            AlertRecord(
-                event_key=event_key,
-                ticker=profile.ticker,
-                alert_type="delivery_canary",
-                created_at=datetime.now(timezone.utc),
-                payload=payload,
-            )
-        )
-        if not inserted:
-            raise RuntimeError(f"Slack canary already exists for run {run_id}")
-        checkpoint_results = []
-        state_store = _state_store(args)
-
-        def checkpoint_delivery(reason: str) -> None:
-            checkpoint_results.append(
-                state_store.checkpoint(
-                    database_path,
-                    run_id=f"{run_id}:{reason}",
-                )
-            )
-
-        delivered = asyncio.run(
-            OutboxDeliveryService(
-                repository,
-                notifier,
-                checkpoint=checkpoint_delivery,
-            ).deliver_pending(limit=1)
+        delivery, checkpoint_count = _deliver_test_message(
+            repository,
+            database_path,
+            args,
+            event_key=event_key,
+            ticker=profile.ticker,
+            payload=payload,
+            run_id=run_id,
         )
         _emit(
             {
                 "command": args.command,
                 "event_key": event_key,
                 "source_event_key": source.event_key,
-                "delivered": delivered,
-                "remote_checkpoints": len(checkpoint_results),
+                "delivered": delivery.delivered,
+                "delivery": delivery.as_dict(),
+                "remote_checkpoints": checkpoint_count,
             },
             args.summary_file,
         )
-        return 0 if delivered == 1 else 1
+        return 0 if delivery.delivered == 1 else 1
+
+    if args.command == "slack-preview":
+        run_id = args.run_id or f"manual-{uuid.uuid4()}"
+        profile = load_instrument_profile(args.config)
+        payload = build_preview_message(
+            args.kind,
+            ticker=profile.ticker,
+            benchmark=profile.benchmark,
+            peers=profile.peers,
+            now=datetime.now(timezone.utc),
+        )
+        event_key = f"delivery-preview:{args.kind}:{run_id}"
+        delivery, checkpoint_count = _deliver_test_message(
+            repository,
+            database_path,
+            args,
+            event_key=event_key,
+            ticker=profile.ticker,
+            payload=payload,
+            run_id=run_id,
+        )
+        _emit(
+            {
+                "command": args.command,
+                "kind": args.kind,
+                "event_key": event_key,
+                "delivery": delivery.as_dict(),
+                "remote_checkpoints": checkpoint_count,
+            },
+            args.summary_file,
+        )
+        return 0 if delivery.delivered == 1 else 1
 
     if args.command == "replay-market":
         now = datetime.now(timezone.utc)
@@ -308,10 +344,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         def handle_market(_task):
             provider_started = monotonic()
-            cycle = adapter.fetch_cycle(
-                now,
-                last_observed_at=repository.latest_market_observation_at(profile.ticker),
-            )
+            try:
+                cycle = adapter.fetch_cycle(
+                    now,
+                    last_observed_at=repository.latest_market_observation_at(profile.ticker),
+                )
+            except Exception as exc:
+                raise TaskExecutionError(
+                    str(exc),
+                    metadata={
+                        "providers": {
+                            "yahoo_market": {
+                                "status": "failed",
+                                "latency_ms": int(
+                                    (monotonic() - provider_started) * 1_000
+                                ),
+                            }
+                        }
+                    },
+                ) from exc
             report = service.process(
                 cycle,
                 repository.recent_catalysts(
@@ -381,12 +432,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 (monotonic() - source_started) * 1_000
                             ),
                         }
-                if not candidates:
-                    raise RuntimeError(
+                if len(source_errors) == 2:
+                    raise TaskExecutionError(
                         "all news sources failed: "
                         + "; ".join(
                             f"{name}={error}" for name, error in source_errors.items()
-                        )
+                        ),
+                        metadata={"providers": provider_health},
                     )
                 analysis_started = monotonic()
                 report = ingestion.ingest(candidates, now)
@@ -412,7 +464,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             def handle_sec(_task):
                 provider_started = monotonic()
-                report = sec_service.poll(now)
+                try:
+                    report = sec_service.poll(now)
+                except Exception as exc:
+                    raise TaskExecutionError(
+                        str(exc),
+                        metadata={
+                            "providers": {
+                                "sec": {
+                                    "status": "failed",
+                                    "latency_ms": int(
+                                        (monotonic() - provider_started) * 1_000
+                                    ),
+                                }
+                            }
+                        },
+                    ) from exc
                 evidence_result["sec"] = {
                     **report.as_dict(),
                     "providers": {
@@ -514,10 +581,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             def handle_delivery(_task):
                 started = monotonic()
-                delivered = asyncio.run(delivery_service.deliver_pending())
+                report = asyncio.run(delivery_service.deliver_pending())
                 delivery_result.update(
                     {
-                        "delivered": delivered,
+                        **report.as_dict(),
                         "remote_checkpoints": len(delivery_checkpoints),
                     }
                 )
@@ -563,7 +630,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload["weekly"] = weekly_result
         if production:
             payload["delivery"] = delivery_result
-        _emit(payload, args.summary_file)
+        _emit(
+            payload,
+            args.summary_file,
+            summary_markdown=build_tick_summary(payload),
+        )
         return 0 if execution.status == "success" else 1
 
     if args.command == "plan":
@@ -612,9 +683,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository,
             calendar=XNYSCalendar(),
         ).build(limit=max(1, args.limit))
+        payload = {"command": args.command, **report.as_dict()}
+        for annotation in quality_annotations(payload):
+            print(annotation)
         _emit(
-            {"command": args.command, **report.as_dict()},
+            payload,
             args.summary_file,
+            summary_markdown=build_quality_summary(payload),
         )
         return 0 if report.passed else 1
 
@@ -689,6 +764,48 @@ def _state_store(args: argparse.Namespace) -> GitStateBranchStore:
     )
 
 
+def _deliver_test_message(
+    repository: SQLiteMonitorRepository,
+    database_path: Path,
+    args: argparse.Namespace,
+    *,
+    event_key: str,
+    ticker: str,
+    payload: dict,
+    run_id: str,
+):
+    inserted = repository.record_alert(
+        AlertRecord(
+            event_key=event_key,
+            ticker=ticker,
+            alert_type="delivery_canary",
+            created_at=datetime.now(timezone.utc),
+            payload=payload,
+        )
+    )
+    if not inserted:
+        raise RuntimeError(f"test delivery already exists for run {run_id}")
+    checkpoints = []
+    state_store = _state_store(args)
+
+    def checkpoint_delivery(reason: str) -> None:
+        checkpoints.append(
+            state_store.checkpoint(
+                database_path,
+                run_id=f"{run_id}:{reason}",
+            )
+        )
+
+    report = asyncio.run(
+        OutboxDeliveryService(
+            repository,
+            SlackWebhookNotifier(os.environ.get("SLACK_WEBHOOK_URL", "")),
+            checkpoint=checkpoint_delivery,
+        ).deliver_pending(event_key=event_key)
+    )
+    return report, len(checkpoints)
+
+
 def _parse_timestamp(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -717,12 +834,20 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat() if value else None
 
 
-def _emit(payload: dict[str, object], summary_file: str) -> int:
+def _emit(
+    payload: dict[str, object],
+    summary_file: str,
+    *,
+    summary_markdown: str = "",
+) -> int:
     rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
     print(rendered)
     if summary_file:
         path = Path(summary_file)
         with path.open("a", encoding="utf-8") as handle:
+            if summary_markdown:
+                handle.write(summary_markdown.rstrip())
+                handle.write("\n\n")
             handle.write("## Investing Monitor v2\n\n```json\n")
             handle.write(rendered)
             handle.write("\n```\n")

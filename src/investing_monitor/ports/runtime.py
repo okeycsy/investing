@@ -72,6 +72,7 @@ class RuntimeRepository(Protocol):
         task_name: str,
         attempted_at: datetime,
         error: str,
+        metadata: Mapping[str, object] | None = None,
     ) -> None: ...
 
     def recent_runs(self, limit: int = 10) -> list[RunCheckpoint]: ...

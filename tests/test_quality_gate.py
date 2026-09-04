@@ -340,6 +340,54 @@ class QualityReportTest(unittest.TestCase):
             self.assertEqual(report.runtime["p95_schedule_interval_seconds"], 25 * 60)
             self.assertEqual(report.runtime["schedule_intervals_over_15_minutes"], 1)
 
+    def test_three_consecutive_provider_failures_open_an_incident(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            for index in range(3):
+                started_at = NOW - timedelta(minutes=(2 - index) * 5)
+                run_id = f"failed-provider-{index}"
+                repository.start_run(
+                    run_id,
+                    scheduled_at=started_at,
+                    started_at=started_at,
+                    gap_seconds=5 * 60,
+                )
+                repository.finish_run(
+                    run_id,
+                    completed_at=started_at + timedelta(seconds=2),
+                    status="success",
+                    summary={
+                        "trigger": "schedule",
+                        "plan": {"tasks": []},
+                        "details": {
+                            "news": {
+                                "task": "news",
+                                "status": "success",
+                                "metadata": {
+                                    "providers": {
+                                        "yahoo": {
+                                            "status": "failed",
+                                            "latency_ms": 100,
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    },
+                )
+
+            report = QualityReportService(repository).build()
+
+            self.assertEqual(report.runtime["operational_status"], "incident")
+            self.assertEqual(
+                report.runtime["provider_state"]["yahoo"]["consecutive_failures"],
+                3,
+            )
+            self.assertEqual(
+                report.runtime["incidents"][0]["type"],
+                "provider_failure",
+            )
+
     def test_two_complete_shadow_days_unlock_test_slack_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")

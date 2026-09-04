@@ -103,6 +103,31 @@ class MarketCycleReport:
         }
 
 
+@dataclass(frozen=True)
+class DeliveryReport:
+    selected: int = 0
+    delivered: int = 0
+    retry_scheduled: int = 0
+    outcome_unknown: int = 0
+    discarded: int = 0
+
+    @property
+    def attention_required(self) -> bool:
+        return bool(
+            self.retry_scheduled or self.outcome_unknown or self.discarded
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "selected": self.selected,
+            "delivered": self.delivered,
+            "retry_scheduled": self.retry_scheduled,
+            "outcome_unknown": self.outcome_unknown,
+            "discarded": self.discarded,
+            "attention_required": self.attention_required,
+        }
+
+
 class MarketCycleService:
     def __init__(
         self,
@@ -327,10 +352,25 @@ class OutboxDeliveryService:
         self.notifier = notifier
         self.checkpoint = checkpoint or (lambda _reason: None)
 
-    async def deliver_pending(self, *, limit: int = 20) -> int:
+    async def deliver_pending(
+        self,
+        *,
+        limit: int = 20,
+        event_key: str | None = None,
+    ) -> DeliveryReport:
         now = datetime.now(timezone.utc)
+        selected = 0
         delivered = 0
-        for item in self.repository.pending_deliveries(now, limit=limit):
+        retry_scheduled = 0
+        outcome_unknown = 0
+        discarded = 0
+        if event_key is None:
+            pending = self.repository.pending_deliveries(now, limit=limit)
+        else:
+            selected_item = self.repository.pending_delivery(event_key, now)
+            pending = [selected_item] if selected_item is not None else []
+        for item in pending:
+            selected += 1
             self.repository.mark_sending(item.outbox_id, now)
             try:
                 self.checkpoint(f"sending:{item.event_key}")
@@ -346,11 +386,13 @@ class OutboxDeliveryService:
             except DeliveryOutcomeUnknown as exc:
                 self.repository.mark_delivery_unknown(item.outbox_id, now, str(exc))
                 self.checkpoint(f"delivery-unknown:{item.event_key}")
+                outcome_unknown += 1
                 continue
             except DeliveryRejected as exc:
                 if not exc.retryable:
                     self.repository.mark_discarded(item.outbox_id, now, str(exc))
                     self.checkpoint(f"delivery-discarded:{item.event_key}")
+                    discarded += 1
                     continue
                 delay_seconds = exc.retry_after_seconds or min(
                     30 * (2 ** item.attempts),
@@ -362,6 +404,7 @@ class OutboxDeliveryService:
                     str(exc),
                 )
                 self.checkpoint(f"delivery-failed:{item.event_key}")
+                retry_scheduled += 1
                 continue
             except Exception as exc:
                 delay_seconds = min(30 * (2 ** item.attempts), 15 * 60)
@@ -371,8 +414,15 @@ class OutboxDeliveryService:
                     str(exc),
                 )
                 self.checkpoint(f"delivery-failed:{item.event_key}")
+                retry_scheduled += 1
                 continue
             self.repository.mark_delivered(item.outbox_id, datetime.now(timezone.utc), receipt)
             self.checkpoint(f"delivered:{item.event_key}")
             delivered += 1
-        return delivered
+        return DeliveryReport(
+            selected=selected,
+            delivered=delivered,
+            retry_scheduled=retry_scheduled,
+            outcome_unknown=outcome_unknown,
+            discarded=discarded,
+        )
