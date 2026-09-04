@@ -24,7 +24,7 @@ on:
           - shadow
           - replay
       persist_state:
-        description: 'Checkpoint the SQLite snapshot to runtime-state'
+        description: 'Checkpoint the SQLite snapshot to isolated shadow state'
         required: true
         type: boolean
         default: false
