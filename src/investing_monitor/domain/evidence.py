@@ -27,6 +27,40 @@ class EvidenceStatus(str, Enum):
     FAILED = "failed"
 
 
+class EvidenceEventType(str, Enum):
+    ACQUISITION = "acquisition"
+    EARNINGS = "earnings"
+    GUIDANCE = "guidance"
+    MAJOR_CONTRACT = "major_contract"
+    MAJOR_CUSTOMER = "major_customer"
+    MANAGEMENT = "management"
+    REGULATORY = "regulatory"
+    FINANCING = "financing"
+    CAPACITY = "capacity"
+    PRODUCT = "product"
+    PARTNERSHIP = "partnership"
+    COMMENTARY = "commentary"
+    OTHER = "other"
+
+
+class EvidenceMateriality(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class EvidenceSourceTier(str, Enum):
+    OFFICIAL = "official"
+    PRIMARY_REPORTING = "primary_reporting"
+    SECONDARY = "secondary"
+
+
+class EvidenceDisposition(str, Enum):
+    IMMEDIATE = "immediate"
+    BRIEFING = "briefing"
+    LEDGER = "ledger"
+
+
 @dataclass(frozen=True)
 class EvidenceProfile:
     ticker: str
@@ -131,6 +165,12 @@ class EvidenceAnalysis:
     impact_reason_ko: str = ""
     confidence: str = "medium"
     official_events: tuple[OfficialEvent, ...] = ()
+    event_type: str = EvidenceEventType.OTHER.value
+    company_directness: bool = False
+    new_fact: bool = False
+    materiality: str = EvidenceMateriality.LOW.value
+    source_tier: str = EvidenceSourceTier.SECONDARY.value
+    alert_worthy: bool = False
 
 
 @dataclass(frozen=True)

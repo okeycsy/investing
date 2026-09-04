@@ -12,10 +12,16 @@ from investing_monitor.domain.evidence import (
     CandidateDecision,
     EvidenceAnalysis,
     EvidenceCandidate,
+    EvidenceDisposition,
     EvidenceKind,
+    EvidenceSourceTier,
     EvidenceStatus,
     GroundedFact,
     candidate_identity,
+)
+from investing_monitor.domain.evidence_qualification import (
+    evidence_disposition,
+    legacy_evidence_qualification,
 )
 from investing_monitor.domain.models import (
     Catalyst,
@@ -554,15 +560,21 @@ class SQLiteMonitorRepository:
     ) -> list[EvidenceQualityRecord]:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
-                "SELECT candidate_id, source_url, status, status_reason, "
+                "SELECT candidate_id, source_url, source_kind, status, status_reason, "
                 "cluster_key, analysis_json FROM evidence_candidates "
                 "ORDER BY last_seen_at DESC LIMIT ?",
                 (max(1, limit),),
             ).fetchall()
         records = []
         for row in rows:
-            analysis = json.loads(row["analysis_json"] or "{}")
-            relevant = analysis.get("relevant") if isinstance(analysis, dict) else None
+            payload = json.loads(row["analysis_json"] or "{}")
+            relevant = payload.get("relevant") if isinstance(payload, dict) else None
+            analysis = _analysis_from_payload(payload)
+            source_kind = row["source_kind"]
+            disposition = evidence_disposition(
+                EvidenceKind(source_kind),
+                analysis,
+            )
             records.append(
                 EvidenceQualityRecord(
                     candidate_id=row["candidate_id"],
@@ -571,6 +583,10 @@ class SQLiteMonitorRepository:
                     status_reason=row["status_reason"],
                     cluster_key=row["cluster_key"],
                     relevant=relevant if isinstance(relevant, bool) else None,
+                    source_kind=source_kind,
+                    event_type=analysis.event_type,
+                    materiality=analysis.materiality,
+                    alert_disposition=disposition.value,
                 )
             )
         return records
@@ -849,6 +865,12 @@ class SQLiteMonitorRepository:
         grouped: dict[str, list[Catalyst]] = {}
         for row in rows:
             payload = json.loads(row["analysis_json"])
+            analysis = _analysis_from_payload(payload)
+            if (
+                evidence_disposition(EvidenceKind(row["source_kind"]), analysis)
+                is EvidenceDisposition.LEDGER
+            ):
+                continue
             catalyst = Catalyst(
                 canonical_id=row["cluster_key"] or row["candidate_id"],
                 headline=payload["headline_ko"],
@@ -1296,6 +1318,12 @@ def _analysis_payload(analysis: EvidenceAnalysis) -> dict[str, object]:
         "thesis_impact": analysis.thesis_impact,
         "impact_reason_ko": analysis.impact_reason_ko,
         "confidence": analysis.confidence,
+        "event_type": analysis.event_type,
+        "company_directness": analysis.company_directness,
+        "new_fact": analysis.new_fact,
+        "materiality": analysis.materiality,
+        "source_tier": analysis.source_tier,
+        "alert_worthy": analysis.alert_worthy,
         "official_events": [
             {
                 "title_ko": event.title_ko,
@@ -1310,6 +1338,7 @@ def _analysis_payload(analysis: EvidenceAnalysis) -> dict[str, object]:
 
 
 def _analysis_from_payload(payload: Mapping[str, object]) -> EvidenceAnalysis:
+    qualification = legacy_evidence_qualification(payload)
     return EvidenceAnalysis(
         candidate_id=str(payload.get("candidate_id") or ""),
         relevant=bool(payload.get("relevant")),
@@ -1327,6 +1356,22 @@ def _analysis_from_payload(payload: Mapping[str, object]) -> EvidenceAnalysis:
         thesis_impact=str(payload.get("thesis_impact") or "neutral"),
         impact_reason_ko=str(payload.get("impact_reason_ko") or ""),
         confidence=str(payload.get("confidence") or "medium"),
+        event_type=str(payload.get("event_type") or qualification["event_type"]),
+        company_directness=_payload_bool(
+            payload,
+            "company_directness",
+            qualification["company_directness"],
+        ),
+        new_fact=_payload_bool(payload, "new_fact", qualification["new_fact"]),
+        materiality=str(payload.get("materiality") or qualification["materiality"]),
+        source_tier=str(
+            payload.get("source_tier") or EvidenceSourceTier.SECONDARY.value
+        ),
+        alert_worthy=_payload_bool(
+            payload,
+            "alert_worthy",
+            qualification["alert_worthy"],
+        ),
         official_events=tuple(
             OfficialEvent(
                 event_date=date.fromisoformat(str(event.get("date") or "")),
@@ -1339,6 +1384,15 @@ def _analysis_from_payload(payload: Mapping[str, object]) -> EvidenceAnalysis:
             if isinstance(event, dict)
         ),
     )
+
+
+def _payload_bool(
+    payload: Mapping[str, object],
+    key: str,
+    default: bool,
+) -> bool:
+    value = payload.get(key)
+    return value if isinstance(value, bool) else default
 
 
 def _candidate_from_row(row: sqlite3.Row) -> EvidenceCandidate:

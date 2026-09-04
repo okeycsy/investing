@@ -56,6 +56,10 @@ class EvidenceQualityRecord:
     status_reason: str
     cluster_key: str
     relevant: bool | None
+    source_kind: str
+    event_type: str
+    materiality: str
+    alert_disposition: str
 
 
 class MonitorRepository(Protocol):

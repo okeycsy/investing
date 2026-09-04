@@ -75,6 +75,25 @@ PROFILE = EvidenceProfile(
 )
 
 
+def qualification(
+    event_type: str = "acquisition",
+    *,
+    materiality: str = "high",
+    source_tier: str = "primary_reporting",
+    alert_worthy: bool = True,
+    company_directness: bool = True,
+    new_fact: bool = True,
+) -> dict[str, object]:
+    return {
+        "event_type": event_type,
+        "company_directness": company_directness,
+        "new_fact": new_fact,
+        "materiality": materiality,
+        "source_tier": source_tier,
+        "alert_worthy": alert_worthy,
+    }
+
+
 def raw(
     headline: str,
     *,
@@ -688,6 +707,7 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
                     "thesis_impact": "strengthen",
                     "impact_reason_ko": "데이터센터 전력 솔루션 범위가 확대된다.",
                     "confidence": "high",
+                    **qualification(),
                 }
             ],
             ensure_ascii=False,
@@ -716,6 +736,7 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
                     "thesis_impact": "strengthen",
                     "impact_reason_ko": "외형이 확대된다.",
                     "confidence": "high",
+                    **qualification(),
                 }
             ],
             ensure_ascii=False,
@@ -725,6 +746,67 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
 
         self.assertEqual(batch.analyses, {})
         self.assertIn("not present", batch.errors[self.candidate.candidate_id])
+
+    def test_relevant_analysis_requires_qualification_fields(self):
+        response = json.dumps(
+            [
+                {
+                    "candidate_id": self.candidate.candidate_id,
+                    "relevant": True,
+                    "headline_ko": "인수 발표",
+                    "summary_ko": "인수를 발표했다.",
+                    "facts": [
+                        {
+                            "source_text": "Vertiv agreed to acquire UtilityInnovation Group",
+                            "fact_ko": "인수에 합의했다.",
+                        }
+                    ],
+                    "interpretation_ko": "사업 범위가 확대된다.",
+                    "thesis_impact": "strengthen",
+                    "impact_reason_ko": "전력 솔루션 범위가 넓어진다.",
+                    "confidence": "high",
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+        batch = parse_analysis_response(response, [self.candidate])
+
+        self.assertEqual(batch.analyses, {})
+        self.assertIn("event_type", batch.errors[self.candidate.candidate_id])
+
+    def test_alert_worthy_cannot_override_materiality_policy(self):
+        response = json.dumps(
+            [
+                {
+                    "candidate_id": self.candidate.candidate_id,
+                    "relevant": True,
+                    "headline_ko": "생산능력 확대",
+                    "summary_ko": "생산능력을 확대한다.",
+                    "facts": [
+                        {
+                            "source_text": "Vertiv agreed to acquire UtilityInnovation Group",
+                            "fact_ko": "생산능력을 확대한다.",
+                        }
+                    ],
+                    "interpretation_ko": "수요 대응력이 커진다.",
+                    "thesis_impact": "strengthen",
+                    "impact_reason_ko": "생산 병목을 완화한다.",
+                    "confidence": "high",
+                    **qualification(
+                        "capacity",
+                        materiality="medium",
+                        alert_worthy=True,
+                    ),
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+        batch = parse_analysis_response(response, [self.candidate])
+
+        self.assertEqual(batch.analyses, {})
+        self.assertIn("conflicts", batch.errors[self.candidate.candidate_id])
 
     def test_medium_confidence_damage_is_downgraded_to_risk(self):
         response = json.dumps(
@@ -744,6 +826,7 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
                     "thesis_impact": "damage",
                     "impact_reason_ko": "통합 불확실성이 있다.",
                     "confidence": "medium",
+                    **qualification(alert_worthy=False),
                 }
             ],
             ensure_ascii=False,
@@ -787,6 +870,12 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
                     "thesis_impact": "neutral",
                     "impact_reason_ko": "일정 공지 자체는 논지 변화가 아니다.",
                     "confidence": "high",
+                    **qualification(
+                        "other",
+                        materiality="low",
+                        source_tier="official",
+                        alert_worthy=False,
+                    ),
                     "official_events": [
                         {
                             "title_ko": "3분기 실적 발표 및 컨퍼런스콜",
@@ -836,6 +925,7 @@ class EvidenceAnalysisValidationTest(unittest.TestCase):
                     "thesis_impact": "strengthen",
                     "impact_reason_ko": "수요 가시성이 개선됐다.",
                     "confidence": "high",
+                    **qualification("earnings", source_tier="official"),
                 }
             ]
         )
@@ -961,6 +1051,7 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
                         thesis_impact="strengthen",
                         impact_reason_ko="AI 전력 병목 대응 범위가 넓어진다.",
                         confidence="high",
+                        **qualification(),
                     )
                 return EvidenceAnalysisBatch(analyses=analyses, errors={})
 
@@ -1028,6 +1119,7 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
                             thesis_impact="strengthen",
                             impact_reason_ko="전력 솔루션 범위가 넓어진다.",
                             confidence="high",
+                            **qualification(),
                         )
                         for candidate in candidates
                     },
@@ -1219,7 +1311,7 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
             self.assertEqual(report.filtered, 1)
             self.assertEqual(report.inserted_pending, 0)
 
-    def test_relevant_analysis_creates_atomic_alert_and_recent_catalyst(self):
+    def test_briefing_analysis_skips_independent_alert_but_enriches_market(self):
         class Analyzer:
             def analyze(self, candidates, _profile):
                 candidate = candidates[0]
@@ -1238,6 +1330,11 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
                     thesis_impact="strengthen",
                     impact_reason_ko="수요 대응 병목을 완화할 수 있다.",
                     confidence="high",
+                    **qualification(
+                        "capacity",
+                        materiality="medium",
+                        alert_worthy=False,
+                    ),
                 )
                 return EvidenceAnalysisBatch(
                     analyses={candidate.candidate_id: analysis},
@@ -1263,14 +1360,9 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
                 NOW,
             )
 
-            self.assertEqual(report.alerts, 1)
+            self.assertEqual(report.alerts, 0)
             pending = repository.pending_deliveries(NOW + timedelta(minutes=1))
-            self.assertEqual(len(pending), 1)
-            rendered = json.dumps(pending[0].payload, ensure_ascii=False)
-            self.assertIn("확인된 사실", rendered)
-            self.assertIn("논지 강화 근거", rendered)
-            self.assertIn("원문 보기", rendered)
-            self.assertNotIn("내용 확인 필요", rendered)
+            self.assertEqual(pending, [])
             catalysts = repository.recent_catalysts(
                 "VRT",
                 NOW - timedelta(hours=1),
@@ -1303,6 +1395,61 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
             move_text = json.dumps(move.messages[0], ensure_ascii=False)
             self.assertIn("버티브, 냉각 생산능력 확대", move_text)
             self.assertIn("https://example.com/story", move_text)
+
+    def test_low_confidence_event_stays_in_ledger(self):
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                candidate = candidates[0]
+                return EvidenceAnalysisBatch(
+                    analyses={
+                        candidate.candidate_id: EvidenceAnalysis(
+                            candidate_id=candidate.candidate_id,
+                            relevant=True,
+                            headline_ko="버티브, 인수 가능성 보도",
+                            summary_ko="인수 가능성이 보도됐으나 확정되지 않았다.",
+                            facts=(
+                                GroundedFact(
+                                    candidate.source_text,
+                                    "인수 가능성이 거론됐다.",
+                                ),
+                            ),
+                            interpretation_ko="확정 사실이 부족하다.",
+                            thesis_impact="neutral",
+                            impact_reason_ko="거래 확정 전이다.",
+                            confidence="low",
+                            **qualification(alert_worthy=False),
+                        )
+                    },
+                    errors={},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+            )
+
+            report = service.ingest(
+                [
+                    raw(
+                        "Vertiv acquisition possibility",
+                        source_text="A transaction may be considered.",
+                    )
+                ],
+                NOW,
+            )
+
+            self.assertEqual(report.analyzed, 1)
+            self.assertEqual(report.alerts, 0)
+            self.assertEqual(
+                repository.recent_catalysts("VRT", NOW - timedelta(hours=1)),
+                [],
+            )
+            record = repository.recent_evidence_quality_records(limit=1)[0]
+            self.assertEqual(record.alert_disposition, "ledger")
 
     def test_material_insider_purchase_bypasses_ai_and_creates_structured_alert(self):
         class Analyzer:

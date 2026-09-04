@@ -517,18 +517,30 @@ def _product_quality(
         classification = "unassessed"
         reason = "source evidence is unavailable in the retained quality window"
         current_cluster = ""
+        event_type = ""
+        materiality = ""
+        alert_disposition = ""
         if record is not None:
             current_cluster = record.cluster_key
+            event_type = record.event_type
+            materiality = record.materiality
+            alert_disposition = record.alert_disposition
             if record.status == "filtered":
                 classification = "retrospectively_filtered"
                 reason = record.status_reason or "current evidence rule filters this item"
             elif record.status == "analyzed" and record.relevant is True:
-                if record.cluster_key == alert.event_key:
-                    classification = "currently_valid"
-                    reason = "current evidence rule retains this canonical event"
-                else:
+                if record.cluster_key != alert.event_key:
                     classification = "duplicate_cluster_reconciled"
                     reason = "source was relinked to an earlier canonical event"
+                elif record.alert_disposition == "immediate":
+                    classification = "currently_valid"
+                    reason = "current qualification still permits an immediate alert"
+                elif record.alert_disposition == "briefing":
+                    classification = "briefing_only_alert"
+                    reason = "current qualification retains this item only for summaries"
+                else:
+                    classification = "ledger_only_alert"
+                    reason = "current qualification retains this item only in the ledger"
             else:
                 classification = "no_longer_relevant"
                 reason = record.status_reason or "current evidence state is not alertable"
@@ -545,6 +557,9 @@ def _product_quality(
                 "reason": reason,
                 "source_url": source_url,
                 "current_cluster": current_cluster,
+                "event_type": event_type,
+                "materiality": materiality,
+                "alert_disposition": alert_disposition,
             }
         )
 
@@ -559,6 +574,8 @@ def _product_quality(
         "retrospectively_filtered",
         "duplicate_cluster_reconciled",
         "no_longer_relevant",
+        "briefing_only_alert",
+        "ledger_only_alert",
     }
     recent_findings = [
         finding
@@ -596,6 +613,16 @@ def _product_quality(
     days_over_target = sum(
         not row["within_target"] for row in load_by_day.values()
     )
+    qualification_inventory = Counter(
+        record.alert_disposition
+        for record in evidence_records
+        if record.status == "analyzed"
+    )
+    event_type_inventory = Counter(
+        record.event_type
+        for record in evidence_records
+        if record.status == "analyzed"
+    )
 
     if recent_semantic_violations or days_over_target:
         status = "needs_improvement"
@@ -615,6 +642,8 @@ def _product_quality(
             ],
             "duplicate_cluster_reconciled": duplicates,
             "no_longer_relevant": classifications["no_longer_relevant"],
+            "briefing_only_alert": classifications["briefing_only_alert"],
+            "ledger_only_alert": classifications["ledger_only_alert"],
             "unassessed": classifications["unassessed"],
             "meaningful_rate_percent": (
                 round(valid / assessed * 100, 1) if assessed else None
@@ -626,6 +655,10 @@ def _product_quality(
             "target_duplicate_rate_percent": 0.1,
             "recent_semantic_violations": recent_semantic_violations,
             "findings": findings,
+        },
+        "evidence_qualification": {
+            "by_disposition": dict(sorted(qualification_inventory.items())),
+            "by_event_type": dict(sorted(event_type_inventory.items())),
         },
         "alert_load": {
             "completed_trading_days_checked": len(load_by_day),

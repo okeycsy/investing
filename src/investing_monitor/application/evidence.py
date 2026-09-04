@@ -13,6 +13,7 @@ from investing_monitor.domain.evidence import (
     EvidenceAnalysis,
     EvidenceCandidate,
     EvidenceCluster,
+    EvidenceDisposition,
     EvidenceKind,
     EvidenceProfile,
     EvidenceStatus,
@@ -20,6 +21,7 @@ from investing_monitor.domain.evidence import (
     RawEvidenceCandidate,
     candidate_identity,
 )
+from investing_monitor.domain.evidence_qualification import evidence_disposition
 from investing_monitor.application.insider import (
     assess_insider_materiality,
     build_insider_analysis,
@@ -799,6 +801,12 @@ class EvidenceIngestionService:
             not analysis.relevant
             or self.alert_builder is None
             or candidate.metadata.get("calendar_only")
+        ):
+            return None
+        if (
+            candidate.kind in {EvidenceKind.NEWS, EvidenceKind.IR}
+            and evidence_disposition(candidate.kind, analysis)
+            is not EvidenceDisposition.IMMEDIATE
         ):
             return None
         for existing in self.repository.recent_analyzed_evidence(

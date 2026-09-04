@@ -494,7 +494,10 @@ class QualityReportTest(unittest.TestCase):
             with closing(sqlite3.connect(repository.path)) as connection, connection:
                 for candidate_id, source_url, status, reason, cluster_key, relevant in rows:
                     analysis_json = (
-                        '{"relevant":true}'
+                        '{"relevant":true,"event_type":"acquisition",'
+                        '"company_directness":true,"new_fact":true,'
+                        '"materiality":"high","source_tier":"secondary",'
+                        '"alert_worthy":true,"confidence":"high"}'
                         if relevant == 1
                         else '{"relevant":false}'
                         if relevant == 0
@@ -551,6 +554,54 @@ class QualityReportTest(unittest.TestCase):
             self.assertIn(
                 "recent_evidence_alerts_clean",
                 report.shadow_validation["blocked_reasons"],
+            )
+
+    def test_product_quality_rejects_briefing_only_independent_alert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            record_full_market_day(repository, date(2026, 9, 1))
+            record_full_market_day(repository, date(2026, 9, 2))
+            source_url = "https://example.com/capacity"
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO evidence_candidates "
+                    "(candidate_id, ticker, source_kind, headline, source_name, "
+                    "source_url, published_at, cluster_key, status, analysis_json, "
+                    "first_seen_at, last_seen_at) "
+                    "VALUES ('capacity', 'VRT', 'news', 'capacity', 'Source', ?, ?, "
+                    "'event-capacity', 'analyzed', ?, ?, ?)",
+                    (
+                        source_url,
+                        NOW.isoformat(),
+                        '{"relevant":true,"event_type":"capacity",'
+                        '"company_directness":true,"new_fact":true,'
+                        '"materiality":"medium","source_tier":"secondary",'
+                        '"alert_worthy":false,"confidence":"high"}',
+                        NOW.isoformat(),
+                        NOW.isoformat(),
+                    ),
+                )
+            repository.record_alert(
+                AlertRecord(
+                    event_key="event-capacity",
+                    ticker="VRT",
+                    alert_type="catalyst",
+                    created_at=NOW,
+                    payload=valid_catalyst_payload(source_url, "capacity"),
+                ),
+                enqueue=False,
+            )
+
+            report = QualityReportService(repository).build()
+            evidence = report.product_quality["evidence_alerts"]
+
+            self.assertEqual(evidence["briefing_only_alert"], 1)
+            self.assertEqual(evidence["currently_valid"], 0)
+            self.assertEqual(evidence["meaningful_rate_percent"], 0.0)
+            self.assertEqual(evidence["recent_semantic_violations"], 1)
+            self.assertEqual(
+                report.product_quality["evidence_qualification"]["by_disposition"],
+                {"briefing": 1},
             )
 
 
