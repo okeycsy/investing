@@ -1,13 +1,17 @@
 name: Monitor V2 Production
 
 on:
-  # Temporary release gate: this push trigger is removed immediately after the
-  # one-time canary succeeds. Scheduled production is enabled in that cutover.
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/monitor_v2_production.yml'
+  schedule:
+    # Five-minute polling without a top-of-hour boundary. GitHub may still
+    # delay or drop scheduled events; the next tick replays missing 5m bars.
+    - cron: '4-59/5 4-19 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '24,54 0-3,20-23 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '24 */2 * * 0,6'
+      timezone: 'America/New_York'
+    - cron: '13 8 * * 1'
+      timezone: 'Asia/Seoul'
   workflow_dispatch:
     inputs:
       mode:
@@ -36,19 +40,19 @@ jobs:
 
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Read workflow trigger time
         id: run-metadata
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const { data: run } = await github.rest.actions.getWorkflowRun({
@@ -65,13 +69,13 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db restore-state
 
       - name: Send one labeled Slack canary
-        if: github.event_name == 'push' || inputs.mode == 'canary'
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'canary'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: investing-monitor --db .runtime/monitor.db slack-canary --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Run one production tick
-        if: inputs.mode == 'tick'
+        if: github.event_name == 'schedule' || inputs.mode == 'tick'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -80,20 +84,21 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db production-tick --scheduled-at "${{ steps.run-metadata.outputs.created_at }}" --trigger "${{ github.event_name }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Run production doctor
-        if: inputs.mode == 'doctor'
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'doctor'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: investing-monitor --db .runtime/monitor.db doctor --require-secrets
 
       - name: Show runtime status
-        if: inputs.mode == 'status'
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'status'
         run: investing-monitor --db .runtime/monitor.db status
 
       - name: Build product quality report
         if: always()
+        continue-on-error: true
         run: investing-monitor --db .runtime/monitor.db quality-report
 
       - name: Checkpoint runtime state
-        if: always() && (github.event_name == 'push' || inputs.mode == 'canary' || inputs.mode == 'tick')
+        if: always() && (github.event_name == 'schedule' || inputs.mode == 'canary' || inputs.mode == 'tick')
         run: investing-monitor --db .runtime/monitor.db checkpoint-state --run-id "${{ github.run_id }}-final"

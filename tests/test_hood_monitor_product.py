@@ -362,13 +362,13 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn('sleep "$WAIT_SECONDS"', workflow)
         self.assertIn("State push failed after $MAX_ATTEMPTS attempts", workflow)
 
-    def test_workflow_has_ten_minute_realtime_and_off_hour_normal_crons(self):
+    def test_legacy_workflow_is_manual_only_after_v2_cutover(self):
         workflow = Path(".github/workflows/hood_monitor.yml").read_text()
 
-        self.assertIn("7,17,27,37,47,57 8-23 * * 1-5", workflow)
-        self.assertIn("23 8-23 * * 1-5", workflow)
-        self.assertNotIn("'0 8-23 * * 1-5'", workflow)
-        self.assertIn('echo "mode=realtime"', workflow)
+        self.assertIn("Ticker Monitor (Legacy Manual)", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("schedule:", workflow)
+        self.assertIn("Legacy fallback only", workflow)
 
     def test_sec_user_agent_declares_contact_inline(self):
         config = MonitorConfig(sec_contact="owner@example.com")

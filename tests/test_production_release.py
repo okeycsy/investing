@@ -173,19 +173,33 @@ class ProductionCliTest(unittest.TestCase):
 
 
 class ProductionWorkflowTest(unittest.TestCase):
-    def test_release_workflow_is_manual_only_before_cutover(self):
+    def test_release_workflow_owns_production_schedule_after_cutover(self):
         workflow = (
             ROOT / ".github" / "workflows" / "monitor_v2_production.yml"
         ).read_text(encoding="utf-8")
+        shadow = (
+            ROOT / ".github" / "workflows" / "monitor_v2_shadow.yml"
+        ).read_text(encoding="utf-8")
+        legacy = (
+            ROOT / ".github" / "workflows" / "hood_monitor.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("workflow_dispatch:", workflow)
-        self.assertNotIn("\n  schedule:", workflow)
+        self.assertIn("\n  schedule:", workflow)
+        self.assertIn("4-59/5 4-19 * * 1-5", workflow)
+        self.assertIn("24,54 0-3,20-23 * * 1-5", workflow)
+        self.assertIn("timezone: 'America/New_York'", workflow)
+        self.assertIn("13 8 * * 1", workflow)
+        self.assertIn("timezone: 'Asia/Seoul'", workflow)
         self.assertIn("slack-canary", workflow)
         self.assertIn("production-tick", workflow)
+        self.assertIn("github.event_name == 'schedule'", workflow)
         self.assertIn("V2_PRODUCTION_ENABLED: 'true'", workflow)
         self.assertIn("SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}", workflow)
         self.assertIn("checkpoint-state", workflow)
         self.assertIn("group: ticker-monitor-v2-state", workflow)
+        self.assertNotIn("\n  schedule:", shadow)
+        self.assertNotIn("\n  schedule:", legacy)
 
 
 if __name__ == "__main__":

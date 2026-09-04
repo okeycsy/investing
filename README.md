@@ -5,8 +5,8 @@
 > [HOOD Monitor 재개발 기준서](docs/HOOD_MONITOR_REBUILD.md)를 따릅니다.
 > 세부 기능, polling 주기, 복구 정책과 수용 기준은
 > [HOOD Monitor PRD v2](docs/HOOD_MONITOR_PRD_V2.md)에 고정합니다.
-> `src/investing_monitor`는 기존 운영 경로와 분리된 새 코어이며 아직 production
-> Slack을 대신하지 않습니다.
+> `src/investing_monitor`가 production Slack과 예약 실행을 담당합니다. 기존
+> `hood_monitor.py` workflow는 수동 fallback과 preview 용도로만 남겨 둡니다.
 
 단일 종목 투자 논지 모니터입니다. 현재 기본 종목은 `$VRT`입니다. 새 버전도 GitHub Actions hosted runner에서 실행하며 Yahoo REST를 장중 5분 schedule로 조회합니다. 예약 지연이나 누락은 다음 성공 실행의 intraday replay로 보완하고, 중요 뉴스, 발행사 SEC 공시, 내부자 거래, 장마감 상대 성과와 주간 논지 변화를 Slack으로 전달합니다.
 
@@ -22,13 +22,20 @@
 - 모든 v2 사용자 메시지는 alert/outbox 저장 전에 길이, 필수 정보, 금지 문구, 원문 링크와 중복 블록 품질 게이트를 통과해야 합니다. `quality-report`는 최근 메시지 판정, `schedule`/`push`/수동 실행 수, Actions run 생성부터 tick 시작까지의 지연, 같은 장중 schedule 사이의 실제 간격, task별 실행 시간, Yahoo market/news, IR, SEC, AI pipeline의 성공·복구·실패와 latency, outbox/evidence 상태를 Actions Summary에 기록합니다. 개발 push 간격을 scheduler 건강도로 계산하지 않습니다. 저장된 근거를 현재 필터·canonical 사건과 다시 대조해 소급 저가치 및 재전재 중복 알림도 별도 판정합니다. schema v8부터 run과 alert에 build SHA, workflow, run ID, 실제 DB 기록 시각을 보존하고, schema v9부터 시장 관측에도 동일 provenance를 남겨 과거 `legacy` 결과와 현재 배포 버전의 품질을 분리합니다.
 - `replay-market`은 운영 DB와 Slack을 사용하지 않는 격리 DB에서 완료된 거래일의 Yahoo 5분봉을 재생합니다. 동일 방향 최고 구간 압축, 양·음 방향 반전, 재실행 중복 0건, 상대 흐름·실제 baseline 거래량과 메시지 품질을 검증합니다.
 - 품질 리포트의 Stage 5 판정은 GitHub `schedule` poll coverage와 Yahoo 5분봉 복구 coverage를 분리합니다. 스케줄 지연은 감추지 않고 advisory로 남기되, XNYS 조기폐장을 포함한 세션별 5분 구간을 모두 복원했는지로 전체 거래일을 계산합니다. 출시 게이트는 현재 build SHA가 직접 만든 schedule/provider 기록, 메시지, 시장 관측, 근거 알림만 사용하며 이전 빌드의 정상 이력을 승계하지 않습니다. 현재 빌드의 완전한 거래일 2개, 거래일당 비정기 알림 0~3건, 저가치·중복 근거 0건을 채우기 전에는 `blocked` 또는 `observing`이며 production 전환을 허용하지 않습니다.
-- production 전달 코어는 Slack 호출 전에 outbox를 `sending`으로 원격 checkpoint하고, 호출 결과를 `delivered`, `failed`, `discarded`, `delivery_unknown`으로 구분해 다시 checkpoint할 수 있습니다. timeout처럼 수락 여부가 모호한 요청은 자동 재발송하지 않습니다. 이 경로는 Stage 5 관측 완료 전 workflow에서 활성화하지 않습니다.
+- production 전달 코어는 Slack 호출 전에 outbox를 `sending`으로 원격 checkpoint하고, 호출 결과를 `delivered`, `failed`, `discarded`, `delivery_unknown`으로 구분해 다시 checkpoint합니다. timeout처럼 수락 여부가 모호한 요청은 자동 재발송하지 않습니다. 2026-09-04 canary run `33870909963`에서 Slack `accepted`와 최종 `delivered` checkpoint를 확인했습니다.
 - SEC 인라인 XBRL의 숨김 메타데이터는 제거하고 10-Q/10-K의 실제 MD&A를 우선 추출합니다. 폼 번호만 있거나 본문을 확보하지 못한 공시는 알림으로 만들지 않습니다.
 - Form 4와 Yahoo 내부자 집계는 거래 코드를 구조화해 `P` 장내매수와 `S` 장내매도만 materiality 기준을 통과할 수 있습니다. `A` 보상, `M` 옵션 행사, `F` 세금 처리는 독립 알림 없이 ledger에만 저장합니다.
-- `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 계획 출력을 자동 검증하며, 수동 실행에서는 상태 진단과 snapshot 저장을 선택할 수 있습니다.
-- 동일 workflow는 DST 양쪽을 포괄하는 UTC 창에서 정각을 피한 5분 schedule로 market/news/SEC/close shadow tick을 실행하고 `runtime-state`를 checkpoint합니다. 예약 실행에서는 운영 의존성만 설치하며 전체 회귀 테스트는 push와 수동 실행에서 수행합니다. 개발 push도 Slack 없이 통합 shadow와 checkpoint를 한 번 실행해 provider·secret 회귀를 즉시 드러냅니다.
+- `Monitor V2 Production`은 New York 시간대 기준 장중 5분, 장외 30분, 주말 2시간 schedule로 동일한 production tick을 실행합니다. close와 weekly는 별도 구현을 중복 호출하지 않고 저장된 due-state로 처리합니다.
+- `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 Slack 없는 통합 tick을 자동 검증합니다. 운영 DB를 건드리지 않도록 별도 `runtime-shadow-state` branch를 사용하며 예약 실행은 하지 않습니다.
 - 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
-- production Slack은 아직 legacy `hood_monitor.py` 경로가 담당합니다. Stage 4~5 검증 전에는 v2로 전환하지 않습니다.
+- production Slack은 v2만 담당합니다. legacy `hood_monitor.py`의 예약 실행은 제거했으며 수동 fallback만 유지합니다.
+
+## 운영 스케줄과 한계
+
+- 장중 예약은 `04,09,...,59`분으로 5분 간격이며 정각을 피합니다. 예약 자체의 이론상 간격은 5분입니다.
+- GitHub Actions schedule에는 실행 시각 SLA가 없습니다. GitHub는 고부하 시 예약이 지연되거나 drop될 수 있다고 명시하며, 실제 shadow에서도 2026-09-02~04에 schedule 14회, 동일 장중 실행 간 최대 약 5시간 16분을 관측했습니다.
+- 따라서 이 구성으로 “10분 이내 최초 알림”은 보장할 수 없습니다. 다음 성공 tick이 Yahoo 5분봉을 복원해 놓친 가격 구간을 탐지하지만, 최초 통지 지연 자체를 없애지는 못합니다.
+- 비용 없는 GitHub-hosted 조건에서 할 수 있는 개선은 정각 회피, 5분 cron, 실행 직렬화, 누락 replay, 지연 표시까지입니다. 더 엄격한 지연 보장은 상시 실행 self-hosted runner 또는 외부 scheduler가 필요합니다.
 
 로컬에서 Stage 1 상태를 확인하려면:
 
@@ -124,7 +131,7 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 
 ## 알림 원칙
 
-- 현재 legacy workflow는 가격을 10분 cron, 뉴스·공시를 시간 단위 cron으로 조회합니다. v2 cutover 후에는 GitHub Actions의 정각을 피한 5분 tick으로 통합하고, 지연된 close/news/SEC와 누락된 가격 구간은 다음 성공 tick에서 복원합니다.
+- v2 production workflow가 정각을 피한 5분 tick으로 가격·뉴스·공시를 통합하고, 지연된 close/news/SEC와 누락된 가격 구간은 다음 성공 tick에서 복원합니다.
 - 장중 급등락은 `±4%` 정수 구간부터 시작해 같은 방향의 새 1%p 구간 진입 때만 전송합니다. 당일 반대 방향 전환과 이미 통과한 구간은 다시 알리지 않습니다.
 - 장중에는 새 뉴스, 분석 완료된 발행사 중요 SEC 공시, 내부자 거래, 큰 폭의 이상 움직임, 20거래일 평균 대비 1.5배 이상 거래량만 전송합니다. 거래량 알림은 하루 한 번만 보냅니다.
 - 상대 흐름은 반도체 지수 `SOXX`와 동일가중 피어 평균 `ETN/NVT/GEV`를 함께 사용합니다.

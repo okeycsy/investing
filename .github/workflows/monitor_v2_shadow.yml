@@ -1,13 +1,6 @@
 name: Monitor V2 Runtime Shadow
 
 on:
-  schedule:
-    # UTC windows cover 04:00-20:00 New York across both DST offsets.
-    # TickPlanner applies the exchange calendar and exact active-session guard.
-    - cron: '3-58/5 8-23 * * 1-5'
-    - cron: '3-58/5 0-3 * * 2-6'
-    # Monday 08:13 KST weekly review wake-up.
-    - cron: '13 23 * * 0'
   push:
     branches:
       - main
@@ -37,7 +30,7 @@ on:
         default: false
 
 concurrency:
-  group: ticker-monitor-v2-state
+  group: ticker-monitor-v2-shadow-state
   cancel-in-progress: false
 
 permissions:
@@ -51,19 +44,19 @@ jobs:
 
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Read workflow trigger time
         id: run-metadata
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const { data: run } = await github.rest.actions.getWorkflowRun({
@@ -78,15 +71,13 @@ jobs:
           pip install -e . yfinance
 
       - name: Install legacy test dependencies
-        if: github.event_name != 'schedule'
         run: pip install -r requirements.txt
 
       - name: Run full test suite
-        if: github.event_name != 'schedule'
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
 
-      - name: Restore runtime state
-        run: investing-monitor --db .runtime/monitor.db restore-state
+      - name: Restore isolated shadow state
+        run: investing-monitor --db .runtime/monitor.db restore-state --branch runtime-shadow-state
 
       - name: Plan due tasks
         if: github.event_name == 'push' || inputs.mode == 'plan'
@@ -97,14 +88,15 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db market-tick --scheduled-at "${{ steps.run-metadata.outputs.created_at }}" --trigger "${{ github.event_name }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Run unified shadow tick
-        if: github.event_name == 'schedule' || github.event_name == 'push' || inputs.mode == 'shadow'
+        if: github.event_name == 'push' || inputs.mode == 'shadow'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SEC_CONTACT: maybe2213@naver.com
         run: investing-monitor --db .runtime/monitor.db shadow-tick --scheduled-at "${{ steps.run-metadata.outputs.created_at }}" --trigger "${{ github.event_name }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Build product quality report
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.mode == 'shadow')
+        if: always() && (github.event_name == 'push' || inputs.mode == 'shadow')
+        continue-on-error: true
         run: investing-monitor --db .runtime/monitor.db quality-report
 
       - name: Replay three completed trading days
@@ -122,6 +114,6 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: investing-monitor --db .runtime/monitor.db doctor --require-secrets
 
-      - name: Checkpoint runtime state
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.persist_state)
-        run: investing-monitor --db .runtime/monitor.db checkpoint-state --run-id "${{ github.run_id }}"
+      - name: Checkpoint isolated shadow state
+        if: always() && (github.event_name == 'push' || inputs.persist_state)
+        run: investing-monitor --db .runtime/monitor.db checkpoint-state --branch runtime-shadow-state --run-id "${{ github.run_id }}"

@@ -249,7 +249,7 @@ Summary와 진단 artifact에서 확인한다. 투자 Slack에는 stack trace나
 
 | 작업 | 활성 구간 | 기본 주기 | 비고 |
 | --- | --- | --- | --- |
-| core tick | 거래일 04:00-20:00 ET | 5분 | 정각을 피해 02분부터 시작 |
+| core tick | 거래일 04:00-20:00 ET | 5분 | 정각을 피해 04분부터 시작 |
 | state restore/checkpoint | 모든 tick | 실행당 2회 이상 | Slack 전후 상태 보존 |
 | VRT quote | 거래일 04:00-20:00 ET | 성공 tick마다 | 이전 정규장 종가 기준 |
 | benchmark/peer quote | MOVE 발생 시 | 즉시 | SOXX/ETN/GEV/NVT 동시 조회 |
@@ -268,21 +268,20 @@ Summary와 진단 artifact에서 확인한다. 투자 Slack에는 stack trace나
 ```yaml
 on:
   schedule:
-    - cron: '2-57/5 4-19 * * 1-5'
+    - cron: '4-59/5 4-19 * * 1-5'
       timezone: 'America/New_York'
-    - cron: '13,43 0-3,20-23 * * 1-5'
+    - cron: '24,54 0-3,20-23 * * 1-5'
       timezone: 'America/New_York'
-    - cron: '13 */2 * * 0,6'
+    - cron: '24 */2 * * 0,6'
       timezone: 'America/New_York'
-    - cron: '10 8 * * 1'
-      timezone: 'Asia/Seoul'
-    - cron: '0 19 * * 6'
+    - cron: '13 8 * * 1'
       timezone: 'Asia/Seoul'
 ```
 
 첫 schedule은 시장 monitoring, 둘째와 셋째는 장외 및 주말 source catch-up, 넷째는
-weekly, 다섯째는 13F wake-up이다. 어떤 schedule로 시작했더라도 동일한 `tick`이
-state를 보고 실제 due task를 결정한다.
+weekly wake-up이다. 어떤 schedule로 시작했더라도 동일한 `tick`이 state를 보고 실제
+due task를 결정한다. 13F는 v2 handler가 구현되기 전까지 legacy 수동 fallback으로만
+실행한다.
 
 ### Scheduler 규칙
 
@@ -293,6 +292,10 @@ state를 보고 실제 due task를 결정한다.
 - 긴 SEC/AI 호출은 market snapshot 저장 이후 수행하며 task별 실패를 격리한다.
 - quote 실패는 실행 예산 안에서 15초, 30초, 60초 뒤 재시도한다.
 - provider의 `429` 또는 `Retry-After`는 명시된 대기 시간을 따른다.
+- 5분 cron은 목표 poll cadence이지 전달 SLA가 아니다. GitHub가 schedule event를
+  지연하거나 drop할 수 있으므로 10분 이내 최초 알림을 보장하지 않는다.
+- 2026-09-02~04 shadow에서 schedule 14회와 장중 최대 약 5시간 16분 간격을 관측했다.
+  다음 성공 tick의 5분봉 replay는 사건 누락을 막지만 최초 통지 지연은 복구하지 못한다.
 - 미국 휴장일에는 market task를 생략하고 news/SEC만 저빈도로 실행한다.
 - 조기 폐장일에는 exchange calendar의 실제 마감 시각을 사용한다.
 - schedule gap이 있으면 현재 quote보다 intraday replay를 먼저 처리한다.
@@ -1018,6 +1021,11 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 3. `runtime-state` baseline을 만든 뒤 production webhook을 활성화한다.
 4. 첫 5개 거래일 매일 품질 report를 확인한다.
 5. 5일 동안 회귀가 없을 때만 기존 `hood_monitor.py` 제거 계획을 세운다.
+
+전환 기록 (2026-09-04): 3개 완료 거래일 Yahoo replay와 전체 회귀 테스트를 통과했고,
+Slack canary run `33870909963`에서 `accepted` 응답 및 원격 outbox `delivered` 상태를
+확인했다. v2가 schedule과 production Slack을 소유하며 legacy와 shadow schedule은
+비활성화했다. 최초 5개 production 거래일 SLO 관찰은 계속한다.
 
 ## 21. 개발 백로그
 
