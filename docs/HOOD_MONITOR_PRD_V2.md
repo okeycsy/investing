@@ -719,7 +719,7 @@ snapshot만 유지한다. `force-with-lease`와 workflow concurrency를 함께 �
 | 테이블 | 목적 | 핵심 unique key |
 | --- | --- | --- |
 | `market_sessions` | 일별 baseline과 watermark | ticker + trading_date |
-| `market_observations` | shadow/replay용 관측 | ticker + observed_at |
+| `market_observations` | shadow/replay용 관측과 기록 시각, build SHA, run ID | ticker + observed_at |
 | `volume_profiles` | 동시간대 baseline | ticker + trading_date + minute |
 | `source_cursors` | provider 마지막 확인 위치 | provider + profile |
 | `source_items` | 수집 원문 메타데이터 | provider + source_id |
@@ -876,11 +876,14 @@ GitHub schedule은 실행 시각을 보장하지 않으므로 아래는 플랫�
 | recovery success | gap 뒤 cursor와 watermark 복원 성공 | 100% 테스트 |
 | alert load | 거래일당 비정기 알림 수 | 평시 0~3건 목표 |
 | build-scoped alert quality | 동일 build SHA가 생성한 근거 알림의 유효율과 위반 건수 | 버전 전환 뒤 별도 집계 |
+| build-scoped release evidence | 동일 build SHA가 직접 만든 schedule/provider/message/market 관측 | 이전 빌드 이력 승계 0건 |
 
 품질 리포트는 사건 발생·게시 시각인 `created_at`과 DB 기록 시각인
 `recorded_at`을 구분한다. GitHub에서 생성된 run과 alert에는 `GITHUB_SHA`,
 `GITHUB_RUN_ID`, `GITHUB_WORKFLOW`을 저장하고, 값이 없는 과거 행은
-`legacy`로 묶어 현재 빌드의 품질을 오염시키지 않는다.
+`legacy`로 묶어 현재 빌드의 품질을 오염시키지 않는다. 시장 관측도 최초 insert
+시점의 build SHA와 run ID를 보존한다. 동일 시각의 관측을 새 빌드가 다시 읽어도
+소유권을 갱신하지 않으며, Stage 5 출시 게이트는 현재 SHA의 기록만 집계한다.
 
 ### 정성 평가 rubric
 
@@ -999,6 +1002,14 @@ shadow 메시지마다 아래를 0 또는 1로 평가한다. 5점 미만은 prod
 - raw SEC, raw news, 내부 오류가 한 번이라도 사용자 메시지에 노출된다.
 - 중복 MOVE가 한 번이라도 재현된다.
 - delayed/dropped run 뒤 상태가 설명 없이 초기화된다.
+
+출시 게이트:
+
+- 현재 build SHA에서 `schedule` 실행과 provider 성공 기록이 존재한다.
+- 현재 build SHA가 생성한 사용자 메시지가 계약 검사를 통과한다.
+- 현재 build SHA로 수집·복구한 완전한 정규장 관측이 2개 거래일 이상이다.
+- 현재 build SHA의 저가치·중복 근거 알림과 목표 초과 알림일이 0건이다.
+- 이전 또는 provenance 없는 `legacy` 행은 위 조건 어느 것에도 합산하지 않는다.
 
 ### Stage 6: Production cutover
 

@@ -78,6 +78,8 @@ class QualityReportService:
                     {
                         "event_key": alert.event_key,
                         "alert_type": alert.alert_type,
+                        "build_sha": alert.build_sha,
+                        "run_id": alert.run_id,
                         **result.as_dict(),
                     }
                 )
@@ -100,11 +102,14 @@ class QualityReportService:
                 )
 
         runs = self.repository.recent_runs(limit=limit)
+        build_history = _build_history(runs)
+        current_build_sha = str(build_history.get("current_build_sha") or "")
         planned = Counter()
         succeeded = Counter()
         task_samples: dict[str, dict[str, int]] = {}
         provider_samples: dict[str, dict[str, int]] = {}
         scheduled_provider_samples: dict[str, dict[str, int]] = {}
+        current_build_scheduled_provider_samples: dict[str, dict[str, int]] = {}
         market_recovery = {
             "task_runs": 0,
             "scheduled_task_runs": 0,
@@ -216,11 +221,21 @@ class QualityReportService:
                             provider_status,
                             latency_ms,
                         )
+                        if not current_build_sha or run.build_sha == current_build_sha:
+                            _record_provider_sample(
+                                current_build_scheduled_provider_samples,
+                                str(provider_name),
+                                provider_status,
+                                latency_ms,
+                            )
         trigger_counts = Counter(_run_trigger(run.summary) for run in runs)
-        build_history = _build_history(runs)
-        current_build_sha = str(build_history.get("current_build_sha") or "")
         scheduled_runs = [
             run for run in runs if _run_trigger(run.summary) == "schedule"
+        ]
+        current_build_scheduled_runs = [
+            run
+            for run in scheduled_runs
+            if not current_build_sha or run.build_sha == current_build_sha
         ]
         schedule_intervals = _same_session_intervals(
             [run.started_at for run in scheduled_runs]
@@ -239,6 +254,29 @@ class QualityReportService:
             scheduler_status = "insufficient_history"
         else:
             scheduler_status = "healthy"
+        current_build_schedule_intervals = _same_session_intervals(
+            [run.started_at for run in current_build_scheduled_runs]
+        )
+        current_build_schedule_delays = [
+            max(0, int((run.started_at - run.scheduled_at).total_seconds()))
+            for run in current_build_scheduled_runs
+        ]
+        current_build_interval_p95 = _percentile_nearest_rank(
+            current_build_schedule_intervals,
+            0.95,
+        )
+        current_build_delay_p95 = _percentile_nearest_rank(
+            current_build_schedule_delays,
+            0.95,
+        )
+        if not current_build_scheduled_runs:
+            current_build_scheduler_status = "unobserved"
+        elif current_build_delay_p95 > 10 * 60 or current_build_interval_p95 > 20 * 60:
+            current_build_scheduler_status = "degraded"
+        elif not current_build_schedule_intervals:
+            current_build_scheduler_status = "insufficient_history"
+        else:
+            current_build_scheduler_status = "healthy"
         runtime = {
             "runs_checked": len(runs),
             "successful_runs": sum(run.status == "success" for run in runs),
@@ -285,39 +323,82 @@ class QualityReportService:
             "scheduled_provider_health": _finalize_latency_samples(
                 scheduled_provider_samples
             ),
+            "current_build_scheduler": {
+                "build_sha": current_build_sha,
+                "status": current_build_scheduler_status,
+                "schedule_runs_checked": len(current_build_scheduled_runs),
+                "p95_start_delay_seconds": current_build_delay_p95,
+                "p95_interval_seconds": current_build_interval_p95,
+            },
+            "current_build_scheduled_provider_health": _finalize_latency_samples(
+                current_build_scheduled_provider_samples
+            ),
             "market_recovery": market_recovery,
         }
         poll_coverage = _regular_session_coverage(
             [run.started_at for run in scheduled_runs]
         )
+        observations = self.repository.recent_market_observations(limit_days=10)
         data_coverage = _regular_market_data_coverage(
-            self.repository.recent_market_observations(limit_days=10),
+            observations,
             self.calendar,
+        )
+        current_build_data_coverage = _regular_market_data_coverage(
+            observations,
+            self.calendar,
+            build_sha=current_build_sha,
+        )
+        release_data_coverage = (
+            current_build_data_coverage if current_build_sha else data_coverage
         )
         full_shadow_days = sum(
             bool(row["full_session_data_recovered"])
-            for row in data_coverage.values()
+            for row in release_data_coverage.values()
         )
         product_quality = _product_quality(
             alerts,
             self.repository.recent_evidence_quality_records(limit=max(500, limit * 5)),
             data_coverage,
             current_build_sha=current_build_sha,
+            current_build_data_coverage=current_build_data_coverage,
         )
-        recent_semantic_violations = int(
-            product_quality["evidence_alerts"]["recent_semantic_violations"]
-        )
-        days_over_alert_target = int(
-            product_quality["alert_load"]["days_over_target"]
-        )
+        if current_build_sha:
+            current_build_quality = product_quality["evidence_qualification"][
+                "by_build"
+            ][current_build_sha]
+            recent_semantic_violations = int(
+                current_build_quality["semantic_violations"]
+            )
+            days_over_alert_target = int(
+                product_quality["alert_load"]["current_build"]["days_over_target"]
+            )
+            release_alerts = [
+                alert for alert in alerts if alert.build_sha == current_build_sha
+            ]
+            release_violations = [
+                violation
+                for violation in violations
+                if violation["build_sha"] == current_build_sha
+            ]
+        else:
+            recent_semantic_violations = int(
+                product_quality["evidence_alerts"]["recent_semantic_violations"]
+            )
+            days_over_alert_target = int(
+                product_quality["alert_load"]["days_over_target"]
+            )
+            release_alerts = alerts
+            release_violations = violations
         gates = {
-            "message_contract": not violations,
-            "messages_observed": bool(alerts),
-            "scheduler_observed": bool(scheduled_runs),
-            "provider_health_observed": bool(scheduled_provider_samples),
+            "message_contract": not release_violations,
+            "messages_observed": bool(release_alerts),
+            "scheduler_observed": bool(current_build_scheduled_runs),
+            "provider_health_observed": bool(
+                current_build_scheduled_provider_samples
+            ),
             "provider_failures_zero": all(
                 sample["failed"] == 0
-                for sample in scheduled_provider_samples.values()
+                for sample in current_build_scheduled_provider_samples.values()
             ),
             "two_full_trading_days": full_shadow_days >= 2,
             "recent_evidence_alerts_clean": recent_semantic_violations == 0,
@@ -338,9 +419,13 @@ class QualityReportService:
             "blocked_reasons": [name for name, passed in gates.items() if not passed],
             "advisories": {
                 "scheduler_cadence_within_slo": scheduler_status == "healthy",
+                "current_build_scheduler_cadence_within_slo": (
+                    current_build_scheduler_status == "healthy"
+                ),
             },
             "regular_session_poll_coverage": poll_coverage,
             "regular_session_data_coverage": data_coverage,
+            "current_build_data_coverage": current_build_data_coverage,
         }
         return QualityReport(
             passed=not violations,
@@ -493,7 +578,13 @@ def _regular_session_coverage(
 def _regular_market_data_coverage(
     observations: list[MarketObservationRecord],
     calendar: MarketSessionCalendar,
+    *,
+    build_sha: str = "",
 ) -> dict[str, dict[str, object]]:
+    if build_sha:
+        observations = [
+            item for item in observations if item.build_sha == build_sha
+        ]
     if not observations:
         return {}
     latest_ticker = max(observations, key=lambda item: item.observed_at).ticker
@@ -532,6 +623,7 @@ def _regular_market_data_coverage(
             "coverage_percent": round(min(100.0, covered / expected_buckets * 100), 1),
             "first_bar_at": ordered[0].observed_at.isoformat(),
             "last_bar_at": ordered[-1].observed_at.isoformat(),
+            "build_sha": build_sha,
             "full_session_data_recovered": (
                 covered == expected_buckets
                 and 0 in buckets
@@ -547,6 +639,7 @@ def _product_quality(
     data_coverage: dict[str, dict[str, object]],
     *,
     current_build_sha: str = "",
+    current_build_data_coverage: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     full_dates = sorted(
         trading_date
@@ -645,31 +738,20 @@ def _product_quality(
         for finding in recent_findings
     )
 
-    routine_types = {"daily_close", "weekly_review"}
-    load_by_day = {}
-    for trading_date in full_dates[-5:]:
-        day_alerts = [
-            alert
-            for alert in alerts
-            if alert.created_at.astimezone(ZoneInfo("America/New_York"))
-            .date()
-            .isoformat()
-            == trading_date
-        ]
-        by_type = Counter(alert.alert_type for alert in day_alerts)
-        nonroutine = sum(
-            count for alert_type, count in by_type.items() if alert_type not in routine_types
-        )
-        load_by_day[trading_date] = {
-            "total_alerts": len(day_alerts),
-            "routine_alerts": len(day_alerts) - nonroutine,
-            "nonroutine_alerts": nonroutine,
-            "target_max_nonroutine_alerts": 3,
-            "within_target": nonroutine <= 3,
-            "by_type": dict(sorted(by_type.items())),
-        }
-    days_over_target = sum(
-        not row["within_target"] for row in load_by_day.values()
+    alert_load = _alert_load(
+        alerts,
+        full_dates[-5:],
+    )
+    days_over_target = int(alert_load["days_over_target"])
+    current_build_full_dates = sorted(
+        trading_date
+        for trading_date, row in (current_build_data_coverage or {}).items()
+        if row["full_session_data_recovered"]
+    )
+    current_build_alert_load = _alert_load(
+        alerts,
+        current_build_full_dates[-5:],
+        build_sha=current_build_sha,
     )
     qualification_inventory = Counter(
         record.alert_disposition
@@ -760,12 +842,47 @@ def _product_quality(
             "current_build_sha": current_build_sha,
             "by_build": quality_by_build,
         },
-        "alert_load": {
-            "completed_trading_days_checked": len(load_by_day),
-            "days_over_target": days_over_target,
-            "target_nonroutine_alerts_per_day": "0-3",
-            "by_trading_day": load_by_day,
-        },
+        "alert_load": {**alert_load, "current_build": current_build_alert_load},
+    }
+
+
+def _alert_load(
+    alerts: list[AlertRecord],
+    trading_dates: list[str],
+    *,
+    build_sha: str = "",
+) -> dict[str, object]:
+    routine_types = {"daily_close", "weekly_review"}
+    load_by_day = {}
+    for trading_date in trading_dates:
+        day_alerts = [
+            alert
+            for alert in alerts
+            if (not build_sha or alert.build_sha == build_sha)
+            and alert.created_at.astimezone(ZoneInfo("America/New_York"))
+            .date()
+            .isoformat()
+            == trading_date
+        ]
+        by_type = Counter(alert.alert_type for alert in day_alerts)
+        nonroutine = sum(
+            count for alert_type, count in by_type.items() if alert_type not in routine_types
+        )
+        load_by_day[trading_date] = {
+            "total_alerts": len(day_alerts),
+            "routine_alerts": len(day_alerts) - nonroutine,
+            "nonroutine_alerts": nonroutine,
+            "target_max_nonroutine_alerts": 3,
+            "within_target": nonroutine <= 3,
+            "by_type": dict(sorted(by_type.items())),
+        }
+    return {
+        "completed_trading_days_checked": len(load_by_day),
+        "days_over_target": sum(
+            not row["within_target"] for row in load_by_day.values()
+        ),
+        "target_nonroutine_alerts_per_day": "0-3",
+        "by_trading_day": load_by_day,
     }
 
 

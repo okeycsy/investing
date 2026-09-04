@@ -292,12 +292,56 @@ class SQLiteRuntimeTest(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection, connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
 
-            self.assertEqual(version, 8)
+            self.assertEqual(version, SCHEMA_VERSION)
             self.assertIsNone(alert.recorded_at)
             self.assertEqual(alert.build_sha, "")
             self.assertEqual(alert.run_id, "")
             self.assertEqual(run.build_sha, "")
             self.assertEqual(run.workflow_name, "")
+
+    def test_schema_eight_market_rows_migrate_without_build_reattribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE market_observations (
+                        ticker TEXT NOT NULL,
+                        observed_at TEXT NOT NULL,
+                        trading_date TEXT NOT NULL,
+                        session TEXT NOT NULL,
+                        close_price REAL NOT NULL,
+                        reference_close REAL NOT NULL,
+                        change_pct REAL NOT NULL,
+                        benchmark_symbol TEXT NOT NULL DEFAULT '',
+                        benchmark_change_pct REAL,
+                        peer_changes_json TEXT NOT NULL DEFAULT '{}',
+                        cumulative_volume INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(ticker, observed_at)
+                    );
+                    PRAGMA user_version = 8;
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO market_observations VALUES "
+                    "('VRT', ?, '2026-09-02', 'regular', 101, 100, 1, "
+                    "'SOXX', 0.5, '{\"ETN\":0.3,\"GEV\":0.7}', 1000)",
+                    (NOW.isoformat(),),
+                )
+
+            repository = SQLiteMonitorRepository(
+                path,
+                build_sha="new-build",
+                run_id="new-run",
+            )
+            observation = repository.recent_market_observations()[0]
+            with closing(sqlite3.connect(path)) as connection, connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+            self.assertEqual(version, SCHEMA_VERSION)
+            self.assertIsNone(observation.recorded_at)
+            self.assertEqual(observation.build_sha, "")
+            self.assertEqual(observation.run_id, "")
 
 
 class GitStateBranchStoreTest(unittest.TestCase):

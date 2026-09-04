@@ -49,6 +49,9 @@ class MarketObservationRecord:
     trading_date: date
     observed_at: datetime
     session: str
+    recorded_at: datetime | None = None
+    build_sha: str = ""
+    run_id: str = ""
 
 
 @dataclass(frozen=True)

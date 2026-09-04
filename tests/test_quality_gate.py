@@ -680,6 +680,114 @@ class QualityReportTest(unittest.TestCase):
             self.assertEqual(build_quality["semantic_violations"], 0)
             self.assertEqual(build_quality["meaningful_rate_percent"], 100.0)
 
+    def test_new_build_cannot_borrow_old_build_release_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            old_sha = "a" * 40
+            new_sha = "b" * 40
+            old_repository = SQLiteMonitorRepository(
+                path,
+                build_sha=old_sha,
+                run_id="old-run",
+            )
+            record_full_market_day(old_repository, date(2026, 9, 1))
+            record_full_market_day(old_repository, date(2026, 9, 2))
+            old_repository.start_run(
+                "old-run",
+                scheduled_at=NOW,
+                started_at=NOW,
+                gap_seconds=0,
+            )
+            old_repository.finish_run(
+                "old-run",
+                completed_at=NOW + timedelta(seconds=2),
+                status="success",
+                summary={"trigger": "schedule", "plan": {"tasks": []}},
+            )
+
+            new_started_at = NOW + timedelta(days=1)
+            new_repository = SQLiteMonitorRepository(
+                path,
+                build_sha=new_sha,
+                workflow_name="Monitor V2 Runtime Shadow",
+                run_id="new-run",
+            )
+            new_repository.start_run(
+                "new-run",
+                scheduled_at=new_started_at,
+                started_at=new_started_at,
+                gap_seconds=0,
+            )
+            new_repository.record_alert(
+                AlertRecord(
+                    event_key="VRT:2026-09-03:close",
+                    ticker="VRT",
+                    alert_type="daily_close",
+                    created_at=new_started_at,
+                    payload=valid_close_payload(),
+                ),
+                enqueue=False,
+            )
+            new_repository.finish_run(
+                "new-run",
+                completed_at=new_started_at + timedelta(seconds=2),
+                status="success",
+                summary={
+                    "trigger": "schedule",
+                    "plan": {"tasks": []},
+                    "details": {
+                        "market": {
+                            "task": "market",
+                            "status": "success",
+                            "duration_ms": 10,
+                            "metadata": {
+                                "providers": {
+                                    "yahoo_market": {
+                                        "status": "success",
+                                        "latency_ms": 8,
+                                    }
+                                }
+                            },
+                        }
+                    },
+                },
+            )
+
+            blocked = QualityReportService(new_repository).build()
+
+            self.assertEqual(
+                blocked.runtime["build_provenance"]["current_build_sha"],
+                new_sha,
+            )
+            self.assertEqual(
+                len(blocked.shadow_validation["regular_session_data_coverage"]),
+                2,
+            )
+            self.assertEqual(
+                blocked.shadow_validation["current_build_data_coverage"],
+                {},
+            )
+            self.assertEqual(blocked.shadow_validation["full_shadow_days"], 0)
+            self.assertFalse(
+                blocked.shadow_validation["gates"]["two_full_trading_days"]
+            )
+            self.assertEqual(blocked.shadow_validation["status"], "observing")
+
+            record_full_market_day(new_repository, date(2026, 9, 3))
+            record_full_market_day(new_repository, date(2026, 9, 4))
+            ready = QualityReportService(new_repository).build()
+
+            self.assertEqual(ready.shadow_validation["full_shadow_days"], 2)
+            self.assertEqual(
+                sorted(ready.shadow_validation["current_build_data_coverage"]),
+                ["2026-09-03", "2026-09-04"],
+            )
+            self.assertTrue(all(ready.shadow_validation["gates"].values()))
+            self.assertEqual(
+                ready.shadow_validation["status"],
+                "ready_for_test_slack",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

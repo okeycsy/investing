@@ -46,7 +46,7 @@ from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS market_observations (
     benchmark_change_pct REAL,
     peer_changes_json TEXT NOT NULL DEFAULT '{}',
     cumulative_volume INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT,
+    build_sha TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(ticker, observed_at)
 );
 
@@ -243,6 +246,24 @@ class SQLiteMonitorRepository:
                 "peer_changes_json",
                 "TEXT NOT NULL DEFAULT '{}'",
             )
+            self._ensure_column(
+                connection,
+                "market_observations",
+                "recorded_at",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "market_observations",
+                "build_sha",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "market_observations",
+                "run_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             self._ensure_column(connection, "alerts", "recorded_at", "TEXT")
             self._ensure_column(
                 connection,
@@ -288,10 +309,24 @@ class SQLiteMonitorRepository:
         self,
         alert: AlertRecord | None = None,
     ) -> tuple[str, str, str]:
-        recorded_at = alert.recorded_at if alert and alert.recorded_at else self._clock()
+        default_recorded_at, default_build_sha, default_run_id = (
+            self._runtime_provenance()
+        )
+        recorded_at = (
+            _utc_iso(alert.recorded_at)
+            if alert and alert.recorded_at
+            else default_recorded_at
+        )
         build_sha = alert.build_sha if alert and alert.build_sha else self.build_sha
         run_id = alert.run_id if alert and alert.run_id else self._active_run_id
-        return _utc_iso(recorded_at), build_sha, run_id
+        return (
+            recorded_at,
+            build_sha or default_build_sha,
+            run_id or default_run_id,
+        )
+
+    def _runtime_provenance(self) -> tuple[str, str, str]:
+        return _utc_iso(self._clock()), self.build_sha, self._active_run_id
 
     def _insert_alert_row(
         self,
@@ -408,6 +443,7 @@ class SQLiteMonitorRepository:
             if frames
             else datetime.now(timezone.utc).isoformat()
         )
+        recorded_at, build_sha, run_id = self._runtime_provenance()
         inserted_events: list[str] = []
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -417,8 +453,9 @@ class SQLiteMonitorRepository:
                     "INSERT OR IGNORE INTO market_observations "
                     "(ticker, observed_at, trading_date, session, close_price, "
                     "reference_close, change_pct, benchmark_symbol, "
-                    "benchmark_change_pct, peer_changes_json, cumulative_volume) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "benchmark_change_pct, peer_changes_json, cumulative_volume, "
+                    "recorded_at, build_sha, run_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         ticker,
                         _utc_iso(snapshot.observed_at),
@@ -435,6 +472,9 @@ class SQLiteMonitorRepository:
                             separators=(",", ":"),
                         ),
                         frame.cumulative_volume,
+                        recorded_at,
+                        build_sha,
+                        run_id,
                     ),
                 )
             if volume is not None and frames:
@@ -604,7 +644,8 @@ class SQLiteMonitorRepository:
     ) -> list[MarketObservationRecord]:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
-                "SELECT ticker, trading_date, observed_at, session "
+                "SELECT ticker, trading_date, observed_at, session, recorded_at, "
+                "build_sha, run_id "
                 "FROM market_observations WHERE trading_date IN ("
                 "SELECT trading_date FROM market_observations "
                 "GROUP BY trading_date ORDER BY trading_date DESC LIMIT ?"
@@ -617,6 +658,9 @@ class SQLiteMonitorRepository:
                 trading_date=date.fromisoformat(row["trading_date"]),
                 observed_at=_required_datetime(row["observed_at"]),
                 session=row["session"],
+                recorded_at=_parse_datetime(row["recorded_at"]),
+                build_sha=row["build_sha"],
+                run_id=row["run_id"],
             )
             for row in rows
         ]
