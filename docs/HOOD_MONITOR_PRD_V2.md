@@ -1090,6 +1090,8 @@ delivery는 지정한 event key만 소비하므로 기존 production outbox를 �
 신규 production workflow가 활성 상태에서도 예약 run을 생성하지 않은 운영 관측에 따라,
 오늘까지 schedule 실행 이력이 확인된 기존 workflow ID를 v2 scheduler 전용으로 전환했다.
 실행 본체는 `workflow_call`로 분리하고 legacy 수동 fallback은 별도 workflow로 격리했다.
+scheduler cron은 `4/5 * * * *` 하나로 단순화하고 세션·task별 주기는 v2 planner가
+checkpoint를 기준으로 제한한다.
 
 ### Epic F: Verification and migration
 

@@ -2,16 +2,9 @@ name: Monitor V2 Scheduler
 
 on:
   schedule:
-    # This established workflow ID remains the sole schedule owner. GitHub may
-    # delay or drop events; the called production tick replays missing 5m bars.
-    - cron: '4-59/5 4-19 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '24,54 0-3,20-23 * * 1-5'
-      timezone: 'America/New_York'
-    - cron: '24 */2 * * 0,6'
-      timezone: 'America/New_York'
-    - cron: '13 8 * * 1'
-      timezone: 'Asia/Seoul'
+    # Keep one non-hour-boundary trigger. The v2 planner gates market, source,
+    # close, and weekly work; a later run replays missed five-minute bars.
+    - cron: '4/5 * * * *'
   workflow_dispatch:
 
 permissions:
