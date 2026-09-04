@@ -184,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "slack-canary":
         run_id = args.run_id or f"manual-{uuid.uuid4()}"
         profile = load_instrument_profile(args.config)
+        notifier = SlackWebhookNotifier(os.environ.get("SLACK_WEBHOOK_URL", ""))
         source = _latest_valid_product_alert(repository)
         payload = _build_slack_canary(source.payload)
         event_key = f"delivery-canary:{run_id}"
@@ -212,7 +213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         delivered = asyncio.run(
             OutboxDeliveryService(
                 repository,
-                SlackWebhookNotifier(os.environ.get("SLACK_WEBHOOK_URL", "")),
+                notifier,
                 checkpoint=checkpoint_delivery,
             ).deliver_pending(limit=1)
         )

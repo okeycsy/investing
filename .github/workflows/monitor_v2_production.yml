@@ -1,6 +1,13 @@
 name: Monitor V2 Production
 
 on:
+  # Temporary release gate: this push trigger is removed immediately after the
+  # one-time canary succeeds. Scheduled production is enabled in that cutover.
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/monitor_v2_production.yml'
   workflow_dispatch:
     inputs:
       mode:
@@ -58,7 +65,7 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db restore-state
 
       - name: Send one labeled Slack canary
-        if: inputs.mode == 'canary'
+        if: github.event_name == 'push' || inputs.mode == 'canary'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: investing-monitor --db .runtime/monitor.db slack-canary --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
@@ -88,5 +95,5 @@ jobs:
         run: investing-monitor --db .runtime/monitor.db quality-report
 
       - name: Checkpoint runtime state
-        if: always() && (inputs.mode == 'canary' || inputs.mode == 'tick')
+        if: always() && (github.event_name == 'push' || inputs.mode == 'canary' || inputs.mode == 'tick')
         run: investing-monitor --db .runtime/monitor.db checkpoint-state --run-id "${{ github.run_id }}-final"
