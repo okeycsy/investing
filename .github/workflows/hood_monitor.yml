@@ -1,10 +1,6 @@
 name: Monitor V2 Scheduler
 
 on:
-  push:
-    branches: ['main']
-    paths:
-      - '.github/scheduler_probe'
   schedule:
     # This established workflow ID remains the sole schedule owner. GitHub may
     # delay or drop events; the called production tick replays missing 5m bars.
