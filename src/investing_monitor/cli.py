@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import copy
 import json
 import os
 import sqlite3
@@ -24,6 +26,7 @@ from investing_monitor.adapters.sec_filings import (
     ResilientSecFilingsAdapter,
     SecFilingTextClient,
 )
+from investing_monitor.adapters.slack import SlackWebhookNotifier
 from investing_monitor.adapters.sqlite_repository import SCHEMA_VERSION, SQLiteMonitorRepository
 from investing_monitor.adapters.yahoo_market_data import (
     YahooChartClient,
@@ -37,11 +40,13 @@ from investing_monitor.application.briefs import (
     WeeklyBriefUnavailable,
 )
 from investing_monitor.application.evidence import EvidenceIngestionService
-from investing_monitor.application.monitor import MarketCycleService
+from investing_monitor.application.monitor import MarketCycleService, OutboxDeliveryService
 from investing_monitor.application.quality import QualityReportService
 from investing_monitor.application.replay import MarketReplayLab
 from investing_monitor.application.sec_monitor import SecMonitorService
 from investing_monitor.presentation.evidence_messages import build_evidence_message
+from investing_monitor.presentation.quality import audit_message
+from investing_monitor.ports.repository import AlertRecord
 from investing_monitor.runtime.tick import NEW_YORK, TickPlanner, TickRunner, TickTask
 
 
@@ -66,27 +71,31 @@ def build_parser() -> argparse.ArgumentParser:
         "market-tick",
         help="run the Stage 2 Yahoo market monitor without delivering Slack",
     )
-    market_tick.add_argument("--config", default="monitor_config.md")
-    market_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
-    market_tick.add_argument("--scheduled-at", default="")
-    market_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
-    market_tick.add_argument(
-        "--trigger",
-        default=os.environ.get("GITHUB_EVENT_NAME", "manual"),
-    )
+    _add_tick_arguments(market_tick)
 
     shadow_tick = subparsers.add_parser(
         "shadow-tick",
         help="run market, evidence, and close monitors without delivering Slack",
     )
-    shadow_tick.add_argument("--config", default="monitor_config.md")
-    shadow_tick.add_argument("--now", default="", help="ISO-8601 timestamp, defaults to now")
-    shadow_tick.add_argument("--scheduled-at", default="")
-    shadow_tick.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
-    shadow_tick.add_argument(
-        "--trigger",
-        default=os.environ.get("GITHUB_EVENT_NAME", "manual"),
+    _add_tick_arguments(shadow_tick)
+
+    production_tick = subparsers.add_parser(
+        "production-tick",
+        help="run the unified monitor and deliver qualified outbox messages to Slack",
     )
+    _add_tick_arguments(production_tick)
+    _add_git_state_arguments(production_tick)
+
+    slack_canary = subparsers.add_parser(
+        "slack-canary",
+        help="send one labeled stored v2 message through the production Slack adapter",
+    )
+    slack_canary.add_argument("--config", default="monitor_config.md")
+    slack_canary.add_argument(
+        "--run-id",
+        default=os.environ.get("GITHUB_RUN_ID", ""),
+    )
+    _add_git_state_arguments(slack_canary)
 
     replay = subparsers.add_parser(
         "replay-market",
@@ -128,6 +137,21 @@ def _add_git_state_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--branch", default="runtime-state")
 
 
+def _add_tick_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", default="monitor_config.md")
+    parser.add_argument(
+        "--now",
+        default="",
+        help="ISO-8601 timestamp, defaults to now",
+    )
+    parser.add_argument("--scheduled-at", default="")
+    parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+    parser.add_argument(
+        "--trigger",
+        default=os.environ.get("GITHUB_EVENT_NAME", "manual"),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     database_path = Path(args.db)
@@ -156,6 +180,53 @@ def main(argv: Sequence[str] | None = None) -> int:
             "database_sha256": result.database_sha256,
         }
         return _emit(payload, args.summary_file)
+
+    if args.command == "slack-canary":
+        run_id = args.run_id or f"manual-{uuid.uuid4()}"
+        profile = load_instrument_profile(args.config)
+        source = _latest_valid_product_alert(repository)
+        payload = _build_slack_canary(source.payload)
+        event_key = f"delivery-canary:{run_id}"
+        inserted = repository.record_alert(
+            AlertRecord(
+                event_key=event_key,
+                ticker=profile.ticker,
+                alert_type="delivery_canary",
+                created_at=datetime.now(timezone.utc),
+                payload=payload,
+            )
+        )
+        if not inserted:
+            raise RuntimeError(f"Slack canary already exists for run {run_id}")
+        checkpoint_results = []
+        state_store = _state_store(args)
+
+        def checkpoint_delivery(reason: str) -> None:
+            checkpoint_results.append(
+                state_store.checkpoint(
+                    database_path,
+                    run_id=f"{run_id}:{reason}",
+                )
+            )
+
+        delivered = asyncio.run(
+            OutboxDeliveryService(
+                repository,
+                SlackWebhookNotifier(os.environ.get("SLACK_WEBHOOK_URL", "")),
+                checkpoint=checkpoint_delivery,
+            ).deliver_pending(limit=1)
+        )
+        _emit(
+            {
+                "command": args.command,
+                "event_key": event_key,
+                "source_event_key": source.event_key,
+                "delivered": delivered,
+                "remote_checkpoints": len(checkpoint_results),
+            },
+            args.summary_file,
+        )
+        return 0 if delivered == 1 else 1
 
     if args.command == "replay-market":
         now = datetime.now(timezone.utc)
@@ -201,7 +272,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0 if passed else 1
 
-    if args.command in {"market-tick", "shadow-tick"}:
+    if args.command in {"market-tick", "shadow-tick", "production-tick"}:
+        production = args.command == "production-tick"
+        full_monitor = args.command in {"shadow-tick", "production-tick"}
+        if production and os.environ.get("V2_PRODUCTION_ENABLED", "").lower() != "true":
+            raise RuntimeError("production delivery requires V2_PRODUCTION_ENABLED=true")
         now = _parse_timestamp(args.now) if args.now else datetime.now(timezone.utc)
         scheduled_at = (
             _parse_timestamp(args.scheduled_at)
@@ -216,11 +291,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile,
             quote_client=YahooQuoteClient(),
         )
-        suppressed_deliveries = repository.suppress_pending_deliveries(
-            now,
-            "v2 shadow runtime does not deliver Slack",
+        suppressed_deliveries = (
+            0
+            if production
+            else repository.suppress_pending_deliveries(
+                now,
+                "v2 shadow runtime does not deliver Slack",
+            )
         )
-        service = MarketCycleService(repository, enqueue_alerts=False)
+        service = MarketCycleService(repository, enqueue_alerts=production)
         market_result: dict[str, object] = {}
         evidence_result: dict[str, object] = {}
         close_result: dict[str, object] = {}
@@ -260,7 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         handlers = {TickTask.MARKET: handle_market}
         enabled_tasks = {TickTask.MARKET}
-        if args.command == "shadow-tick":
+        if full_monitor:
             evidence_profile = load_evidence_profile(args.config)
             ingestion = EvidenceIngestionService(
                 repository,
@@ -269,7 +348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 article_text=YahooArticleTextClient(),
                 filing_text=SecFilingTextClient(evidence_profile.sec_contact),
                 alert_builder=build_evidence_message,
-                enqueue_alerts=False,
+                enqueue_alerts=production,
             )
             yahoo_news = YahooNewsAdapter()
             investor_relations = InvestorRelationsFeedAdapter()
@@ -346,8 +425,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
                 return evidence_result["sec"]
 
-            close_service = CloseBriefService(repository, enqueue_alerts=False)
-            weekly_service = WeeklyBriefService(repository, enqueue_alerts=False)
+            close_service = CloseBriefService(repository, enqueue_alerts=production)
+            weekly_service = WeeklyBriefService(repository, enqueue_alerts=production)
 
             def handle_close(task):
                 close_date = date.fromisoformat(task.checkpoint_key.rsplit(":", 1)[-1])
@@ -413,6 +492,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         run_id = args.run_id or f"manual-{uuid.uuid4()}"
+        delivery_result: dict[str, object] = {}
+        if production:
+            state_store = _state_store(args)
+            delivery_checkpoints = []
+
+            def checkpoint_delivery(reason: str) -> None:
+                delivery_checkpoints.append(
+                    state_store.checkpoint(
+                        database_path,
+                        run_id=f"{run_id}:{reason}",
+                    )
+                )
+
+            delivery_service = OutboxDeliveryService(
+                repository,
+                SlackWebhookNotifier(os.environ.get("SLACK_WEBHOOK_URL", "")),
+                checkpoint=checkpoint_delivery,
+            )
+
+            def handle_delivery(_task):
+                started = monotonic()
+                delivered = asyncio.run(delivery_service.deliver_pending())
+                delivery_result.update(
+                    {
+                        "delivered": delivered,
+                        "remote_checkpoints": len(delivery_checkpoints),
+                    }
+                )
+                return {
+                    **delivery_result,
+                    "duration_ms": int((monotonic() - started) * 1_000),
+                }
+
+            handlers[TickTask.DELIVERY] = handle_delivery
+            enabled_tasks.add(TickTask.DELIVERY)
         execution = TickRunner(
             repository,
             handlers,
@@ -442,10 +556,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "execution": execution.as_dict(),
             "market": market_result,
         }
-        if args.command == "shadow-tick":
+        if full_monitor:
             payload["evidence"] = evidence_result
             payload["close"] = close_result
             payload["weekly"] = weekly_result
+        if production:
+            payload["delivery"] = delivery_result
         _emit(payload, args.summary_file)
         return 0 if execution.status == "success" else 1
 
@@ -521,6 +637,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if ok else 1
 
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _latest_valid_product_alert(repository: SQLiteMonitorRepository) -> AlertRecord:
+    for alert in repository.recent_alerts(limit=100):
+        if alert.alert_type == "delivery_canary":
+            continue
+        if audit_message(alert.alert_type, alert.payload).passed:
+            return alert
+    raise RuntimeError("no quality-approved v2 message is available for Slack canary")
+
+
+def _build_slack_canary(source: dict) -> dict:
+    payload = copy.deepcopy(source)
+    fallback = str(payload.get("text") or "V2 Slack message")
+    payload["text"] = f"[V2 검증] {fallback}"[:3_000]
+    blocks = payload.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        raise ValueError("canary source must contain Slack blocks")
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") != "header":
+            continue
+        text = block.get("text")
+        if isinstance(text, dict) and isinstance(text.get("text"), str):
+            text["text"] = f"V2 검증 · {text['text']}"[:150]
+            break
+    blocks.insert(
+        1,
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "전송 경로 검증 · 투자 신호가 아닙니다",
+                }
+            ],
+        },
+    )
+    result = audit_message("delivery_canary", payload)
+    if not result.passed:
+        raise ValueError("invalid Slack canary: " + "; ".join(result.violations))
+    return payload
 
 
 def _state_store(args: argparse.Namespace) -> GitStateBranchStore:
