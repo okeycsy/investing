@@ -23,6 +23,8 @@ def build_price_band_message(
     volume: VolumeSnapshot | None,
     volume_assessment: VolumeAssessment,
     catalysts: Sequence[Catalyst],
+    *,
+    detection_delay_seconds: int = 0,
 ) -> dict:
     direction_icon = "📈" if signal.direction is Direction.UP else "📉"
     direction_label = "상승" if signal.direction is Direction.UP else "하락"
@@ -47,7 +49,13 @@ def build_price_band_message(
                 ),
             },
         },
-        _context(f"{session_label} · {timestamp}"),
+        _context(
+            _detection_context(
+                session_label,
+                timestamp,
+                detection_delay_seconds,
+            )
+        ),
         _section(_relative_text(relative)),
     ]
 
@@ -81,6 +89,8 @@ def build_volume_message(
     relative: RelativeAssessment,
     volume: VolumeSnapshot,
     volume_assessment: VolumeAssessment,
+    *,
+    detection_delay_seconds: int = 0,
 ) -> dict:
     timestamp = signal.observed_at.astimezone(KST).strftime("%m/%d %H:%M KST")
     direction_icon = {
@@ -104,7 +114,13 @@ def build_volume_message(
                     "text": f"🔥 ${signal.ticker} 거래량 {ratio:.1f}배 확대",
                 },
             },
-            _context(timestamp),
+            _context(
+                _detection_context(
+                    "거래량 기준 시각",
+                    timestamp,
+                    detection_delay_seconds,
+                )
+            ),
             _section(
                 f"*동시간대 거래량 터짐*\n"
                 f"누적 {volume.observed_volume:,}주 | "
@@ -148,6 +164,29 @@ def _catalyst_text(catalyst: Catalyst) -> str:
         f"{catalyst.summary}\n"
         f"_{catalyst.source_name}_"
     )
+
+
+def _detection_context(
+    session_label: str,
+    timestamp: str,
+    detection_delay_seconds: int,
+) -> str:
+    if detection_delay_seconds <= 10 * 60:
+        return f"{session_label} · {timestamp}"
+    return (
+        f"⏱️ 지연 감지 · {session_label} {timestamp} 발생 · "
+        f"{_duration_label(detection_delay_seconds)} 뒤 복구"
+    )
+
+
+def _duration_label(seconds: int) -> str:
+    minutes = max(1, round(seconds / 60))
+    hours, remaining = divmod(minutes, 60)
+    if not hours:
+        return f"{remaining}분"
+    if not remaining:
+        return f"{hours}시간"
+    return f"{hours}시간 {remaining}분"
 
 
 def _section(text: str) -> dict:

@@ -108,6 +108,8 @@ class QualityReportService:
             "max_recovery_span_minutes": 0,
             "max_source_age_seconds": 0,
             "max_gap_recovered_seconds": 0,
+            "delayed_events": 0,
+            "max_detection_delay_seconds": 0,
         }
         for run in runs:
             run_trigger = _run_trigger(run.summary)
@@ -168,6 +170,17 @@ class QualityReportService:
                     market_recovery["max_source_age_seconds"] = max(
                         market_recovery["max_source_age_seconds"],
                         max(0, int(metadata.get("source_age_seconds") or 0)),
+                    )
+                    market_recovery["delayed_events"] += max(
+                        0,
+                        int(metadata.get("delayed_events") or 0),
+                    )
+                    market_recovery["max_detection_delay_seconds"] = max(
+                        market_recovery["max_detection_delay_seconds"],
+                        max(
+                            0,
+                            int(metadata.get("max_detection_delay_seconds") or 0),
+                        ),
                     )
                     if replayed_frames:
                         market_recovery["max_gap_recovered_seconds"] = max(

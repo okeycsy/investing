@@ -33,6 +33,9 @@ from investing_monitor.presentation.slack_messages import (
 )
 
 
+DELAYED_DETECTION_SECONDS = 10 * 60
+
+
 class MarketMonitorService:
     def __init__(
         self,
@@ -81,6 +84,8 @@ class MarketCycleReport:
     observed_frames: int
     replayed_frames: int
     inserted_event_keys: tuple[str, ...]
+    delayed_event_keys: tuple[str, ...]
+    max_detection_delay_seconds: int
     messages: tuple[dict, ...]
     latest_context: Mapping[str, object]
 
@@ -91,6 +96,8 @@ class MarketCycleReport:
             "observed_frames": self.observed_frames,
             "replayed_frames": self.replayed_frames,
             "inserted_event_keys": list(self.inserted_event_keys),
+            "delayed_event_keys": list(self.delayed_event_keys),
+            "max_detection_delay_seconds": self.max_detection_delay_seconds,
             "messages": list(self.messages),
             "latest_context": dict(self.latest_context),
         }
@@ -112,7 +119,11 @@ class MarketCycleService:
         self,
         cycle: MarketCycle,
         catalysts: Sequence[Catalyst] = (),
+        *,
+        detected_at: datetime | None = None,
     ) -> MarketCycleReport:
+        if detected_at is not None and detected_at.tzinfo is None:
+            raise ValueError("detected_at must be timezone-aware")
         existing = self.repository.load_price_band_state(cycle.ticker)
         state = self._state_for_cycle(cycle, existing)
         if not cycle.frames:
@@ -122,6 +133,8 @@ class MarketCycleService:
                 observed_frames=0,
                 replayed_frames=0,
                 inserted_event_keys=(),
+                delayed_event_keys=(),
+                max_detection_delay_seconds=0,
                 messages=(),
                 latest_context={},
             )
@@ -137,13 +150,19 @@ class MarketCycleService:
         consume_volume = volume_assessment.is_exploded and not state.volume_alerted
         alerts: list[AlertRecord] = []
         payloads: dict[str, dict] = {}
+        detection_delays: dict[str, int] = {}
         for signal, frame in signals:
+            detection_delay = self._detection_delay(
+                signal.observed_at,
+                detected_at,
+            )
             payload = build_price_band_message(
                 signal,
                 assess_relative_performance(frame.snapshot),
                 cycle.volume,
                 volume_assessment,
                 catalysts,
+                detection_delay_seconds=detection_delay,
             )
             alerts.append(
                 AlertRecord(
@@ -155,6 +174,7 @@ class MarketCycleService:
                 )
             )
             payloads[signal.event_key] = payload
+            detection_delays[signal.event_key] = detection_delay
 
         latest = cycle.frames[-1].snapshot
         latest_relative = assess_relative_performance(latest)
@@ -167,12 +187,17 @@ class MarketCycleService:
                 trading_date=cycle.trading_date,
                 observed_at=latest.observed_at,
             )
+            detection_delay = self._detection_delay(
+                signal.observed_at,
+                detected_at,
+            )
             payload = build_volume_message(
                 signal,
                 latest,
                 latest_relative,
                 cycle.volume,
                 volume_assessment,
+                detection_delay_seconds=detection_delay,
             )
             alerts.append(
                 AlertRecord(
@@ -184,6 +209,7 @@ class MarketCycleService:
                 )
             )
             payloads[signal.event_key] = payload
+            detection_delays[signal.event_key] = detection_delay
 
         if consume_volume:
             state = replace(state, volume_alerted=True)
@@ -196,18 +222,45 @@ class MarketCycleService:
             alerts,
             enqueue=self.enqueue_alerts,
         )
+        delayed = tuple(
+            key
+            for key in inserted
+            if detection_delays.get(key, 0) > DELAYED_DETECTION_SECONDS
+        )
         return MarketCycleReport(
             ticker=cycle.ticker,
             trading_date=cycle.trading_date.isoformat(),
             observed_frames=len(cycle.frames),
             replayed_frames=cycle.replayed_frames,
             inserted_event_keys=inserted,
+            delayed_event_keys=delayed,
+            max_detection_delay_seconds=max(
+                (detection_delays[key] for key in inserted),
+                default=0,
+            ),
             messages=tuple(payloads[key] for key in inserted),
             latest_context=self._latest_context(
                 latest,
                 latest_relative,
                 cycle.volume,
                 volume_assessment,
+            ),
+        )
+
+    @staticmethod
+    def _detection_delay(
+        observed_at: datetime,
+        detected_at: datetime | None,
+    ) -> int:
+        if detected_at is None:
+            return 0
+        return max(
+            0,
+            int(
+                (
+                    detected_at.astimezone(timezone.utc)
+                    - observed_at.astimezone(timezone.utc)
+                ).total_seconds()
             ),
         )
 

@@ -239,6 +239,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     now - timedelta(hours=24),
                     limit=2,
                 ),
+                detected_at=now,
             )
             market_result.update(report.as_dict())
             market_result["source_age_seconds"] = cycle.source_age_seconds
@@ -246,6 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observed_frames": report.observed_frames,
                 "replayed_frames": report.replayed_frames,
                 "inserted_events": len(report.inserted_event_keys),
+                "delayed_events": len(report.delayed_event_keys),
+                "max_detection_delay_seconds": report.max_detection_delay_seconds,
                 "source_age_seconds": cycle.source_age_seconds,
                 "providers": {
                     "yahoo_market": {

@@ -358,6 +358,49 @@ class MarketCycleServiceTest(unittest.TestCase):
             self.assertEqual(benchmark, 1.0)
             self.assertEqual(json.loads(peer_json)["ETN"], 1.0)
 
+    def test_recovered_move_discloses_event_time_and_detection_delay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            frames = tuple(
+                MarketFrame(
+                    MarketSnapshot(
+                        ticker="VRT",
+                        trading_date=TRADING_DATE,
+                        observed_at=et(TRADING_DATE, 10, minute),
+                        session=MarketSession.REGULAR,
+                        change_pct=change,
+                        benchmark_change_pct=1.0,
+                        peer_changes={"ETN": 1.0, "GEV": 1.2, "NVT": 1.1},
+                    ),
+                    close_price=100 + change,
+                    reference_close=100,
+                    cumulative_volume=100_000,
+                )
+                for minute, change in ((0, 4.2), (5, 2.0))
+            )
+            cycle = MarketCycle(
+                ticker="VRT",
+                trading_date=TRADING_DATE,
+                frames=frames,
+                volume=None,
+                source_age_seconds=0,
+            )
+
+            report = MarketCycleService(repository).process(
+                cycle,
+                detected_at=et(TRADING_DATE, 12, 20),
+            )
+            rendered = json.dumps(report.messages[0], ensure_ascii=False)
+
+            self.assertEqual(
+                report.delayed_event_keys,
+                ("VRT:2026-09-02:price-band:up:4",),
+            )
+            self.assertEqual(report.max_detection_delay_seconds, 2 * 60 * 60 + 20 * 60)
+            self.assertIn("⏱️ 지연 감지", rendered)
+            self.assertIn("정규장 09/02 23:00 KST 발생", rendered)
+            self.assertIn("2시간 20분 뒤 복구", rendered)
+
     def test_volume_alert_is_once_per_day_and_combines_with_move(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
@@ -386,15 +429,20 @@ class MarketCycleServiceTest(unittest.TestCase):
             service = MarketCycleService(repository)
 
             first = service.process(
-                self._cycle(change=1.0, minute=0, observed=300, expected=200)
+                self._cycle(change=1.0, minute=0, observed=300, expected=200),
+                detected_at=et(TRADING_DATE, 12, 0),
             )
             second = service.process(
                 self._cycle(change=1.5, minute=5, observed=600, expected=200)
             )
 
             self.assertEqual(first.inserted_event_keys, ("VRT:2026-09-02:volume-spike",))
+            self.assertEqual(first.delayed_event_keys, first.inserted_event_keys)
             self.assertEqual(second.inserted_event_keys, ())
-            self.assertIn("거래량 1.5배 확대", json.dumps(first.messages[0], ensure_ascii=False))
+            rendered = json.dumps(first.messages[0], ensure_ascii=False)
+            self.assertIn("거래량 1.5배 확대", rendered)
+            self.assertIn("⏱️ 지연 감지", rendered)
+            self.assertIn("2시간 뒤 복구", rendered)
 
     def test_shadow_records_alert_without_creating_delivery_intent(self):
         with tempfile.TemporaryDirectory() as directory:
