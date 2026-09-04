@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -14,6 +14,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from investing_monitor.adapters.sqlite_repository import SQLiteMonitorRepository
 from investing_monitor.application.quality import QualityReportService
+from investing_monitor.domain.models import (
+    MarketFrame,
+    MarketSession,
+    MarketSnapshot,
+    PriceBandState,
+)
 from investing_monitor.ports.repository import AlertRecord
 from investing_monitor.presentation.quality import (
     MessageQualityError,
@@ -45,6 +51,71 @@ def valid_close_payload() -> dict:
             },
         ],
     }
+
+
+def valid_catalyst_payload(source_url: str, title: str = "중요 회사 사건") -> dict:
+    return {
+        "text": f"$VRT {title}",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{title}*\n확인된 사실과 투자 논지 변화",
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"<{source_url}|원문 보기>",
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def record_full_market_day(
+    repository: SQLiteMonitorRepository,
+    trading_date: date,
+    *,
+    bucket_count: int = 78,
+) -> None:
+    frames = []
+    session_start = datetime.combine(
+        trading_date,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    ) + timedelta(hours=13, minutes=30)
+    for index in range(bucket_count):
+        observed_at = session_start + timedelta(minutes=index * 5)
+        snapshot = MarketSnapshot(
+            ticker="VRT",
+            trading_date=trading_date,
+            observed_at=observed_at,
+            session=MarketSession.REGULAR,
+            change_pct=1.0,
+            benchmark_symbol="SOXX",
+            benchmark_change_pct=0.5,
+            peer_changes={"ETN": 0.3, "GEV": 0.7},
+        )
+        frames.append(
+            MarketFrame(
+                snapshot=snapshot,
+                close_price=101.0,
+                reference_close=100.0,
+                cumulative_volume=1000 * (index + 1),
+            )
+        )
+    repository.record_market_cycle(
+        "VRT",
+        PriceBandState(trading_date),
+        frames,
+        volume=None,
+        alerts=(),
+    )
 
 
 class MessageQualityGateTest(unittest.TestCase):
@@ -91,6 +162,42 @@ class MessageQualityGateTest(unittest.TestCase):
 
 
 class QualityReportTest(unittest.TestCase):
+    def test_market_data_coverage_respects_early_close_calendar(self):
+        class EarlyCloseCalendar:
+            def regular_open(self, value: date) -> datetime:
+                return datetime.combine(
+                    value,
+                    datetime.min.time(),
+                    timezone.utc,
+                ) + timedelta(hours=13, minutes=30)
+
+            def regular_close(self, value: date) -> datetime:
+                return datetime.combine(
+                    value,
+                    datetime.min.time(),
+                    timezone.utc,
+                ) + timedelta(hours=17)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            record_full_market_day(
+                repository,
+                date(2026, 11, 27),
+                bucket_count=42,
+            )
+
+            report = QualityReportService(
+                repository,
+                calendar=EarlyCloseCalendar(),
+            ).build()
+            coverage = report.shadow_validation[
+                "regular_session_data_coverage"
+            ]["2026-11-27"]
+
+            self.assertEqual(coverage["nominal_regular_5m_buckets"], 42)
+            self.assertEqual(coverage["covered_5m_buckets"], 42)
+            self.assertTrue(coverage["full_session_data_recovered"])
+
     def test_report_combines_message_and_runtime_health(self):
         with tempfile.TemporaryDirectory() as directory:
             repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
@@ -153,8 +260,13 @@ class QualityReportTest(unittest.TestCase):
             self.assertEqual(report.runtime["max_schedule_interval_seconds"], 0)
             self.assertEqual(report.shadow_validation["status"], "observing")
             self.assertIn(
-                "scheduler_cadence_within_slo",
+                "two_full_trading_days",
                 report.shadow_validation["blocked_reasons"],
+            )
+            self.assertFalse(
+                report.shadow_validation["advisories"][
+                    "scheduler_cadence_within_slo"
+                ]
             )
             self.assertEqual(report.runtime["planned_tasks"], {"market": 1})
             self.assertEqual(report.runtime["succeeded_tasks"], {"market": 1})
@@ -241,6 +353,8 @@ class QualityReportTest(unittest.TestCase):
                 ),
                 enqueue=False,
             )
+            record_full_market_day(repository, date(2026, 9, 1))
+            record_full_market_day(repository, date(2026, 9, 2))
             for day in (1, 2):
                 session_start = datetime(2026, 9, day, 13, 30, tzinfo=timezone.utc)
                 for index in range(37):
@@ -283,7 +397,161 @@ class QualityReportTest(unittest.TestCase):
             self.assertEqual(report.runtime["p95_schedule_interval_seconds"], 600)
             self.assertIn("yahoo_market", report.runtime["scheduled_provider_health"])
             self.assertEqual(report.shadow_validation["full_shadow_days"], 2)
+            self.assertEqual(
+                report.shadow_validation["regular_session_data_coverage"][
+                    "2026-09-02"
+                ]["covered_5m_buckets"],
+                78,
+            )
             self.assertEqual(report.shadow_validation["status"], "ready_for_test_slack")
+
+    def test_full_bar_recovery_is_distinct_from_sparse_scheduler_polling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            repository.record_alert(
+                AlertRecord(
+                    event_key="VRT:2026-09-02:close",
+                    ticker="VRT",
+                    alert_type="daily_close",
+                    created_at=NOW,
+                    payload=valid_close_payload(),
+                ),
+                enqueue=False,
+            )
+            for trading_date in (date(2026, 9, 1), date(2026, 9, 2)):
+                record_full_market_day(repository, trading_date)
+                for suffix, started_at in (
+                    ("open", datetime.combine(trading_date, datetime.min.time(), timezone.utc) + timedelta(hours=14)),
+                    ("close", datetime.combine(trading_date, datetime.min.time(), timezone.utc) + timedelta(hours=19, minutes=45)),
+                ):
+                    run_id = f"{trading_date}-{suffix}"
+                    repository.start_run(
+                        run_id,
+                        scheduled_at=started_at,
+                        started_at=started_at,
+                        gap_seconds=3 * 60 * 60,
+                    )
+                    repository.finish_run(
+                        run_id,
+                        completed_at=started_at + timedelta(seconds=2),
+                        status="success",
+                        summary={
+                            "trigger": "schedule",
+                            "plan": {
+                                "tasks": [
+                                    {"name": "market", "checkpoint_key": "market"}
+                                ]
+                            },
+                            "succeeded": ["market"],
+                            "details": {
+                                "market": {
+                                    "task": "market",
+                                    "status": "success",
+                                    "duration_ms": 10,
+                                    "metadata": {
+                                        "observed_frames": 78 if suffix == "close" else 1,
+                                        "replayed_frames": 77 if suffix == "close" else 0,
+                                        "source_age_seconds": 20,
+                                        "providers": {
+                                            "yahoo_market": {
+                                                "status": "success",
+                                                "latency_ms": 8,
+                                            }
+                                        },
+                                    },
+                                }
+                            },
+                        },
+                    )
+
+            report = QualityReportService(repository).build()
+
+            self.assertEqual(report.runtime["scheduler_status"], "degraded")
+            self.assertFalse(
+                report.shadow_validation["advisories"][
+                    "scheduler_cadence_within_slo"
+                ]
+            )
+            self.assertEqual(report.shadow_validation["full_shadow_days"], 2)
+            self.assertEqual(report.runtime["market_recovery"]["replayed_frames"], 154)
+            self.assertEqual(
+                report.runtime["market_recovery"]["max_recovery_span_minutes"],
+                385,
+            )
+            self.assertEqual(report.shadow_validation["status"], "ready_for_test_slack")
+
+    def test_product_quality_detects_filtered_and_reconciled_evidence_alerts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            record_full_market_day(repository, date(2026, 9, 1))
+            record_full_market_day(repository, date(2026, 9, 2))
+            rows = (
+                ("valid", "https://example.com/valid", "analyzed", "", "event-valid", 1),
+                ("filtered", "https://example.com/filtered", "filtered", "low value", "event-filtered", None),
+                ("duplicate", "https://example.com/duplicate", "analyzed", "", "event-valid", 1),
+                ("irrelevant", "https://example.com/irrelevant", "analyzed", "irrelevant", "event-irrelevant", 0),
+            )
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                for candidate_id, source_url, status, reason, cluster_key, relevant in rows:
+                    analysis_json = (
+                        '{"relevant":true}'
+                        if relevant == 1
+                        else '{"relevant":false}'
+                        if relevant == 0
+                        else "{}"
+                    )
+                    connection.execute(
+                        "INSERT INTO evidence_candidates "
+                        "(candidate_id, ticker, source_kind, headline, source_name, "
+                        "source_url, published_at, cluster_key, status, status_reason, "
+                        "analysis_json, first_seen_at, last_seen_at) "
+                        "VALUES (?, 'VRT', 'news', ?, 'Source', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            candidate_id,
+                            candidate_id,
+                            source_url,
+                            NOW.isoformat(),
+                            cluster_key,
+                            status,
+                            reason,
+                            analysis_json,
+                            NOW.isoformat(),
+                            NOW.isoformat(),
+                        ),
+                    )
+            for candidate_id, source_url, _status, _reason, cluster_key, _relevant in rows:
+                event_key = "event-old-duplicate" if candidate_id == "duplicate" else cluster_key
+                repository.record_alert(
+                    AlertRecord(
+                        event_key=event_key,
+                        ticker="VRT",
+                        alert_type="catalyst",
+                        created_at=NOW - timedelta(minutes=len(candidate_id)),
+                        payload=valid_catalyst_payload(source_url, candidate_id),
+                    ),
+                    enqueue=False,
+                )
+
+            report = QualityReportService(repository).build()
+            evidence = report.product_quality["evidence_alerts"]
+
+            self.assertEqual(report.product_quality["status"], "needs_improvement")
+            self.assertEqual(evidence["assessed"], 4)
+            self.assertEqual(evidence["currently_valid"], 1)
+            self.assertEqual(evidence["retrospectively_filtered"], 1)
+            self.assertEqual(evidence["duplicate_cluster_reconciled"], 1)
+            self.assertEqual(evidence["no_longer_relevant"], 1)
+            self.assertEqual(evidence["meaningful_rate_percent"], 25.0)
+            self.assertEqual(evidence["duplicate_rate_percent"], 25.0)
+            self.assertEqual(evidence["recent_semantic_violations"], 3)
+            self.assertEqual(
+                report.product_quality["alert_load"]["days_over_target"],
+                1,
+            )
+            self.assertIn(
+                "recent_evidence_alerts_clean",
+                report.shadow_validation["blocked_reasons"],
+            )
 
 
 if __name__ == "__main__":

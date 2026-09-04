@@ -1,14 +1,35 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time
 from math import ceil
 from statistics import median
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from investing_monitor.ports.repository import MonitorRepository
+from investing_monitor.ports.repository import (
+    AlertRecord,
+    EvidenceQualityRecord,
+    MarketObservationRecord,
+    MonitorRepository,
+)
 from investing_monitor.presentation.quality import audit_message
+
+
+class MarketSessionCalendar(Protocol):
+    def regular_open(self, value: date) -> datetime: ...
+
+    def regular_close(self, value: date) -> datetime: ...
+
+
+class StandardMarketSessionCalendar:
+    def regular_open(self, value: date) -> datetime:
+        return datetime.combine(value, time(9, 30), ZoneInfo("America/New_York"))
+
+    def regular_close(self, value: date) -> datetime:
+        return datetime.combine(value, time(16, 0), ZoneInfo("America/New_York"))
 
 
 @dataclass(frozen=True)
@@ -18,6 +39,7 @@ class QualityReport:
     message_violations: tuple[dict[str, object], ...]
     recent_messages: tuple[dict[str, object], ...]
     runtime: dict[str, object]
+    product_quality: dict[str, object]
     shadow_validation: dict[str, object]
     status_counts: dict[str, dict[str, int]]
 
@@ -28,14 +50,21 @@ class QualityReport:
             "message_violations": list(self.message_violations),
             "recent_messages": list(self.recent_messages),
             "runtime": self.runtime,
+            "product_quality": self.product_quality,
             "shadow_validation": self.shadow_validation,
             "status_counts": self.status_counts,
         }
 
 
 class QualityReportService:
-    def __init__(self, repository: MonitorRepository) -> None:
+    def __init__(
+        self,
+        repository: MonitorRepository,
+        *,
+        calendar: MarketSessionCalendar | None = None,
+    ) -> None:
         self.repository = repository
+        self.calendar = calendar or StandardMarketSessionCalendar()
 
     def build(self, *, limit: int = 100) -> QualityReport:
         alerts = self.repository.recent_alerts(limit=limit)
@@ -68,6 +97,18 @@ class QualityReportService:
         task_samples: dict[str, dict[str, int]] = {}
         provider_samples: dict[str, dict[str, int]] = {}
         scheduled_provider_samples: dict[str, dict[str, int]] = {}
+        market_recovery = {
+            "task_runs": 0,
+            "scheduled_task_runs": 0,
+            "runs_with_replay": 0,
+            "scheduled_runs_with_replay": 0,
+            "observed_frames": 0,
+            "replayed_frames": 0,
+            "max_replayed_frames_in_run": 0,
+            "max_recovery_span_minutes": 0,
+            "max_source_age_seconds": 0,
+            "max_gap_recovered_seconds": 0,
+        }
         for run in runs:
             run_trigger = _run_trigger(run.summary)
             plan_rows = (run.summary.get("plan") or {}).get("tasks") or []
@@ -101,7 +142,39 @@ class QualityReportService:
                 task_sample["total_ms"] += duration_ms
                 task_sample["max_ms"] = max(task_sample["max_ms"], duration_ms)
                 metadata = detail.get("metadata") or {}
-                providers = metadata.get("providers") if isinstance(metadata, dict) else {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                if task_name == "market" and task_status == "success":
+                    observed_frames = max(0, int(metadata.get("observed_frames") or 0))
+                    replayed_frames = max(0, int(metadata.get("replayed_frames") or 0))
+                    market_recovery["task_runs"] += 1
+                    market_recovery["scheduled_task_runs"] += int(
+                        run_trigger == "schedule"
+                    )
+                    market_recovery["runs_with_replay"] += int(replayed_frames > 0)
+                    market_recovery["scheduled_runs_with_replay"] += int(
+                        run_trigger == "schedule" and replayed_frames > 0
+                    )
+                    market_recovery["observed_frames"] += observed_frames
+                    market_recovery["replayed_frames"] += replayed_frames
+                    market_recovery["max_replayed_frames_in_run"] = max(
+                        market_recovery["max_replayed_frames_in_run"],
+                        replayed_frames,
+                    )
+                    market_recovery["max_recovery_span_minutes"] = max(
+                        market_recovery["max_recovery_span_minutes"],
+                        replayed_frames * 5,
+                    )
+                    market_recovery["max_source_age_seconds"] = max(
+                        market_recovery["max_source_age_seconds"],
+                        max(0, int(metadata.get("source_age_seconds") or 0)),
+                    )
+                    if replayed_frames:
+                        market_recovery["max_gap_recovered_seconds"] = max(
+                            market_recovery["max_gap_recovered_seconds"],
+                            run.gap_seconds,
+                        )
+                providers = metadata.get("providers")
                 if not isinstance(providers, dict):
                     continue
                 for provider_name, provider in providers.items():
@@ -188,25 +261,42 @@ class QualityReportService:
             "scheduled_provider_health": _finalize_latency_samples(
                 scheduled_provider_samples
             ),
+            "market_recovery": market_recovery,
         }
-        session_coverage = _regular_session_coverage(
+        poll_coverage = _regular_session_coverage(
             [run.started_at for run in scheduled_runs]
         )
+        data_coverage = _regular_market_data_coverage(
+            self.repository.recent_market_observations(limit_days=10),
+            self.calendar,
+        )
         full_shadow_days = sum(
-            bool(row["full_session_window_observed"])
-            for row in session_coverage.values()
+            bool(row["full_session_data_recovered"])
+            for row in data_coverage.values()
+        )
+        product_quality = _product_quality(
+            alerts,
+            self.repository.recent_evidence_quality_records(limit=max(500, limit * 5)),
+            data_coverage,
+        )
+        recent_semantic_violations = int(
+            product_quality["evidence_alerts"]["recent_semantic_violations"]
+        )
+        days_over_alert_target = int(
+            product_quality["alert_load"]["days_over_target"]
         )
         gates = {
             "message_contract": not violations,
             "messages_observed": bool(alerts),
             "scheduler_observed": bool(scheduled_runs),
-            "scheduler_cadence_within_slo": scheduler_status == "healthy",
             "provider_health_observed": bool(scheduled_provider_samples),
             "provider_failures_zero": all(
                 sample["failed"] == 0
                 for sample in scheduled_provider_samples.values()
             ),
             "two_full_trading_days": full_shadow_days >= 2,
+            "recent_evidence_alerts_clean": recent_semantic_violations == 0,
+            "alert_load_within_target": days_over_alert_target == 0,
         }
         if all(gates.values()):
             validation_status = "ready_for_test_slack"
@@ -221,7 +311,11 @@ class QualityReportService:
             "required_full_shadow_days": 2,
             "gates": gates,
             "blocked_reasons": [name for name, passed in gates.items() if not passed],
-            "regular_session_coverage": session_coverage,
+            "advisories": {
+                "scheduler_cadence_within_slo": scheduler_status == "healthy",
+            },
+            "regular_session_poll_coverage": poll_coverage,
+            "regular_session_data_coverage": data_coverage,
         }
         return QualityReport(
             passed=not violations,
@@ -229,6 +323,7 @@ class QualityReportService:
             message_violations=tuple(violations),
             recent_messages=tuple(samples),
             runtime=runtime,
+            product_quality=product_quality,
             shadow_validation=shadow_validation,
             status_counts=self.repository.quality_status_counts(),
         )
@@ -329,3 +424,217 @@ def _regular_session_coverage(
             ),
         }
     return coverage
+
+
+def _regular_market_data_coverage(
+    observations: list[MarketObservationRecord],
+    calendar: MarketSessionCalendar,
+) -> dict[str, dict[str, object]]:
+    if not observations:
+        return {}
+    latest_ticker = max(observations, key=lambda item: item.observed_at).ticker
+    regular = [
+        item
+        for item in observations
+        if item.ticker == latest_ticker and item.session == "regular"
+    ]
+    sessions: dict[str, list[MarketObservationRecord]] = {}
+    for item in regular:
+        sessions.setdefault(item.trading_date.isoformat(), []).append(item)
+
+    coverage = {}
+    for trading_date, rows in sorted(sessions.items()):
+        trading_day = date.fromisoformat(trading_date)
+        regular_open = calendar.regular_open(trading_day)
+        regular_close = calendar.regular_close(trading_day)
+        expected_buckets = int(
+            (regular_close - regular_open).total_seconds() // (5 * 60)
+        )
+        buckets: set[int] = set()
+        for row in rows:
+            observed_at = row.observed_at.astimezone(regular_open.tzinfo)
+            second_offset = int((observed_at - regular_open).total_seconds())
+            if 0 <= second_offset < int(
+                (regular_close - regular_open).total_seconds()
+            ):
+                buckets.add(second_offset // (5 * 60))
+        ordered = sorted(rows, key=lambda item: item.observed_at)
+        covered = len(buckets)
+        coverage[trading_date] = {
+            "ticker": latest_ticker,
+            "observed_rows": len(rows),
+            "covered_5m_buckets": covered,
+            "nominal_regular_5m_buckets": expected_buckets,
+            "coverage_percent": round(min(100.0, covered / expected_buckets * 100), 1),
+            "first_bar_at": ordered[0].observed_at.isoformat(),
+            "last_bar_at": ordered[-1].observed_at.isoformat(),
+            "full_session_data_recovered": (
+                covered == expected_buckets
+                and 0 in buckets
+                and expected_buckets - 1 in buckets
+            ),
+        }
+    return coverage
+
+
+def _product_quality(
+    alerts: list[AlertRecord],
+    evidence_records: list[EvidenceQualityRecord],
+    data_coverage: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    full_dates = sorted(
+        trading_date
+        for trading_date, row in data_coverage.items()
+        if row["full_session_data_recovered"]
+    )
+    evaluation_dates = set(full_dates[-2:])
+    evidence_by_url: dict[str, EvidenceQualityRecord] = {}
+    for record in evidence_records:
+        if record.source_url:
+            evidence_by_url.setdefault(record.source_url, record)
+
+    classifications = Counter()
+    findings = []
+    evidence_alert_types = {"catalyst", "filing", "insider"}
+    for alert in alerts:
+        if alert.alert_type not in evidence_alert_types:
+            continue
+        source_url = _message_source_url(alert.payload)
+        record = evidence_by_url.get(source_url)
+        classification = "unassessed"
+        reason = "source evidence is unavailable in the retained quality window"
+        current_cluster = ""
+        if record is not None:
+            current_cluster = record.cluster_key
+            if record.status == "filtered":
+                classification = "retrospectively_filtered"
+                reason = record.status_reason or "current evidence rule filters this item"
+            elif record.status == "analyzed" and record.relevant is True:
+                if record.cluster_key == alert.event_key:
+                    classification = "currently_valid"
+                    reason = "current evidence rule retains this canonical event"
+                else:
+                    classification = "duplicate_cluster_reconciled"
+                    reason = "source was relinked to an earlier canonical event"
+            else:
+                classification = "no_longer_relevant"
+                reason = record.status_reason or "current evidence state is not alertable"
+        classifications[classification] += 1
+        local_date = alert.created_at.astimezone(
+            ZoneInfo("America/New_York")
+        ).date().isoformat()
+        findings.append(
+            {
+                "event_key": alert.event_key,
+                "created_at": alert.created_at.isoformat(),
+                "trading_date": local_date,
+                "classification": classification,
+                "reason": reason,
+                "source_url": source_url,
+                "current_cluster": current_cluster,
+            }
+        )
+
+    assessed = sum(
+        count
+        for classification, count in classifications.items()
+        if classification != "unassessed"
+    )
+    valid = classifications["currently_valid"]
+    duplicates = classifications["duplicate_cluster_reconciled"]
+    semantic_violations = {
+        "retrospectively_filtered",
+        "duplicate_cluster_reconciled",
+        "no_longer_relevant",
+    }
+    recent_findings = [
+        finding
+        for finding in findings
+        if finding["trading_date"] in evaluation_dates
+    ]
+    recent_semantic_violations = sum(
+        finding["classification"] in semantic_violations
+        for finding in recent_findings
+    )
+
+    routine_types = {"daily_close", "weekly_review"}
+    load_by_day = {}
+    for trading_date in full_dates[-5:]:
+        day_alerts = [
+            alert
+            for alert in alerts
+            if alert.created_at.astimezone(ZoneInfo("America/New_York"))
+            .date()
+            .isoformat()
+            == trading_date
+        ]
+        by_type = Counter(alert.alert_type for alert in day_alerts)
+        nonroutine = sum(
+            count for alert_type, count in by_type.items() if alert_type not in routine_types
+        )
+        load_by_day[trading_date] = {
+            "total_alerts": len(day_alerts),
+            "routine_alerts": len(day_alerts) - nonroutine,
+            "nonroutine_alerts": nonroutine,
+            "target_max_nonroutine_alerts": 3,
+            "within_target": nonroutine <= 3,
+            "by_type": dict(sorted(by_type.items())),
+        }
+    days_over_target = sum(
+        not row["within_target"] for row in load_by_day.values()
+    )
+
+    if recent_semantic_violations or days_over_target:
+        status = "needs_improvement"
+    elif len(evaluation_dates) >= 2:
+        status = "meets_current_targets"
+    else:
+        status = "observing"
+    return {
+        "status": status,
+        "evaluation_trading_dates": sorted(evaluation_dates),
+        "evidence_alerts": {
+            "alerts_checked": len(findings),
+            "assessed": assessed,
+            "currently_valid": valid,
+            "retrospectively_filtered": classifications[
+                "retrospectively_filtered"
+            ],
+            "duplicate_cluster_reconciled": duplicates,
+            "no_longer_relevant": classifications["no_longer_relevant"],
+            "unassessed": classifications["unassessed"],
+            "meaningful_rate_percent": (
+                round(valid / assessed * 100, 1) if assessed else None
+            ),
+            "target_meaningful_rate_percent": 80.0,
+            "duplicate_rate_percent": (
+                round(duplicates / assessed * 100, 1) if assessed else None
+            ),
+            "target_duplicate_rate_percent": 0.1,
+            "recent_semantic_violations": recent_semantic_violations,
+            "findings": findings,
+        },
+        "alert_load": {
+            "completed_trading_days_checked": len(load_by_day),
+            "days_over_target": days_over_target,
+            "target_nonroutine_alerts_per_day": "0-3",
+            "by_trading_day": load_by_day,
+        },
+    }
+
+
+def _message_source_url(payload: object) -> str:
+    if isinstance(payload, str):
+        match = re.search(r"<(https?://[^|>]+)(?:\|[^>]*)?>", payload)
+        return match.group(1) if match else ""
+    if isinstance(payload, dict):
+        for value in payload.values():
+            found = _message_source_url(value)
+            if found:
+                return found
+    if isinstance(payload, list):
+        for value in payload:
+            found = _message_source_url(value)
+            if found:
+                return found
+    return ""

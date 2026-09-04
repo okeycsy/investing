@@ -486,7 +486,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _emit(payload, args.summary_file)
 
     if args.command == "quality-report":
-        report = QualityReportService(repository).build(limit=max(1, args.limit))
+        report = QualityReportService(
+            repository,
+            calendar=XNYSCalendar(),
+        ).build(limit=max(1, args.limit))
         _emit(
             {"command": args.command, **report.as_dict()},
             args.summary_file,

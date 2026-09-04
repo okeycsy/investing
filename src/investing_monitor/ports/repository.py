@@ -40,6 +40,24 @@ class AlertRecord:
     payload: dict
 
 
+@dataclass(frozen=True)
+class MarketObservationRecord:
+    ticker: str
+    trading_date: date
+    observed_at: datetime
+    session: str
+
+
+@dataclass(frozen=True)
+class EvidenceQualityRecord:
+    candidate_id: str
+    source_url: str
+    status: str
+    status_reason: str
+    cluster_key: str
+    relevant: bool | None
+
+
 class MonitorRepository(Protocol):
     def load_price_band_state(self, ticker: str) -> PriceBandState | None: ...
 
@@ -79,6 +97,16 @@ class MonitorRepository(Protocol):
     def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool: ...
 
     def recent_alerts(self, limit: int = 100) -> list[AlertRecord]: ...
+
+    def recent_market_observations(
+        self,
+        limit_days: int = 10,
+    ) -> list[MarketObservationRecord]: ...
+
+    def recent_evidence_quality_records(
+        self,
+        limit: int = 500,
+    ) -> list[EvidenceQualityRecord]: ...
 
     def quality_status_counts(self) -> dict[str, dict[str, int]]: ...
 

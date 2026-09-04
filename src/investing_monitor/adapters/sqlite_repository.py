@@ -29,7 +29,12 @@ from investing_monitor.domain.models import (
     ThesisImpact,
     VolumeSnapshot,
 )
-from investing_monitor.ports.repository import AlertRecord, PendingDelivery
+from investing_monitor.ports.repository import (
+    AlertRecord,
+    EvidenceQualityRecord,
+    MarketObservationRecord,
+    PendingDelivery,
+)
 from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
@@ -519,6 +524,56 @@ class SQLiteMonitorRepository:
             )
             for row in rows
         ]
+
+    def recent_market_observations(
+        self,
+        limit_days: int = 10,
+    ) -> list[MarketObservationRecord]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT ticker, trading_date, observed_at, session "
+                "FROM market_observations WHERE trading_date IN ("
+                "SELECT trading_date FROM market_observations "
+                "GROUP BY trading_date ORDER BY trading_date DESC LIMIT ?"
+                ") ORDER BY observed_at",
+                (max(1, limit_days),),
+            ).fetchall()
+        return [
+            MarketObservationRecord(
+                ticker=row["ticker"],
+                trading_date=date.fromisoformat(row["trading_date"]),
+                observed_at=_required_datetime(row["observed_at"]),
+                session=row["session"],
+            )
+            for row in rows
+        ]
+
+    def recent_evidence_quality_records(
+        self,
+        limit: int = 500,
+    ) -> list[EvidenceQualityRecord]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT candidate_id, source_url, status, status_reason, "
+                "cluster_key, analysis_json FROM evidence_candidates "
+                "ORDER BY last_seen_at DESC LIMIT ?",
+                (max(1, limit),),
+            ).fetchall()
+        records = []
+        for row in rows:
+            analysis = json.loads(row["analysis_json"] or "{}")
+            relevant = analysis.get("relevant") if isinstance(analysis, dict) else None
+            records.append(
+                EvidenceQualityRecord(
+                    candidate_id=row["candidate_id"],
+                    source_url=row["source_url"],
+                    status=row["status"],
+                    status_reason=row["status_reason"],
+                    cluster_key=row["cluster_key"],
+                    relevant=relevant if isinstance(relevant, bool) else None,
+                )
+            )
+        return records
 
     def quality_status_counts(self) -> dict[str, dict[str, int]]:
         with closing(self._connect()) as connection, connection:
