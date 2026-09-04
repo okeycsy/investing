@@ -254,6 +254,54 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
         self.assertEqual(cycle.replayed_frames, 2)
         self.assertEqual(cycle.frames[0].snapshot.observed_at, et(TRADING_DATE, 9, 35))
 
+    def test_first_run_of_day_recovers_missed_intraday_extreme(self):
+        current = [
+            bar(TRADING_DATE, 9, 30, 104.2, 100),
+            bar(TRADING_DATE, 9, 35, 106.2, 100),
+            bar(TRADING_DATE, 12, 0, 101.0, 100),
+        ]
+        charts = {"VRT": make_chart("VRT", history_bars(self.calendar) + current)}
+        for symbol in ("SOXX", "ETN", "GEV", "NVT"):
+            charts[symbol] = comparison_chart(
+                self.calendar,
+                symbol,
+                [
+                    bar(
+                        TRADING_DATE,
+                        item.observed_at.astimezone(NEW_YORK).hour,
+                        item.observed_at.astimezone(NEW_YORK).minute,
+                        101.0,
+                    )
+                    for item in current
+                ],
+            )
+        adapter = YahooMarketDataAdapter(FakeChartClient(charts), self.calendar, PROFILE)
+        now = et(TRADING_DATE, 12, 1)
+        previous_day = self.calendar.previous_trading_day(TRADING_DATE)
+
+        after_previous_day = adapter.fetch_cycle(
+            now,
+            last_observed_at=et(previous_day, 17, 0),
+        )
+        without_cursor = adapter.fetch_cycle(now, last_observed_at=None)
+
+        self.assertEqual(len(after_previous_day.frames), 3)
+        self.assertEqual(after_previous_day.replayed_frames, 2)
+        self.assertEqual(len(without_cursor.frames), 3)
+        with tempfile.TemporaryDirectory() as directory:
+            report = MarketCycleService(
+                SQLiteMonitorRepository(Path(directory) / "monitor.db"),
+                enqueue_alerts=False,
+            ).process(after_previous_day, detected_at=now)
+        self.assertEqual(
+            report.inserted_event_keys,
+            ("VRT:2026-09-02:price-band:up:6",),
+        )
+        self.assertEqual(report.delayed_event_keys, report.inserted_event_keys)
+        rendered = json.dumps(report.messages[0], ensure_ascii=False)
+        self.assertIn("+6.0% 상승 구간 진입", rendered)
+        self.assertIn("2시간 26분 뒤 복구", rendered)
+
     def test_abnormal_move_requires_independent_quote_confirmation(self):
         primary = make_chart(
             "VRT",

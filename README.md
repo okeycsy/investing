@@ -16,7 +16,7 @@
 
 - Stage 0 계약은 문서와 기존 제품 테스트로 동결되어 있습니다.
 - Stage 1 기반은 versioned SQLite, due-task planner, run/task checkpoint, outbox 상태 전이, `runtime-state` rolling snapshot으로 구현되어 있습니다.
-- Stage 2 시장 경로는 XNYS 휴장·조기폐장 캘린더, Yahoo 5분봉, 인증 multi-quote, 고정 전일 종가, SOXX/피어 상대 흐름, 동시간대 20세션 거래량과 intraday replay를 구현했습니다. 10분을 넘겨 복구된 MOVE/VOLUME은 실시간 알림처럼 보이지 않도록 실제 발생 시각과 복구 지연을 `지연 감지`로 표시합니다.
+- Stage 2 시장 경로는 XNYS 휴장·조기폐장 캘린더, Yahoo 5분봉, 인증 multi-quote, 고정 전일 종가, SOXX/피어 상대 흐름, 동시간대 20세션 거래량과 intraday replay를 구현했습니다. 새 거래일의 첫 GitHub 실행이 늦어져도 당일 04:00 ET 이후 봉을 처음부터 복원해 오전 급변 후 되돌림을 놓치지 않습니다. 10분을 넘겨 복구된 MOVE/VOLUME은 실시간 알림처럼 보이지 않도록 실제 발생 시각과 복구 지연을 `지연 감지`로 표시합니다.
 - Stage 3 근거 경로는 Yahoo Search와 발행사 IR RSS, 결정론적 저가치 필터, 사건 클러스터링, 원문 근거 검증 AI 분석, SEC 403 Yahoo 미러 복구, 신규 공시 기준선과 재시도 ledger를 구현했습니다. 뉴스 제목에 회사를 직접 명시하지 않은 업종 일반론과 목표가·주가 해설·펀드 보유 기사는 AI 전에 제외합니다. 검증된 사실과 거래 금액까지 비교해 7일 안의 재전재를 최초 canonical 사건에 연결하고, 최근 촉매는 사건당 한 건만 노출합니다.
 - Stage 4 브리핑은 실제 XNYS 마감 15분 후 일일 브리프와 월요일 08:13 KST 주간 리뷰를 생성합니다. 일일 브리프는 방향, SOXX, 피어 평균, 20거래일 거래량, 당일 핵심 근거 순서를 고정하고, 주간 리뷰는 완료된 미국 거래 주간의 상대 흐름과 high-confidence 강화·위험 근거만 요약합니다. 공식 IR 원문에서 날짜가 검증된 다음 주 일정만 링크와 함께 표시합니다.
 - 모든 v2 사용자 메시지는 alert/outbox 저장 전에 길이, 필수 정보, 금지 문구, 원문 링크와 중복 블록 품질 게이트를 통과해야 합니다. `quality-report`는 최근 메시지 판정, `schedule`/`push`/수동 실행 수, Actions run 생성부터 tick 시작까지의 지연, 같은 장중 schedule 사이의 실제 간격, task별 실행 시간, Yahoo market/news, IR, SEC, AI pipeline의 성공·복구·실패와 latency, outbox/evidence 상태를 Actions Summary에 기록합니다. 개발 push 간격을 scheduler 건강도로 계산하지 않습니다. 저장된 근거를 현재 필터·canonical 사건과 다시 대조해 소급 저가치 및 재전재 중복 알림도 별도 판정합니다.

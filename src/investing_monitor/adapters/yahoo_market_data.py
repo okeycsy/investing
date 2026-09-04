@@ -337,7 +337,6 @@ class YahooMarketDataAdapter:
 
         replay_bars = self._bars_after_cursor(
             current_bars,
-            latest,
             trading_date,
             last_observed_at,
         )
@@ -542,15 +541,14 @@ class YahooMarketDataAdapter:
     def _bars_after_cursor(
         self,
         current_bars: Sequence[YahooBar],
-        latest: YahooBar,
         trading_date: date,
         last_observed_at: datetime | None,
     ) -> tuple[YahooBar, ...]:
         if last_observed_at is None:
-            return (latest,)
+            return tuple(current_bars)
         cursor = _utc(last_observed_at)
         if cursor.astimezone(NEW_YORK).date() != trading_date:
-            return (latest,)
+            return tuple(current_bars)
         return tuple(bar for bar in current_bars if bar.observed_at > cursor)
 
     def _volume_snapshot(
