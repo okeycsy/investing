@@ -348,14 +348,14 @@ class ProductContractTest(unittest.TestCase):
         self.assertEqual(cache["processed_filing_hashes"], [])
 
     def test_workflow_stages_only_existing_state_files(self):
-        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+        workflow = Path(".github/workflows/legacy_manual.yml").read_text()
 
         self.assertIn('if [ -f "$file" ]', workflow)
         self.assertIn('git add -f -- "$file"', workflow)
         self.assertIn("*_sec_alert_cache.json", workflow)
 
     def test_workflow_retries_transient_state_push_failures(self):
-        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+        workflow = Path(".github/workflows/legacy_manual.yml").read_text()
 
         self.assertIn("MAX_ATTEMPTS=4", workflow)
         self.assertIn("git pull --rebase origin main && git push origin main", workflow)
@@ -363,7 +363,7 @@ class ProductContractTest(unittest.TestCase):
         self.assertIn("State push failed after $MAX_ATTEMPTS attempts", workflow)
 
     def test_legacy_workflow_is_manual_only_after_v2_cutover(self):
-        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+        workflow = Path(".github/workflows/legacy_manual.yml").read_text()
 
         self.assertIn("Ticker Monitor (Legacy Manual)", workflow)
         self.assertIn("workflow_dispatch:", workflow)
@@ -399,7 +399,7 @@ class ProductContractTest(unittest.TestCase):
         yahoo.assert_called_once_with()
 
     def test_workflow_disables_raw_sec_archives_on_hosted_runner(self):
-        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+        workflow = Path(".github/workflows/legacy_manual.yml").read_text()
 
         self.assertIn("SEC_ARCHIVE_MODE:   yahoo", workflow)
         self.assertIn("SEC_DATA_MODE:      yahoo", workflow)
@@ -541,7 +541,7 @@ class ProductContractTest(unittest.TestCase):
         insiders.assert_not_called()
 
     def test_workflow_has_no_dca_modes_or_inputs(self):
-        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+        workflow = Path(".github/workflows/legacy_manual.yml").read_text()
 
         self.assertNotIn("dca_status", workflow)
         self.assertNotIn("dca_update", workflow)
@@ -592,7 +592,7 @@ class ProductContractTest(unittest.TestCase):
         save_weekly_state.assert_not_called()
 
     def test_preview_workflow_does_not_commit_state(self):
-        workflow = Path(".github/workflows/hood_monitor.yml").read_text()
+        workflow = Path(".github/workflows/legacy_manual.yml").read_text()
         smoke_workflow = Path(".github/workflows/live_smoke.yml").read_text()
 
         self.assertIn("normal/preview/close/weekly/13f", workflow)

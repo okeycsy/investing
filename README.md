@@ -28,10 +28,10 @@
 - `Monitor V2 State Backup`은 평일 장 종료 후 production SQLite snapshot을 검증해 GitHub artifact로 보관하고 7일 뒤 자동 삭제합니다. production state branch와 같은 concurrency group을 사용해 checkpoint 도중의 DB를 읽지 않습니다.
 - SEC 인라인 XBRL의 숨김 메타데이터는 제거하고 10-Q/10-K의 실제 MD&A를 우선 추출합니다. 폼 번호만 있거나 본문을 확보하지 못한 공시는 알림으로 만들지 않습니다.
 - Form 4와 Yahoo 내부자 집계는 거래 코드를 구조화해 `P` 장내매수와 `S` 장내매도만 materiality 기준을 통과할 수 있습니다. `A` 보상, `M` 옵션 행사, `F` 세금 처리는 독립 알림 없이 ledger에만 저장합니다.
-- `Monitor V2 Production`은 New York 시간대 기준 장중 5분, 장외 30분, 주말 2시간 schedule로 동일한 production tick을 실행합니다. close와 weekly는 별도 구현을 중복 호출하지 않고 저장된 due-state로 처리합니다.
+- 실제 예약 실행 이력이 있는 `Monitor V2 Scheduler` workflow ID가 New York 시간대 기준 장중 5분, 장외 30분, 주말 2시간 schedule을 소유하고, 재사용 가능한 `Monitor V2 Production`을 호출합니다. close와 weekly는 별도 구현을 중복 호출하지 않고 저장된 due-state로 처리합니다.
 - `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 Slack 없는 통합 tick을 자동 검증합니다. 운영 DB를 건드리지 않도록 별도 `runtime-shadow-state` branch를 사용하며 예약 실행은 하지 않습니다.
 - 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
-- production Slack은 v2만 담당합니다. legacy `hood_monitor.py`의 예약 실행은 제거했으며 수동 fallback만 유지합니다.
+- production Slack은 v2만 담당합니다. legacy `hood_monitor.py`는 `Ticker Monitor (Legacy Manual)` workflow로 격리했으며 수동 fallback과 기존 preview trigger만 유지합니다.
 
 ## 운영 스케줄과 한계
 

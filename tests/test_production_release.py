@@ -283,17 +283,16 @@ class ProductionWorkflowTest(unittest.TestCase):
         shadow = (
             ROOT / ".github" / "workflows" / "monitor_v2_shadow.yml"
         ).read_text(encoding="utf-8")
-        legacy = (
+        scheduler = (
             ROOT / ".github" / "workflows" / "hood_monitor.yml"
+        ).read_text(encoding="utf-8")
+        legacy = (
+            ROOT / ".github" / "workflows" / "legacy_manual.yml"
         ).read_text(encoding="utf-8")
 
         self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn("\n  schedule:", workflow)
-        self.assertIn("4-59/5 4-19 * * 1-5", workflow)
-        self.assertIn("24,54 0-3,20-23 * * 1-5", workflow)
-        self.assertIn("timezone: 'America/New_York'", workflow)
-        self.assertIn("13 8 * * 1", workflow)
-        self.assertIn("timezone: 'Asia/Seoul'", workflow)
+        self.assertIn("workflow_call:", workflow)
+        self.assertNotIn("\n  schedule:", workflow)
         self.assertIn("slack-canary", workflow)
         self.assertIn("slack-preview", workflow)
         self.assertIn("preview_kind", workflow)
@@ -303,6 +302,16 @@ class ProductionWorkflowTest(unittest.TestCase):
         self.assertIn("SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}", workflow)
         self.assertIn("checkpoint-state", workflow)
         self.assertIn("group: ticker-monitor-v2-state", workflow)
+        self.assertIn("Monitor V2 Scheduler", scheduler)
+        self.assertIn("\n  schedule:", scheduler)
+        self.assertIn("4-59/5 4-19 * * 1-5", scheduler)
+        self.assertIn("24,54 0-3,20-23 * * 1-5", scheduler)
+        self.assertIn("timezone: 'America/New_York'", scheduler)
+        self.assertIn("13 8 * * 1", scheduler)
+        self.assertIn("timezone: 'Asia/Seoul'", scheduler)
+        self.assertIn("uses: ./.github/workflows/monitor_v2_production.yml", scheduler)
+        self.assertIn("mode: tick", scheduler)
+        self.assertIn("secrets: inherit", scheduler)
         self.assertNotIn("\n  schedule:", shadow)
         self.assertNotIn("\n  schedule:", legacy)
 

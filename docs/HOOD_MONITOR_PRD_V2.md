@@ -1087,6 +1087,9 @@ Slack canary run `33870909963`에서 `accepted` 응답 및 원격 outbox `delive
 구현 기록 (2026-09-04): A-06의 사람이 읽는 Job Summary와 7일 production DB
 artifact, E-06의 7종 Slack fixture preview를 production workflow에 추가했다. test
 delivery는 지정한 event key만 소비하므로 기존 production outbox를 먼저 전송하지 않는다.
+신규 production workflow가 활성 상태에서도 예약 run을 생성하지 않은 운영 관측에 따라,
+오늘까지 schedule 실행 이력이 확인된 기존 workflow ID를 v2 scheduler 전용으로 전환했다.
+실행 본체는 `workflow_call`로 분리하고 legacy 수동 fallback은 별도 workflow로 격리했다.
 
 ### Epic F: Verification and migration
 

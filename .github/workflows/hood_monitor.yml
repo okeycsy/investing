@@ -1,116 +1,26 @@
-name: Ticker Monitor (Legacy Manual)
-
-concurrency:
-  group: ticker-monitor-state
-  cancel-in-progress: false
+name: Monitor V2 Scheduler
 
 on:
-  push:
-    branches: ['main']
-    paths:
-      - '.github/alert_preview_request'
-
+  schedule:
+    # This established workflow ID remains the sole schedule owner. GitHub may
+    # delay or drop events; the called production tick replays missing 5m bars.
+    - cron: '4-59/5 4-19 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '24,54 0-3,20-23 * * 1-5'
+      timezone: 'America/New_York'
+    - cron: '24 */2 * * 0,6'
+      timezone: 'America/New_York'
+    - cron: '13 8 * * 1'
+      timezone: 'Asia/Seoul'
   workflow_dispatch:
-    inputs:
-      mode:
-        description: 'Legacy fallback only (realtime/normal/preview/close/weekly/13f)'
-        required: true
-        default: 'normal'
-      preview_change_pct:
-        description: 'preview 모드 가정 등락률'
-        required: false
-        default: '4.0'
+
+permissions:
+  actions: read
+  contents: write
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Determine RUN_MODE
-        id: mode
-        run: |
-          # 미리보기 요청 파일이 추가된 push는 운영 상태와 분리해 한 번만 발송한다.
-          if [ "${{ github.event_name }}" = "push" ]; then
-            if [ -f ".github/alert_preview_request" ]; then
-              PREVIEW_CHANGE=$(cat .github/alert_preview_request)
-              echo "mode=preview" >> $GITHUB_OUTPUT
-              echo "preview_change_pct=${PREVIEW_CHANGE:-4.0}" >> $GITHUB_OUTPUT
-            else
-              echo "mode=skip" >> $GITHUB_OUTPUT
-            fi
-            exit 0
-          fi
-
-          # workflow_dispatch이면 입력값 우선
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
-            echo "preview_change_pct=${{ github.event.inputs.preview_change_pct }}" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "mode=skip" >> $GITHUB_OUTPUT
-
-      - name: Run Ticker Monitor
-        if: steps.mode.outputs.mode != 'skip'
-        env:
-          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
-          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
-          SEC_CONTACT:        ${{ secrets.SEC_CONTACT }}
-          SEC_USER_AGENT:     ${{ secrets.SEC_USER_AGENT }}
-          SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
-          SEC_API_KEY:        ${{ secrets.SEC_API_KEY }}
-          SEC_DATA_MODE:      yahoo
-          SEC_ARCHIVE_MODE:   yahoo
-          RUN_MODE:           ${{ steps.mode.outputs.mode }}
-          PREVIEW_CHANGE_PCT: ${{ steps.mode.outputs.preview_change_pct }}
-        run: python hood_monitor.py
-
-      - name: Commit state files
-        if: success() && steps.mode.outputs.mode != 'skip' && steps.mode.outputs.mode != 'preview'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          for file in state.json weekly_state.json beta_cache.json app_rank_cache.json sec_alert_cache.json *_state.json *_weekly_state.json *_beta_cache.json *_app_rank_cache.json *_sec_alert_cache.json; do
-            if [ -f "$file" ]; then
-              git add -f -- "$file"
-            fi
-          done
-          if git diff --cached --quiet; then
-            echo "No state changes"
-            exit 0
-          fi
-          git commit -m "chore: update state [skip ci]"
-
-          # GitHub가 간헐적으로 commit_refs 단계에서 push를 거부하므로
-          # 최신 main에 다시 정렬한 뒤 짧은 간격으로 재시도한다.
-          MAX_ATTEMPTS=4
-          for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
-            if git pull --rebase origin main && git push origin main; then
-              exit 0
-            fi
-
-            git rebase --abort 2>/dev/null || true
-            if [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
-              echo "State push failed after $MAX_ATTEMPTS attempts"
-              exit 1
-            fi
-
-            WAIT_SECONDS=$((ATTEMPT * 10))
-            echo "State push attempt $ATTEMPT failed; retrying in ${WAIT_SECONDS}s"
-            sleep "$WAIT_SECONDS"
-          done
+  production:
+    uses: ./.github/workflows/monitor_v2_production.yml
+    with:
+      mode: tick
+    secrets: inherit
