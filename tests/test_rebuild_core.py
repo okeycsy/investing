@@ -182,6 +182,13 @@ class RepositoryContractTest(unittest.TestCase):
             self.assertEqual(persisted.upward_high_watermark, 4)
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0].event_key, event_key)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                created_at, next_attempt_at = connection.execute(
+                    "SELECT alerts.created_at, outbox.next_attempt_at "
+                    "FROM alerts JOIN outbox USING (event_key)"
+                ).fetchone()
+            self.assertEqual(created_at, OBSERVED_AT.isoformat())
+            self.assertEqual(next_attempt_at, OBSERVED_AT.isoformat())
 
     def test_delivery_failure_is_rescheduled_without_losing_payload(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -247,14 +247,14 @@ class SQLiteMonitorRepository:
     ) -> bool:
         require_valid_message("price_band", payload)
         payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        now = datetime.now(timezone.utc).isoformat()
+        observed_at = _utc_iso(signal.observed_at)
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             inserted = connection.execute(
                 "INSERT OR IGNORE INTO alerts "
                 "(event_key, ticker, alert_type, created_at, payload_json) "
                 "VALUES (?, ?, 'price_band', ?, ?)",
-                (signal.event_key, signal.ticker, now, payload_json),
+                (signal.event_key, signal.ticker, observed_at, payload_json),
             ).rowcount
             if not inserted:
                 return False
@@ -274,12 +274,12 @@ class SQLiteMonitorRepository:
                     state.upward_high_watermark,
                     state.downward_high_watermark,
                     int(state.volume_alerted),
-                    now,
+                    observed_at,
                 ),
             )
             connection.execute(
                 "INSERT INTO outbox (event_key, payload_json, next_attempt_at) VALUES (?, ?, ?)",
-                (signal.event_key, payload_json, now),
+                (signal.event_key, payload_json, observed_at),
             )
         return True
 
@@ -305,7 +305,11 @@ class SQLiteMonitorRepository:
         for alert in alerts:
             require_valid_message(alert.alert_type, alert.payload)
         ticker = ticker.upper()
-        updated_at = datetime.now(timezone.utc).isoformat()
+        updated_at = (
+            _utc_iso(frames[-1].snapshot.observed_at)
+            if frames
+            else datetime.now(timezone.utc).isoformat()
+        )
         inserted_events: list[str] = []
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -776,6 +780,7 @@ class SQLiteMonitorRepository:
         since: datetime,
         limit: int = 2,
     ) -> list[Catalyst]:
+        cluster_lookback = since - timedelta(days=7)
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT candidate_id, cluster_key, headline, source_name, source_url, "
@@ -783,26 +788,39 @@ class SQLiteMonitorRepository:
                 "WHERE ticker = ? AND status = 'analyzed' AND published_at >= ? "
                 "AND json_extract(analysis_json, '$.relevant') = 1 "
                 "AND COALESCE(json_extract(metadata_json, '$.calendar_only'), 0) = 0 "
-                "ORDER BY published_at DESC LIMIT 30",
-                (ticker.upper(), _utc_iso(since)),
+                "ORDER BY published_at DESC LIMIT 100",
+                (ticker.upper(), _utc_iso(cluster_lookback)),
             ).fetchall()
-        catalysts = []
+        grouped: dict[str, list[Catalyst]] = {}
         for row in rows:
             payload = json.loads(row["analysis_json"])
+            catalyst = Catalyst(
+                canonical_id=row["cluster_key"] or row["candidate_id"],
+                headline=payload["headline_ko"],
+                summary=payload["summary_ko"],
+                source_name=row["source_name"],
+                source_url=row["source_url"],
+                published_at=_required_datetime(row["published_at"]),
+                impact=ThesisImpact(payload["thesis_impact"]),
+                confidence=payload["confidence"],
+                facts=tuple(
+                    fact["fact_ko"] for fact in payload.get("facts") or []
+                ),
+                source_kind=row["source_kind"],
+            )
+            grouped.setdefault(catalyst.canonical_id, []).append(catalyst)
+        catalysts = []
+        for candidates in grouped.values():
+            event_started_at = min(item.published_at for item in candidates)
+            if event_started_at < since:
+                continue
             catalysts.append(
-                Catalyst(
-                    canonical_id=row["cluster_key"] or row["candidate_id"],
-                    headline=payload["headline_ko"],
-                    summary=payload["summary_ko"],
-                    source_name=row["source_name"],
-                    source_url=row["source_url"],
-                    published_at=_required_datetime(row["published_at"]),
-                    impact=ThesisImpact(payload["thesis_impact"]),
-                    confidence=payload["confidence"],
-                    facts=tuple(
-                        fact["fact_ko"] for fact in payload.get("facts") or []
+                max(
+                    candidates,
+                    key=lambda item: (
+                        _catalyst_source_rank(item.source_kind, item.source_name),
+                        -item.published_at.timestamp(),
                     ),
-                    source_kind=row["source_kind"],
                 )
             )
         impact_rank = {
@@ -1120,6 +1138,18 @@ def _utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("runtime timestamps must be timezone-aware")
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _catalyst_source_rank(source_kind: str, source_name: str) -> int:
+    kind_rank = {"ir": 40, "sec": 30, "news": 10}.get(source_kind, 0)
+    normalized = source_name.casefold()
+    if any(name in normalized for name in ("pr newswire", "business wire")):
+        return kind_rank + 3
+    if any(name in normalized for name in ("reuters", "associated press")):
+        return kind_rank + 2
+    if "globenewswire" in normalized:
+        return kind_rank + 1
+    return kind_rank
 
 
 def _insert_evidence_decisions(

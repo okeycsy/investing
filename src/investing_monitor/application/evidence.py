@@ -60,6 +60,16 @@ LOW_VALUE_PATTERNS = (
     "shareholder alert",
     "securities fraud investigation",
     "class action",
+    "analyst says",
+    "billionaire",
+    "hedge fund",
+    "is this pullback",
+    "rally is coming",
+    "should you buy the dip",
+    "stock is up today",
+    "stock keeps cooling",
+    "why this stock",
+    "why the stock",
     "목표주가",
     "적정가치",
     "고평가",
@@ -119,6 +129,24 @@ STOP_WORDS = {
     "vrt",
 }
 
+EVENT_ACTION_TOKENS = {
+    "acquire",
+    "appoint",
+    "capacity",
+    "contract",
+    "earnings",
+    "guidance",
+    "invest",
+    "launch",
+    "partner",
+    "restructure",
+}
+
+AMOUNT_PATTERN = re.compile(
+    r"\$?\s*(\d+(?:\.\d+)?)\s*(billion|million|bn|억|조|b|m)\b",
+    re.IGNORECASE,
+)
+
 
 def screen_candidate(
     raw: RawEvidenceCandidate,
@@ -169,6 +197,15 @@ def screen_candidate(
             reason="deterministic low-value title rule",
             candidate=candidate,
         )
+    if candidate.kind is EvidenceKind.NEWS and not _headline_names_company(
+        candidate.headline,
+        profile,
+    ):
+        return CandidateDecision(
+            status=EvidenceStatus.FILTERED,
+            reason="news headline does not directly name monitored company",
+            candidate=candidate,
+        )
     if candidate.kind is EvidenceKind.INSIDER:
         assessment = assess_insider_materiality(candidate)
         if assessment is not None and not assessment.material:
@@ -197,7 +234,7 @@ def cluster_candidates(
     *,
     window: timedelta = timedelta(minutes=15),
     minimum_similarity: float = 0.4,
-    extended_window: timedelta = timedelta(hours=24),
+    extended_window: timedelta = timedelta(hours=72),
     extended_similarity: float = 0.5,
 ) -> tuple[EvidenceCluster, ...]:
     groups: list[list[EvidenceCandidate]] = []
@@ -284,10 +321,19 @@ def same_evidence_event(
     right_candidate: EvidenceCandidate,
     right_analysis: EvidenceAnalysis,
     *,
-    window: timedelta = timedelta(hours=24),
+    window: timedelta = timedelta(days=7),
 ) -> bool:
     if abs(left_candidate.published_at - right_candidate.published_at) > window:
         return False
+    left_texts = _event_text_values(left_candidate, left_analysis)
+    right_texts = _event_text_values(right_candidate, right_analysis)
+    left_tokens = set().union(*(_event_tokens(value) for value in left_texts))
+    right_tokens = set().union(*(_event_tokens(value) for value in right_texts))
+    if (
+        left_tokens & right_tokens & EVENT_ACTION_TOKENS
+        and _event_amounts(left_texts) & _event_amounts(right_texts)
+    ):
+        return True
     similarities = []
     for left in _event_signatures(left_candidate, left_analysis):
         for right in _event_signatures(right_candidate, right_analysis):
@@ -304,11 +350,69 @@ def _event_signatures(
     return tuple(
         tokens
         for tokens in (
-            _event_tokens(candidate.headline),
-            _event_tokens(analysis.headline_ko),
+            _event_tokens(value)
+            for value in _event_text_values(candidate, analysis)
         )
         if tokens
     )
+
+
+def _event_text_values(
+    candidate: EvidenceCandidate,
+    analysis: EvidenceAnalysis,
+) -> tuple[str, ...]:
+    return tuple(
+        value
+        for value in (
+            candidate.headline,
+            analysis.headline_ko,
+            analysis.summary_ko,
+            *(fact.source_text for fact in analysis.facts),
+            *(fact.fact_ko for fact in analysis.facts),
+        )
+        if value.strip()
+    )
+
+
+def _event_amounts(values: tuple[str, ...]) -> set[int]:
+    multipliers = {
+        "billion": 1_000_000_000,
+        "bn": 1_000_000_000,
+        "b": 1_000_000_000,
+        "million": 1_000_000,
+        "m": 1_000_000,
+        "억": 100_000_000,
+        "조": 1_000_000_000_000,
+    }
+    amounts = set()
+    for value in values:
+        for number, unit in AMOUNT_PATTERN.findall(value):
+            amounts.add(round(float(number) * multipliers[unit.casefold()]))
+    return amounts
+
+
+def _headline_names_company(value: str, profile: EvidenceProfile) -> bool:
+    normalized = " ".join(value.casefold().split())
+    names = (profile.ticker, *profile.aliases)
+    return any(
+        re.search(rf"(?<!\w){re.escape(name.casefold())}(?!\w)", normalized)
+        for name in names
+        if name.strip()
+    )
+
+
+def _news_title_rejection_reason(
+    candidate: EvidenceCandidate,
+    profile: EvidenceProfile,
+) -> str:
+    if candidate.kind is not EvidenceKind.NEWS:
+        return ""
+    title = f" {candidate.headline.casefold()} "
+    if any(pattern in title for pattern in LOW_VALUE_PATTERNS):
+        return "deterministic low-value title rule"
+    if not _headline_names_company(candidate.headline, profile):
+        return "news headline does not directly name monitored company"
+    return ""
 
 
 def _canonical_url(value: str) -> str:
@@ -350,6 +454,8 @@ class EvidenceIngestionReport:
     relevant: int
     failed: int
     alerts: int
+    reclassified_low_value: int
+    reconciled_clusters: int
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -362,6 +468,8 @@ class EvidenceIngestionReport:
             "relevant": self.relevant,
             "failed": self.failed,
             "alerts": self.alerts,
+            "reclassified_low_value": self.reclassified_low_value,
+            "reconciled_clusters": self.reconciled_clusters,
         }
 
 
@@ -518,6 +626,9 @@ class EvidenceIngestionService:
                         error,
                     )
                     failed += 1
+        reclassified_low_value, reconciled_clusters = (
+            self._reconcile_recent_evidence(now)
+        )
         return EvidenceIngestionReport(
             seen=len(raw_candidates),
             inserted_pending=len(inserted),
@@ -533,7 +644,56 @@ class EvidenceIngestionService:
             relevant=relevant,
             failed=failed,
             alerts=alerts,
+            reclassified_low_value=reclassified_low_value,
+            reconciled_clusters=reconciled_clusters,
         )
+
+    def _reconcile_recent_evidence(self, now: datetime) -> tuple[int, int]:
+        analyzed = self.repository.recent_analyzed_evidence(
+            self.profile.ticker,
+            now - timedelta(days=7),
+            limit=100,
+        )
+        eligible = []
+        reclassified = 0
+        for item in analyzed:
+            reason = _news_title_rejection_reason(item.candidate, self.profile)
+            if reason:
+                self.repository.mark_evidence_filtered(
+                    item.candidate.candidate_id,
+                    now,
+                    f"retrospective quality rule: {reason}",
+                )
+                reclassified += 1
+            else:
+                eligible.append(item)
+
+        canonical = []
+        reconciled = 0
+        for item in sorted(eligible, key=lambda value: value.candidate.published_at):
+            existing = next(
+                (
+                    prior
+                    for prior in canonical
+                    if same_evidence_event(
+                        item.candidate,
+                        item.analysis,
+                        prior.candidate,
+                        prior.analysis,
+                    )
+                ),
+                None,
+            )
+            if existing is None:
+                canonical.append(item)
+                continue
+            if item.cluster_key != existing.cluster_key:
+                self.repository.link_evidence_cluster(
+                    item.candidate.candidate_id,
+                    existing.cluster_key,
+                )
+                reconciled += 1
+        return reclassified, reconciled
 
     def _apply_lookback(
         self,
@@ -643,7 +803,8 @@ class EvidenceIngestionService:
             return None
         for existing in self.repository.recent_analyzed_evidence(
             candidate.ticker,
-            candidate.published_at - timedelta(hours=24),
+            candidate.published_at - timedelta(days=7),
+            limit=100,
         ):
             if same_evidence_event(
                 candidate,

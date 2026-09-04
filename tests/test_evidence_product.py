@@ -143,6 +143,38 @@ class CandidateScreeningTest(unittest.TestCase):
 
         self.assertEqual(decision.status, EvidenceStatus.FILTERED)
 
+    def test_observed_low_value_news_titles_are_filtered_before_ai(self):
+        titles = (
+            "Billionaires Like These 2 AI Data Center Stocks",
+            "Vertiv Stock Keeps Cooling Off. One Analyst Says a 100% Rally Is Coming",
+            "Is This Pullback In Vertiv Stock A Glitch Or A Warning?",
+            "Why Vertiv (VRT) Stock Is Up Today",
+        )
+
+        for title in titles:
+            with self.subTest(title=title):
+                decision = screen_candidate(raw(title), PROFILE)
+                self.assertEqual(decision.status, EvidenceStatus.FILTERED)
+                self.assertEqual(
+                    decision.reason,
+                    "deterministic low-value title rule",
+                )
+
+    def test_news_without_company_in_headline_is_not_an_independent_catalyst(self):
+        decision = screen_candidate(
+            raw(
+                "Trump Warned Towns They'd End Up Poor Without Data Centers",
+                source_text="The article later mentions Vertiv as a supplier.",
+            ),
+            PROFILE,
+        )
+
+        self.assertEqual(decision.status, EvidenceStatus.FILTERED)
+        self.assertEqual(
+            decision.reason,
+            "news headline does not directly name monitored company",
+        )
+
     def test_non_material_8k_item_is_filtered_before_body_fetch(self):
         decision = screen_candidate(
             raw(
@@ -343,6 +375,58 @@ class EvidenceClusteringTest(unittest.TestCase):
 
         self.assertTrue(
             same_evidence_event(news, news_analysis, filing, filing_analysis)
+        )
+
+    def test_grounded_facts_match_acquisition_syndication_after_two_days(self):
+        original = screen_candidate(
+            raw(
+                "Vertiv Announces Agreement to Acquire UtilityInnovation Group",
+                source_text=(
+                    "Vertiv will acquire UtilityInnovation Group for $1.45 billion."
+                ),
+            ),
+            PROFILE,
+        ).candidate
+        follow_up = screen_candidate(
+            raw(
+                "Can VRT's UIG Deal Deepen Its AI Power Edge?",
+                minute=42 * 60,
+                source_url="https://example.com/uig-follow-up",
+                source_text=(
+                    "VRT agreed to acquire UIG for approximately $1.45 billion "
+                    "in cash at closing."
+                ),
+            ),
+            PROFILE,
+        ).candidate
+
+        self.assertTrue(
+            same_evidence_event(
+                original,
+                EvidenceAnalysis(
+                    candidate_id=original.candidate_id,
+                    relevant=True,
+                    headline_ko="버티브, UIG 인수 합의",
+                    facts=(
+                        GroundedFact(
+                            original.source_text,
+                            "버티브가 UIG를 14.5억 달러에 인수한다.",
+                        ),
+                    ),
+                ),
+                follow_up,
+                EvidenceAnalysis(
+                    candidate_id=follow_up.candidate_id,
+                    relevant=True,
+                    headline_ko="VRT, UIG 인수로 전력 역량 확대",
+                    facts=(
+                        GroundedFact(
+                            follow_up.source_text,
+                            "VRT가 UIG를 14.5억 달러에 인수한다.",
+                        ),
+                    ),
+                ),
+            )
         )
 
     def test_different_same_day_events_do_not_match(self):
@@ -923,6 +1007,138 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
                     )
                 }
             self.assertEqual(len(clusters), 1)
+
+    def test_two_day_acquisition_follow_up_does_not_create_another_alert(self):
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                return EvidenceAnalysisBatch(
+                    analyses={
+                        candidate.candidate_id: EvidenceAnalysis(
+                            candidate_id=candidate.candidate_id,
+                            relevant=True,
+                            headline_ko="버티브, UIG 인수로 전력 역량 확대",
+                            summary_ko="UIG를 인수해 데이터센터 전력 역량을 확대한다.",
+                            facts=(
+                                GroundedFact(
+                                    candidate.source_text,
+                                    "UIG를 14.5억 달러에 인수한다.",
+                                ),
+                            ),
+                            interpretation_ko="기존 인수 발표의 후속 보도다.",
+                            thesis_impact="strengthen",
+                            impact_reason_ko="전력 솔루션 범위가 넓어진다.",
+                            confidence="high",
+                        )
+                        for candidate in candidates
+                    },
+                    errors={},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+            )
+            original = raw(
+                "Vertiv Announces Agreement to Acquire UtilityInnovation Group",
+                source_text=(
+                    "Vertiv will acquire UtilityInnovation Group for $1.45 billion."
+                ),
+            )
+            follow_up = raw(
+                "Can VRT's UIG Deal Deepen Its AI Power Edge?",
+                minute=42 * 60,
+                source_url="https://example.com/uig-follow-up",
+                source_text=(
+                    "VRT agreed to acquire UIG for approximately $1.45 billion "
+                    "in cash at closing."
+                ),
+            )
+
+            first = service.ingest([original], NOW)
+            second = service.ingest([follow_up], NOW + timedelta(hours=42))
+            follow_up_candidate = screen_candidate(follow_up, PROFILE).candidate
+            repository.link_evidence_cluster(
+                follow_up_candidate.candidate_id,
+                "VRT:evidence:legacy-split",
+            )
+            repaired = service.ingest([], NOW + timedelta(hours=43))
+
+            self.assertEqual(first.alerts, 1)
+            self.assertEqual(second.alerts, 0)
+            self.assertEqual(repaired.reconciled_clusters, 1)
+            self.assertEqual(
+                len(repository.pending_deliveries(NOW + timedelta(hours=43))),
+                1,
+            )
+            self.assertEqual(
+                repository.recent_catalysts(
+                    "VRT",
+                    NOW + timedelta(hours=18),
+                    limit=10,
+                ),
+                [],
+            )
+
+    def test_recent_analyzed_low_value_story_is_reclassified(self):
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                candidate = candidates[0]
+                return EvidenceAnalysisBatch(
+                    analyses={
+                        candidate.candidate_id: EvidenceAnalysis(
+                            candidate_id=candidate.candidate_id,
+                            relevant=True,
+                            headline_ko="버티브 생산능력 확대",
+                            summary_ko="생산능력을 확대한다.",
+                            facts=(
+                                GroundedFact(
+                                    candidate.source_text,
+                                    "생산능력을 확대한다.",
+                                ),
+                            ),
+                            interpretation_ko="수요 대응력이 높아진다.",
+                            thesis_impact="strengthen",
+                            impact_reason_ko="생산 병목을 완화한다.",
+                            confidence="high",
+                        )
+                    },
+                    errors={},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+            )
+            service.ingest(
+                [
+                    raw(
+                        "Vertiv expands cooling capacity",
+                        source_text="Vertiv will expand cooling capacity.",
+                    )
+                ],
+                NOW,
+            )
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                connection.execute(
+                    "UPDATE evidence_candidates SET headline = ?",
+                    ("Why Vertiv Stock Is Up Today",),
+                )
+
+            report = service.ingest([], NOW + timedelta(minutes=5))
+
+            self.assertEqual(report.reclassified_low_value, 1)
+            self.assertEqual(
+                repository.quality_status_counts()["evidence"]["filtered"],
+                1,
+            )
 
     def test_cluster_duplicate_is_not_analyzed_and_representative_is_enriched(self):
         class Analyzer:
