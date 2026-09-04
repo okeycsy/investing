@@ -38,6 +38,9 @@ class AlertRecord:
     alert_type: str
     created_at: datetime
     payload: dict
+    recorded_at: datetime | None = None
+    build_sha: str = ""
+    run_id: str = ""
 
 
 @dataclass(frozen=True)

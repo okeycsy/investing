@@ -604,6 +604,82 @@ class QualityReportTest(unittest.TestCase):
                 {"briefing": 1},
             )
 
+    def test_quality_report_attributes_alerts_to_current_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build_sha = "b" * 40
+            recorded_at = NOW + timedelta(seconds=30)
+            repository = SQLiteMonitorRepository(
+                Path(directory) / "monitor.db",
+                build_sha=build_sha,
+                workflow_name="Monitor V2 Runtime Shadow",
+                clock=lambda: recorded_at,
+            )
+            repository.start_run(
+                "run-99",
+                scheduled_at=NOW,
+                started_at=NOW + timedelta(seconds=5),
+                gap_seconds=0,
+            )
+            source_url = "https://example.com/acquisition"
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO evidence_candidates "
+                    "(candidate_id, ticker, source_kind, headline, source_name, "
+                    "source_url, published_at, cluster_key, status, analysis_json, "
+                    "first_seen_at, last_seen_at) "
+                    "VALUES ('acquisition', 'VRT', 'news', 'acquisition', 'Source', "
+                    "?, ?, 'event-acquisition', 'analyzed', ?, ?, ?)",
+                    (
+                        source_url,
+                        NOW.isoformat(),
+                        '{"relevant":true,"event_type":"acquisition",'
+                        '"company_directness":true,"new_fact":true,'
+                        '"materiality":"high","source_tier":"secondary",'
+                        '"alert_worthy":true,"confidence":"high"}',
+                        NOW.isoformat(),
+                        NOW.isoformat(),
+                    ),
+                )
+            repository.record_alert(
+                AlertRecord(
+                    event_key="event-acquisition",
+                    ticker="VRT",
+                    alert_type="catalyst",
+                    created_at=NOW,
+                    payload=valid_catalyst_payload(source_url, "acquisition"),
+                ),
+                enqueue=False,
+            )
+            repository.finish_run(
+                "run-99",
+                completed_at=recorded_at,
+                status="success",
+                summary={"trigger": "push", "plan": {"tasks": []}},
+            )
+
+            report = QualityReportService(repository).build()
+            stored = repository.recent_alerts()[0]
+            build_quality = report.product_quality["evidence_qualification"][
+                "by_build"
+            ][build_sha]
+
+            self.assertEqual(stored.recorded_at, recorded_at)
+            self.assertEqual(stored.build_sha, build_sha)
+            self.assertEqual(stored.run_id, "run-99")
+            self.assertEqual(
+                report.runtime["build_provenance"]["current_build_sha"],
+                build_sha,
+            )
+            self.assertEqual(
+                report.runtime["build_provenance"]["by_build"][build_sha][
+                    "workflows"
+                ],
+                ["Monitor V2 Runtime Shadow"],
+            )
+            self.assertEqual(build_quality["alerts_checked"], 1)
+            self.assertEqual(build_quality["semantic_violations"], 0)
+            self.assertEqual(build_quality["meaningful_rate_percent"], 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

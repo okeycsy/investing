@@ -482,6 +482,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "completed_at": _iso(run.completed_at),
                     "status": run.status,
                     "gap_seconds": run.gap_seconds,
+                    "build_sha": run.build_sha,
+                    "workflow_name": run.workflow_name,
                 }
                 for run in repository.recent_runs()
             ],

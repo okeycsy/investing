@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from investing_monitor.domain.evidence import (
     AnalyzedEvidence,
@@ -45,7 +46,7 @@ from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -129,6 +130,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     ticker TEXT NOT NULL,
     alert_type TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    recorded_at TEXT,
+    build_sha TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL DEFAULT '',
     payload_json TEXT NOT NULL
 );
 
@@ -162,6 +166,8 @@ CREATE TABLE IF NOT EXISTS run_checkpoints (
     completed_at TEXT,
     status TEXT NOT NULL,
     gap_seconds INTEGER NOT NULL DEFAULT 0,
+    build_sha TEXT NOT NULL DEFAULT '',
+    workflow_name TEXT NOT NULL DEFAULT '',
     summary_json TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -171,8 +177,28 @@ ON run_checkpoints(completed_at DESC);
 
 
 class SQLiteMonitorRepository:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        build_sha: str | None = None,
+        workflow_name: str | None = None,
+        run_id: str | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.path = Path(path)
+        self.build_sha = (
+            os.environ.get("GITHUB_SHA", "") if build_sha is None else build_sha
+        ).strip()
+        self.workflow_name = (
+            os.environ.get("GITHUB_WORKFLOW", "")
+            if workflow_name is None
+            else workflow_name
+        ).strip()
+        self._active_run_id = (
+            os.environ.get("GITHUB_RUN_ID", "") if run_id is None else run_id
+        ).strip()
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -217,6 +243,31 @@ class SQLiteMonitorRepository:
                 "peer_changes_json",
                 "TEXT NOT NULL DEFAULT '{}'",
             )
+            self._ensure_column(connection, "alerts", "recorded_at", "TEXT")
+            self._ensure_column(
+                connection,
+                "alerts",
+                "build_sha",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "alerts",
+                "run_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "run_checkpoints",
+                "build_sha",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "run_checkpoints",
+                "workflow_name",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
@@ -232,6 +283,40 @@ class SQLiteMonitorRepository:
         }
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _alert_provenance(
+        self,
+        alert: AlertRecord | None = None,
+    ) -> tuple[str, str, str]:
+        recorded_at = alert.recorded_at if alert and alert.recorded_at else self._clock()
+        build_sha = alert.build_sha if alert and alert.build_sha else self.build_sha
+        run_id = alert.run_id if alert and alert.run_id else self._active_run_id
+        return _utc_iso(recorded_at), build_sha, run_id
+
+    def _insert_alert_row(
+        self,
+        connection: sqlite3.Connection,
+        alert: AlertRecord,
+        payload_json: str,
+    ) -> bool:
+        recorded_at, build_sha, run_id = self._alert_provenance(alert)
+        return bool(
+            connection.execute(
+                "INSERT OR IGNORE INTO alerts "
+                "(event_key, ticker, alert_type, created_at, recorded_at, build_sha, "
+                "run_id, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    alert.event_key,
+                    alert.ticker.upper(),
+                    alert.alert_type,
+                    _utc_iso(alert.created_at),
+                    recorded_at,
+                    build_sha,
+                    run_id,
+                    payload_json,
+                ),
+            ).rowcount
+        )
 
     def load_price_band_state(self, ticker: str) -> PriceBandState | None:
         with closing(self._connect()) as connection, connection:
@@ -259,14 +344,16 @@ class SQLiteMonitorRepository:
         require_valid_message("price_band", payload)
         payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         observed_at = _utc_iso(signal.observed_at)
+        alert = AlertRecord(
+            event_key=signal.event_key,
+            ticker=signal.ticker,
+            alert_type="price_band",
+            created_at=signal.observed_at,
+            payload=payload,
+        )
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            inserted = connection.execute(
-                "INSERT OR IGNORE INTO alerts "
-                "(event_key, ticker, alert_type, created_at, payload_json) "
-                "VALUES (?, ?, 'price_band', ?, ?)",
-                (signal.event_key, signal.ticker, observed_at, payload_json),
-            ).rowcount
+            inserted = self._insert_alert_row(connection, alert, payload_json)
             if not inserted:
                 return False
             connection.execute(
@@ -396,18 +483,7 @@ class SQLiteMonitorRepository:
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
-                inserted = connection.execute(
-                    "INSERT OR IGNORE INTO alerts "
-                    "(event_key, ticker, alert_type, created_at, payload_json) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        alert.event_key,
-                        alert.ticker.upper(),
-                        alert.alert_type,
-                        _utc_iso(alert.created_at),
-                        payload_json,
-                    ),
-                ).rowcount
+                inserted = self._insert_alert_row(connection, alert, payload_json)
                 if not inserted:
                     continue
                 if enqueue:
@@ -491,20 +567,7 @@ class SQLiteMonitorRepository:
         )
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            inserted = bool(
-                connection.execute(
-                    "INSERT OR IGNORE INTO alerts "
-                    "(event_key, ticker, alert_type, created_at, payload_json) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        alert.event_key,
-                        alert.ticker.upper(),
-                        alert.alert_type,
-                        _utc_iso(alert.created_at),
-                        payload_json,
-                    ),
-                ).rowcount
-            )
+            inserted = self._insert_alert_row(connection, alert, payload_json)
             if inserted and enqueue:
                 connection.execute(
                     "INSERT INTO outbox (event_key, payload_json, next_attempt_at) "
@@ -516,8 +579,9 @@ class SQLiteMonitorRepository:
     def recent_alerts(self, limit: int = 100) -> list[AlertRecord]:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
-                "SELECT event_key, ticker, alert_type, created_at, payload_json "
-                "FROM alerts ORDER BY created_at DESC LIMIT ?",
+                "SELECT event_key, ticker, alert_type, created_at, recorded_at, "
+                "build_sha, run_id, payload_json FROM alerts "
+                "ORDER BY COALESCE(recorded_at, created_at) DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
@@ -527,6 +591,9 @@ class SQLiteMonitorRepository:
                 alert_type=row["alert_type"],
                 created_at=_required_datetime(row["created_at"]),
                 payload=json.loads(row["payload_json"]),
+                recorded_at=_parse_datetime(row["recorded_at"]),
+                build_sha=row["build_sha"],
+                run_id=row["run_id"],
             )
             for row in rows
         ]
@@ -810,19 +877,10 @@ class SQLiteMonitorRepository:
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
-                inserted_alert = bool(
-                    connection.execute(
-                        "INSERT OR IGNORE INTO alerts "
-                        "(event_key, ticker, alert_type, created_at, payload_json) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (
-                            alert.event_key,
-                            alert.ticker.upper(),
-                            alert.alert_type,
-                            _utc_iso(alert.created_at),
-                            alert_payload,
-                        ),
-                    ).rowcount
+                inserted_alert = self._insert_alert_row(
+                    connection,
+                    alert,
+                    alert_payload,
                 )
                 if inserted_alert and enqueue:
                     connection.execute(
@@ -1093,20 +1151,24 @@ class SQLiteMonitorRepository:
         started_at: datetime,
         gap_seconds: int,
     ) -> None:
+        self._active_run_id = run_id
         with closing(self._connect()) as connection, connection:
             connection.execute(
                 "INSERT INTO run_checkpoints "
-                "(run_id, scheduled_at, started_at, status, gap_seconds) "
-                "VALUES (?, ?, ?, 'running', ?) "
+                "(run_id, scheduled_at, started_at, status, gap_seconds, build_sha, "
+                "workflow_name) VALUES (?, ?, ?, 'running', ?, ?, ?) "
                 "ON CONFLICT(run_id) DO UPDATE SET "
                 "scheduled_at = excluded.scheduled_at, started_at = excluded.started_at, "
                 "completed_at = NULL, status = 'running', gap_seconds = excluded.gap_seconds, "
+                "build_sha = excluded.build_sha, workflow_name = excluded.workflow_name, "
                 "summary_json = '{}'",
                 (
                     run_id,
                     _utc_iso(scheduled_at),
                     _utc_iso(started_at),
                     max(0, gap_seconds),
+                    self.build_sha,
+                    self.workflow_name,
                 ),
             )
 
@@ -1193,7 +1255,8 @@ class SQLiteMonitorRepository:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT run_id, scheduled_at, started_at, completed_at, status, "
-                "gap_seconds, summary_json FROM run_checkpoints "
+                "gap_seconds, build_sha, workflow_name, summary_json "
+                "FROM run_checkpoints "
                 "ORDER BY started_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -1206,6 +1269,8 @@ class SQLiteMonitorRepository:
                 status=row["status"],
                 gap_seconds=row["gap_seconds"],
                 summary=json.loads(row["summary_json"]),
+                build_sha=row["build_sha"],
+                workflow_name=row["workflow_name"],
             )
             for row in rows
         ]

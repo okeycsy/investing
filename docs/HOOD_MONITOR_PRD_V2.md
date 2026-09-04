@@ -725,8 +725,9 @@ snapshot만 유지한다. `force-with-lease`와 workflow concurrency를 함께 �
 | `source_items` | 수집 원문 메타데이터 | provider + source_id |
 | `catalysts` | cluster와 AI 분석 상태 | canonical_event_id |
 | `events` | 사용자 사건 ledger | event_key |
-| `alerts` | 렌더링 버전과 payload | event_key + payload_version |
+| `alerts` | 렌더링 버전, payload, 실제 기록 시각, build SHA, run ID | event_key + payload_version |
 | `outbox` | 전달과 retry | alert_id |
+| `run_checkpoints` | 실행 결과, build SHA, workflow 이름 | run_id |
 | `run_checkpoints` | 예정/실제 tick과 schedule gap | run_id + started_at |
 | `source_health` | provider 상태 | provider |
 
@@ -874,6 +875,12 @@ GitHub schedule은 실행 시각을 보장하지 않으므로 아래는 플랫�
 | garbage filing rate | form 이름만 있는 filing 알림 | 0% |
 | recovery success | gap 뒤 cursor와 watermark 복원 성공 | 100% 테스트 |
 | alert load | 거래일당 비정기 알림 수 | 평시 0~3건 목표 |
+| build-scoped alert quality | 동일 build SHA가 생성한 근거 알림의 유효율과 위반 건수 | 버전 전환 뒤 별도 집계 |
+
+품질 리포트는 사건 발생·게시 시각인 `created_at`과 DB 기록 시각인
+`recorded_at`을 구분한다. GitHub에서 생성된 run과 alert에는 `GITHUB_SHA`,
+`GITHUB_RUN_ID`, `GITHUB_WORKFLOW`을 저장하고, 값이 없는 과거 행은
+`legacy`로 묶어 현재 빌드의 품질을 오염시키지 않는다.
 
 ### 정성 평가 rubric
 

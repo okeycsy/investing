@@ -24,6 +24,8 @@ class RunCheckpoint:
     status: str
     gap_seconds: int
     summary: Mapping[str, object] = field(default_factory=dict)
+    build_sha: str = ""
+    workflow_name: str = ""
 
 
 class RuntimeRepository(Protocol):

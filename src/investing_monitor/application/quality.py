@@ -15,6 +15,7 @@ from investing_monitor.ports.repository import (
     MarketObservationRecord,
     MonitorRepository,
 )
+from investing_monitor.ports.runtime import RunCheckpoint
 from investing_monitor.presentation.quality import audit_message
 
 
@@ -86,6 +87,13 @@ class QualityReportService:
                         "event_key": alert.event_key,
                         "alert_type": alert.alert_type,
                         "created_at": alert.created_at.isoformat(),
+                        "recorded_at": (
+                            alert.recorded_at.isoformat()
+                            if alert.recorded_at
+                            else None
+                        ),
+                        "build_sha": alert.build_sha,
+                        "run_id": alert.run_id,
                         "fallback_text": alert.payload.get("text", ""),
                         **result.as_dict(),
                     }
@@ -209,6 +217,8 @@ class QualityReportService:
                             latency_ms,
                         )
         trigger_counts = Counter(_run_trigger(run.summary) for run in runs)
+        build_history = _build_history(runs)
+        current_build_sha = str(build_history.get("current_build_sha") or "")
         scheduled_runs = [
             run for run in runs if _run_trigger(run.summary) == "schedule"
         ]
@@ -234,6 +244,7 @@ class QualityReportService:
             "successful_runs": sum(run.status == "success" for run in runs),
             "partial_runs": sum(run.status != "success" for run in runs),
             "trigger_counts": dict(sorted(trigger_counts.items())),
+            "build_provenance": build_history,
             "scheduler_status": scheduler_status,
             "schedule_runs_checked": len(scheduled_runs),
             "latest_schedule_started_at": (
@@ -291,6 +302,7 @@ class QualityReportService:
             alerts,
             self.repository.recent_evidence_quality_records(limit=max(500, limit * 5)),
             data_coverage,
+            current_build_sha=current_build_sha,
         )
         recent_semantic_violations = int(
             product_quality["evidence_alerts"]["recent_semantic_violations"]
@@ -380,6 +392,45 @@ def _record_provider_sample(
         sample[status] += 1
     sample["total_ms"] += latency_ms
     sample["max_ms"] = max(sample["max_ms"], latency_ms)
+
+
+def _build_history(runs: list[RunCheckpoint]) -> dict[str, object]:
+    versioned = [run for run in runs if run.build_sha]
+    if not versioned:
+        return {
+            "current_build_sha": "",
+            "versioned_runs": 0,
+            "legacy_runs": len(runs),
+            "by_build": {},
+        }
+    current = max(versioned, key=lambda item: item.started_at)
+    by_build: dict[str, dict[str, object]] = {}
+    for run in sorted(versioned, key=lambda item: item.started_at):
+        row = by_build.setdefault(
+            run.build_sha,
+            {
+                "runs": 0,
+                "successful_runs": 0,
+                "first_started_at": run.started_at.isoformat(),
+                "last_started_at": run.started_at.isoformat(),
+                "workflows": set(),
+            },
+        )
+        row["runs"] = int(row["runs"]) + 1
+        row["successful_runs"] = int(row["successful_runs"]) + int(
+            run.status == "success"
+        )
+        row["last_started_at"] = run.started_at.isoformat()
+        if run.workflow_name:
+            row["workflows"].add(run.workflow_name)
+    for row in by_build.values():
+        row["workflows"] = sorted(row["workflows"])
+    return {
+        "current_build_sha": current.build_sha,
+        "versioned_runs": len(versioned),
+        "legacy_runs": len(runs) - len(versioned),
+        "by_build": by_build,
+    }
 
 
 def _run_trigger(summary: object) -> str:
@@ -494,6 +545,8 @@ def _product_quality(
     alerts: list[AlertRecord],
     evidence_records: list[EvidenceQualityRecord],
     data_coverage: dict[str, dict[str, object]],
+    *,
+    current_build_sha: str = "",
 ) -> dict[str, object]:
     full_dates = sorted(
         trading_date
@@ -552,6 +605,11 @@ def _product_quality(
             {
                 "event_key": alert.event_key,
                 "created_at": alert.created_at.isoformat(),
+                "recorded_at": (
+                    alert.recorded_at.isoformat() if alert.recorded_at else None
+                ),
+                "build_sha": alert.build_sha,
+                "run_id": alert.run_id,
                 "trading_date": local_date,
                 "classification": classification,
                 "reason": reason,
@@ -623,6 +681,46 @@ def _product_quality(
         for record in evidence_records
         if record.status == "analyzed"
     )
+    quality_by_build: dict[str, dict[str, object]] = {}
+    for finding in findings:
+        build_sha = str(finding["build_sha"] or "legacy")
+        row = quality_by_build.setdefault(
+            build_sha,
+            {
+                "alerts_checked": 0,
+                "assessed": 0,
+                "currently_valid": 0,
+                "semantic_violations": 0,
+            },
+        )
+        row["alerts_checked"] = int(row["alerts_checked"]) + 1
+        row["assessed"] = int(row["assessed"]) + int(
+            finding["classification"] != "unassessed"
+        )
+        row["currently_valid"] = int(row["currently_valid"]) + int(
+            finding["classification"] == "currently_valid"
+        )
+        row["semantic_violations"] = int(row["semantic_violations"]) + int(
+            finding["classification"] in semantic_violations
+        )
+    if current_build_sha:
+        quality_by_build.setdefault(
+            current_build_sha,
+            {
+                "alerts_checked": 0,
+                "assessed": 0,
+                "currently_valid": 0,
+                "semantic_violations": 0,
+            },
+        )
+    for row in quality_by_build.values():
+        assessed_for_build = int(row["assessed"])
+        row["evidence_alerts_observed"] = bool(row["alerts_checked"])
+        row["meaningful_rate_percent"] = (
+            round(int(row["currently_valid"]) / assessed_for_build * 100, 1)
+            if assessed_for_build
+            else None
+        )
 
     if recent_semantic_violations or days_over_target:
         status = "needs_improvement"
@@ -659,6 +757,8 @@ def _product_quality(
         "evidence_qualification": {
             "by_disposition": dict(sorted(qualification_inventory.items())),
             "by_event_type": dict(sorted(event_type_inventory.items())),
+            "current_build_sha": current_build_sha,
+            "by_build": quality_by_build,
         },
         "alert_load": {
             "completed_trading_days_checked": len(load_by_day),

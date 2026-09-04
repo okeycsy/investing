@@ -225,6 +225,80 @@ class SQLiteRuntimeTest(unittest.TestCase):
             self.assertEqual(restarted.task_checkpoints()["news"].metadata, {"items": 2})
             self.assertEqual(restarted.recent_runs()[0].gap_seconds, 900)
 
+    def test_run_provenance_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            build_sha = "a" * 40
+            repository = SQLiteMonitorRepository(
+                path,
+                build_sha=build_sha,
+                workflow_name="Monitor V2 Runtime Shadow",
+            )
+            repository.start_run(
+                "run-42",
+                scheduled_at=NOW,
+                started_at=NOW + timedelta(seconds=8),
+                gap_seconds=0,
+            )
+            repository.finish_run(
+                "run-42",
+                completed_at=NOW + timedelta(seconds=10),
+                status="success",
+                summary={"trigger": "push"},
+            )
+
+            run = SQLiteMonitorRepository(path).recent_runs()[0]
+
+            self.assertEqual(run.build_sha, build_sha)
+            self.assertEqual(run.workflow_name, "Monitor V2 Runtime Shadow")
+
+    def test_schema_seven_database_migrates_without_rewriting_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.db"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE alerts (
+                        event_key TEXT PRIMARY KEY,
+                        ticker TEXT NOT NULL,
+                        alert_type TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    );
+                    CREATE TABLE run_checkpoints (
+                        run_id TEXT PRIMARY KEY,
+                        scheduled_at TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        status TEXT NOT NULL,
+                        gap_seconds INTEGER NOT NULL DEFAULT 0,
+                        summary_json TEXT NOT NULL DEFAULT '{}'
+                    );
+                    PRAGMA user_version = 7;
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO alerts VALUES (?, 'VRT', 'daily_close', ?, '{}')",
+                    ("legacy-alert", NOW.isoformat()),
+                )
+                connection.execute(
+                    "INSERT INTO run_checkpoints VALUES (?, ?, ?, ?, 'success', 0, '{}')",
+                    ("legacy-run", NOW.isoformat(), NOW.isoformat(), NOW.isoformat()),
+                )
+
+            repository = SQLiteMonitorRepository(path)
+            alert = repository.recent_alerts()[0]
+            run = repository.recent_runs()[0]
+            with closing(sqlite3.connect(path)) as connection, connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+            self.assertEqual(version, 8)
+            self.assertIsNone(alert.recorded_at)
+            self.assertEqual(alert.build_sha, "")
+            self.assertEqual(alert.run_id, "")
+            self.assertEqual(run.build_sha, "")
+            self.assertEqual(run.workflow_name, "")
+
 
 class GitStateBranchStoreTest(unittest.TestCase):
     def test_twenty_checkpoints_keep_main_unchanged_and_restore_latest_state(self):
