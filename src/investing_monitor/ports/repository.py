@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from typing import Mapping, Protocol, Sequence
 
 from investing_monitor.domain.evidence import (
@@ -14,6 +14,7 @@ from investing_monitor.domain.models import (
     Catalyst,
     CloseMarketContext,
     MarketFrame,
+    MarketSensitivity,
     OfficialEvent,
     PriceBandSignal,
     PriceBandState,
@@ -41,6 +42,7 @@ class AlertRecord:
     recorded_at: datetime | None = None
     build_sha: str = ""
     run_id: str = ""
+    context: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,9 +78,31 @@ class MonitorRepository(Protocol):
         signal: PriceBandSignal,
         state: PriceBandState,
         payload: dict,
+        context: Mapping[str, object] | None = None,
     ) -> bool: ...
 
     def latest_market_observation_at(self, ticker: str) -> datetime | None: ...
+
+    def load_market_sensitivity(self, ticker: str) -> MarketSensitivity | None: ...
+
+    def save_market_sensitivity(self, sensitivity: MarketSensitivity) -> None: ...
+
+    def latest_price_alert_context(
+        self,
+        ticker: str,
+        trading_date: date,
+        direction: str,
+    ) -> AlertRecord | None: ...
+
+    def unexplained_price_alert_near(
+        self,
+        ticker: str,
+        published_at: datetime,
+        *,
+        window: timedelta = timedelta(hours=6),
+    ) -> AlertRecord | None: ...
+
+    def alert_exists(self, event_key: str) -> bool: ...
 
     def record_market_cycle(
         self,

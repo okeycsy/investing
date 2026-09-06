@@ -33,6 +33,14 @@ class ThesisImpact(str, Enum):
     DAMAGE = "damage"
 
 
+class SituationVerdict(str, Enum):
+    COMPANY_STRENGTH = "company_strength"
+    COMPANY_WEAKNESS = "company_weakness"
+    BROADLY_EXPLAINED = "broadly_explained"
+    MIXED = "mixed"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True)
 class InstrumentProfile:
     ticker: str
@@ -126,6 +134,41 @@ class CloseMarketContext:
 
 
 @dataclass(frozen=True)
+class MarketSensitivity:
+    ticker: str
+    benchmark_symbol: str
+    peer_symbols: tuple[str, ...]
+    calculated_at: datetime
+    benchmark_beta: float | None = None
+    benchmark_residual_band_pct: float | None = None
+    benchmark_samples: int = 0
+    peer_beta: float | None = None
+    peer_residual_band_pct: float | None = None
+    peer_samples: int = 0
+
+    def __post_init__(self) -> None:
+        if self.calculated_at.tzinfo is None:
+            raise ValueError("sensitivity timestamp must be timezone-aware")
+        object.__setattr__(self, "ticker", self.ticker.strip().upper())
+        object.__setattr__(
+            self,
+            "benchmark_symbol",
+            self.benchmark_symbol.strip().upper(),
+        )
+        object.__setattr__(
+            self,
+            "peer_symbols",
+            tuple(
+                dict.fromkeys(
+                    symbol.strip().upper()
+                    for symbol in self.peer_symbols
+                    if symbol.strip()
+                )
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class OfficialEvent:
     event_date: date
     title_ko: str
@@ -152,6 +195,8 @@ class Catalyst:
     confidence: str = "medium"
     facts: tuple[str, ...] = ()
     source_kind: str = ""
+    source_tier: str = "secondary"
+    event_type: str = "other"
 
     def __post_init__(self) -> None:
         if not self.canonical_id:

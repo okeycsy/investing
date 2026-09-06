@@ -544,7 +544,7 @@ class QualityReportTest(unittest.TestCase):
                     analysis_json = (
                         '{"relevant":true,"event_type":"acquisition",'
                         '"company_directness":true,"new_fact":true,'
-                        '"materiality":"high","source_tier":"secondary",'
+                        '"materiality":"high","source_tier":"primary_reporting",'
                         '"alert_worthy":true,"confidence":"high"}'
                         if relevant == 1
                         else '{"relevant":false}'
@@ -652,6 +652,75 @@ class QualityReportTest(unittest.TestCase):
                 {"briefing": 1},
             )
 
+    def test_product_quality_validates_move_followup_by_evidence_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            source_url = "https://example.com/contract"
+            with closing(sqlite3.connect(repository.path)) as connection, connection:
+                connection.execute(
+                    "INSERT INTO evidence_candidates "
+                    "(candidate_id, ticker, source_kind, headline, source_name, "
+                    "source_url, published_at, cluster_key, status, analysis_json, "
+                    "first_seen_at, last_seen_at) "
+                    "VALUES ('contract', 'VRT', 'news', 'contract', 'Reuters', ?, ?, "
+                    "'event-contract', 'analyzed', ?, ?, ?)",
+                    (
+                        source_url,
+                        NOW.isoformat(),
+                        '{"relevant":true,"event_type":"major_contract",'
+                        '"company_directness":true,"new_fact":true,'
+                        '"materiality":"high","source_tier":"primary_reporting",'
+                        '"alert_worthy":true,"confidence":"high"}',
+                        NOW.isoformat(),
+                        NOW.isoformat(),
+                    ),
+                )
+            repository.record_alert(
+                AlertRecord(
+                    event_key="VRT:2026-09-02:price-band:up:4:context-update",
+                    ticker="VRT",
+                    alert_type="move_followup",
+                    created_at=NOW,
+                    payload={
+                        "text": "$VRT +4.0% 상승 움직임 후속 확인",
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        "*새로 확인된 근거*\n대형 계약이 확인됐다. "
+                                        "인과관계가 확정된 것은 아님."
+                                    ),
+                                },
+                            },
+                            {
+                                "type": "context",
+                                "elements": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"<{source_url}|Reuters 원문 보기>",
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    context={
+                        "parent_event_key": "VRT:2026-09-02:price-band:up:4",
+                        "evidence_event_key": "event-contract",
+                    },
+                ),
+                enqueue=False,
+            )
+
+            evidence = QualityReportService(repository).build().product_quality[
+                "evidence_alerts"
+            ]
+
+            self.assertEqual(evidence["alerts_checked"], 1)
+            self.assertEqual(evidence["currently_valid"], 1)
+            self.assertEqual(evidence["duplicate_cluster_reconciled"], 0)
+
     def test_quality_report_attributes_alerts_to_current_build(self):
         with tempfile.TemporaryDirectory() as directory:
             build_sha = "b" * 40
@@ -682,7 +751,7 @@ class QualityReportTest(unittest.TestCase):
                         NOW.isoformat(),
                         '{"relevant":true,"event_type":"acquisition",'
                         '"company_directness":true,"new_fact":true,'
-                        '"materiality":"high","source_tier":"secondary",'
+                        '"materiality":"high","source_tier":"primary_reporting",'
                         '"alert_worthy":true,"confidence":"high"}',
                         NOW.isoformat(),
                         NOW.isoformat(),

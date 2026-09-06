@@ -48,6 +48,7 @@ from investing_monitor.application.evidence import (
 from investing_monitor.application.sec_monitor import SecMonitorService
 from investing_monitor.domain.evidence import (
     EvidenceAnalysis,
+    EvidenceDisposition,
     EvidenceDocument,
     EvidenceKind,
     EvidenceProfile,
@@ -55,6 +56,7 @@ from investing_monitor.domain.evidence import (
     GroundedFact,
     RawEvidenceCandidate,
 )
+from investing_monitor.domain.evidence_qualification import evidence_disposition
 from investing_monitor.domain.models import (
     MarketCycle,
     MarketFrame,
@@ -63,7 +65,10 @@ from investing_monitor.domain.models import (
     OfficialEvent,
 )
 from investing_monitor.application.monitor import MarketCycleService
-from investing_monitor.presentation.evidence_messages import build_evidence_message
+from investing_monitor.presentation.evidence_messages import (
+    build_evidence_message,
+    build_move_followup_message,
+)
 
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
@@ -178,6 +183,34 @@ class CandidateScreeningTest(unittest.TestCase):
                     decision.reason,
                     "deterministic low-value title rule",
                 )
+
+
+class EvidenceDispositionTest(unittest.TestCase):
+    def test_secondary_reporting_cannot_create_an_independent_immediate_alert(self):
+        base = dict(
+            candidate_id="candidate",
+            relevant=True,
+            headline_ko="버티브 대형 계약",
+            summary_ko="새 계약을 발표했다.",
+            facts=(GroundedFact("contract", "계약을 체결했다."),),
+            thesis_impact="strengthen",
+            impact_reason_ko="수주가 늘어난다.",
+            confidence="high",
+            **qualification("major_contract"),
+        )
+        primary = EvidenceAnalysis(**base)
+        secondary = EvidenceAnalysis(
+            **{**base, "source_tier": "secondary"}
+        )
+
+        self.assertEqual(
+            evidence_disposition(EvidenceKind.NEWS, primary),
+            EvidenceDisposition.IMMEDIATE,
+        )
+        self.assertEqual(
+            evidence_disposition(EvidenceKind.NEWS, secondary),
+            EvidenceDisposition.BRIEFING,
+        )
 
     def test_news_without_company_in_headline_is_not_an_independent_catalyst(self):
         decision = screen_candidate(
@@ -1025,6 +1058,150 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
             self.assertEqual(stored, [event])
             self.assertEqual(catalysts, [])
             self.assertEqual(repository.pending_deliveries(NOW), [])
+
+    def test_secondary_story_waits_and_official_source_promotes_the_event(self):
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                analyses = {}
+                for candidate in candidates:
+                    source_tier = (
+                        "official"
+                        if candidate.kind is EvidenceKind.IR
+                        else "secondary"
+                    )
+                    analyses[candidate.candidate_id] = EvidenceAnalysis(
+                        candidate_id=candidate.candidate_id,
+                        relevant=True,
+                        headline_ko="버티브, UIG 인수 계약 발표",
+                        summary_ko="UIG를 14.5억 달러에 인수하기로 합의했다.",
+                        facts=(
+                            GroundedFact(
+                                candidate.source_text,
+                                "UIG를 14.5억 달러에 인수하기로 합의했다.",
+                            ),
+                        ),
+                        thesis_impact="strengthen",
+                        impact_reason_ko="데이터센터 전력 역량이 확대된다.",
+                        confidence="high",
+                        **qualification(
+                            "acquisition",
+                            source_tier=source_tier,
+                        ),
+                    )
+                return EvidenceAnalysisBatch(analyses=analyses, errors={})
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+            )
+            secondary = raw(
+                "Vertiv to acquire UtilityInnovation Group for $1.45 billion",
+                source_name="Industry Blog",
+                source_url="https://example.com/secondary-uig",
+                source_text="Vertiv will acquire UIG for $1.45 billion.",
+            )
+            official = raw(
+                "Vertiv announces agreement to acquire UtilityInnovation Group for $1.45 billion",
+                kind=EvidenceKind.IR,
+                minute=30,
+                source_name="Vertiv Investor Relations",
+                source_url="https://investors.vertiv.com/uig",
+                source_text="Vertiv agreed to acquire UIG for $1.45 billion.",
+            )
+
+            secondary_report = service.ingest([secondary], NOW)
+            official_report = service.ingest([official], NOW + timedelta(minutes=30))
+            pending = repository.pending_deliveries(NOW + timedelta(hours=1))
+
+            self.assertEqual(secondary_report.alerts, 0)
+            self.assertEqual(official_report.alerts, 1)
+            self.assertEqual(len(pending), 1)
+            self.assertIn(
+                "공식 원문",
+                json.dumps(pending[0].payload, ensure_ascii=False),
+            )
+
+    def test_new_trusted_evidence_becomes_one_move_context_followup(self):
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                candidate = candidates[0]
+                return EvidenceAnalysisBatch(
+                    analyses={
+                        candidate.candidate_id: EvidenceAnalysis(
+                            candidate_id=candidate.candidate_id,
+                            relevant=True,
+                            headline_ko="버티브, 대형 데이터센터 계약 체결",
+                            summary_ko="신규 전력·냉각 공급 계약을 체결했다.",
+                            facts=(
+                                GroundedFact(
+                                    candidate.source_text,
+                                    "2억 5천만 달러 규모 계약을 체결했다.",
+                                ),
+                            ),
+                            thesis_impact="strengthen",
+                            impact_reason_ko="수주 가시성이 높아진다.",
+                            confidence="high",
+                            **qualification("major_contract"),
+                        )
+                    },
+                    errors={},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            market = MarketCycle(
+                ticker="VRT",
+                trading_date=NOW.date(),
+                frames=(
+                    MarketFrame(
+                        MarketSnapshot(
+                            ticker="VRT",
+                            trading_date=NOW.date(),
+                            observed_at=NOW,
+                            session=MarketSession.REGULAR,
+                            change_pct=4.2,
+                            benchmark_change_pct=1.0,
+                            peer_changes={"ETN": 1.0, "GEV": 1.1, "NVT": 0.9},
+                        ),
+                        close_price=104.2,
+                        reference_close=100.0,
+                    ),
+                ),
+                volume=None,
+                source_age_seconds=0,
+            )
+            MarketCycleService(repository).process(market)
+            service = EvidenceIngestionService(
+                repository,
+                PROFILE,
+                Analyzer(),
+                alert_builder=build_evidence_message,
+                move_followup_builder=build_move_followup_message,
+            )
+            evidence = raw(
+                "Vertiv signs $250 million data center supply contract",
+                minute=30,
+                source_name="Reuters",
+                source_url="https://example.com/contract",
+                source_text="Vertiv signed a $250 million supply contract.",
+            )
+
+            report = service.ingest([evidence], NOW + timedelta(minutes=30))
+            repeated = service.ingest([evidence], NOW + timedelta(minutes=35))
+            pending = repository.pending_deliveries(NOW + timedelta(hours=1))
+            followups = [item for item in pending if "context-update" in item.event_key]
+
+            self.assertEqual(report.alerts, 1)
+            self.assertEqual(repeated.alerts, 0)
+            self.assertEqual(len(followups), 1)
+            rendered = json.dumps(followups[0].payload, ensure_ascii=False)
+            self.assertIn("움직임 후속 확인", rendered)
+            self.assertIn("인과관계가 확정된 것은 아님", rendered)
+            self.assertIn("주요 원보도", rendered)
 
     def test_later_sec_filing_links_to_news_event_without_second_alert(self):
         class Analyzer:

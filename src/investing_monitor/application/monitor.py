@@ -9,7 +9,9 @@ from investing_monitor.domain.models import (
     Direction,
     MarketCycle,
     MarketFrame,
+    MarketSensitivity,
     MarketSnapshot,
+    PriceBandSignal,
     PriceBandState,
     VolumeSignal,
     VolumeSnapshot,
@@ -19,8 +21,10 @@ from investing_monitor.domain.policies import (
     RelativeAssessment,
     VolumeAssessment,
     assess_intraday_volume,
+    assess_market_situation,
     assess_relative_performance,
 )
+from investing_monitor.domain.situation import compare_market_context
 from investing_monitor.ports.providers import (
     DeliveryOutcomeUnknown,
     DeliveryRejected,
@@ -52,20 +56,46 @@ class MarketMonitorService:
         *,
         volume: VolumeSnapshot | None = None,
         catalysts: Sequence[Catalyst] = (),
+        sensitivity: MarketSensitivity | None = None,
     ) -> str | None:
         state = self.repository.load_price_band_state(snapshot.ticker)
         signal, next_state = self.price_policy.evaluate(snapshot, state)
         if signal is None:
             return None
 
-        relative = assess_relative_performance(snapshot)
+        relative = assess_relative_performance(
+            snapshot,
+            sensitivity=sensitivity,
+        )
         volume_assessment = assess_intraday_volume(volume)
+        situation = assess_market_situation(snapshot, relative)
+        contextual_catalysts = _contextual_catalysts(
+            catalysts,
+            snapshot.observed_at,
+        )
+        context = _alert_context(
+            signal,
+            relative,
+            volume_assessment,
+            situation.verdict.value,
+            contextual_catalysts,
+        )
+        previous = self.repository.latest_price_alert_context(
+            snapshot.ticker,
+            snapshot.trading_date,
+            signal.direction.value,
+        )
         payload = build_price_band_message(
             signal,
             relative,
             volume,
             volume_assessment,
-            catalysts,
+            contextual_catalysts,
+            situation=situation,
+            delta=compare_market_context(
+                previous.context if previous else None,
+                context,
+            ),
         )
         if volume_assessment.is_exploded:
             next_state = replace(next_state, volume_alerted=True)
@@ -73,6 +103,7 @@ class MarketMonitorService:
             signal,
             next_state,
             payload,
+            context,
         )
         return signal.event_key if inserted else None
 
@@ -146,6 +177,7 @@ class MarketCycleService:
         catalysts: Sequence[Catalyst] = (),
         *,
         detected_at: datetime | None = None,
+        sensitivity: MarketSensitivity | None = None,
     ) -> MarketCycleReport:
         if detected_at is not None and detected_at.tzinfo is None:
             raise ValueError("detected_at must be timezone-aware")
@@ -181,13 +213,39 @@ class MarketCycleService:
                 signal.observed_at,
                 detected_at,
             )
+            relative = assess_relative_performance(
+                frame.snapshot,
+                sensitivity=sensitivity,
+            )
+            situation = assess_market_situation(frame.snapshot, relative)
+            contextual_catalysts = _contextual_catalysts(
+                catalysts,
+                signal.observed_at,
+            )
+            context = _alert_context(
+                signal,
+                relative,
+                volume_assessment,
+                situation.verdict.value,
+                contextual_catalysts,
+            )
+            previous = self.repository.latest_price_alert_context(
+                cycle.ticker,
+                cycle.trading_date,
+                signal.direction.value,
+            )
             payload = build_price_band_message(
                 signal,
-                assess_relative_performance(frame.snapshot),
+                relative,
                 cycle.volume,
                 volume_assessment,
-                catalysts,
+                contextual_catalysts,
                 detection_delay_seconds=detection_delay,
+                situation=situation,
+                delta=compare_market_context(
+                    previous.context if previous else None,
+                    context,
+                ),
             )
             alerts.append(
                 AlertRecord(
@@ -196,13 +254,18 @@ class MarketCycleService:
                     alert_type="price_band",
                     created_at=signal.observed_at,
                     payload=payload,
+                    context=context,
                 )
             )
             payloads[signal.event_key] = payload
             detection_delays[signal.event_key] = detection_delay
 
         latest = cycle.frames[-1].snapshot
-        latest_relative = assess_relative_performance(latest)
+        latest_relative = assess_relative_performance(
+            latest,
+            sensitivity=sensitivity,
+        )
+        latest_situation = assess_market_situation(latest, latest_relative)
         if consume_volume and not signals and cycle.volume is not None:
             signal = VolumeSignal(
                 event_key=(
@@ -223,6 +286,7 @@ class MarketCycleService:
                 cycle.volume,
                 volume_assessment,
                 detection_delay_seconds=detection_delay,
+                situation=latest_situation,
             )
             alerts.append(
                 AlertRecord(
@@ -269,6 +333,9 @@ class MarketCycleService:
                 latest_relative,
                 cycle.volume,
                 volume_assessment,
+                latest_situation.verdict.value,
+                latest_situation.confidence,
+                latest_situation.sensitivity_adjusted,
             ),
         )
 
@@ -315,6 +382,9 @@ class MarketCycleService:
         relative: RelativeAssessment,
         volume: VolumeSnapshot | None,
         volume_assessment: VolumeAssessment,
+        situation: str,
+        situation_confidence: str,
+        sensitivity_adjusted: bool,
     ) -> dict[str, object]:
         context: dict[str, object] = {
             "direction": snapshot.direction.value,
@@ -325,6 +395,12 @@ class MarketCycleService:
             "peers": {
                 "symbols": list(relative.peer_symbols),
                 "outcome": relative.peers.value,
+            },
+            "situation": {
+                "verdict": situation,
+                "confidence": situation_confidence,
+                "sensitivity_adjusted": sensitivity_adjusted,
+                "model_samples": relative.model_samples,
             },
         }
         if volume is not None and volume_assessment.is_ready:
@@ -338,6 +414,48 @@ class MarketCycleService:
         else:
             context["volume"] = {"status": "unavailable"}
         return context
+
+
+def _contextual_catalysts(
+    catalysts: Sequence[Catalyst],
+    observed_at: datetime,
+    *,
+    window: timedelta = timedelta(hours=6),
+) -> tuple[Catalyst, ...]:
+    eligible = [
+        catalyst
+        for catalyst in catalysts
+        if abs(catalyst.published_at - observed_at) <= window
+        and catalyst.source_tier in {"official", "primary_reporting"}
+    ]
+    return tuple(eligible[:2])
+
+
+def _alert_context(
+    signal: PriceBandSignal,
+    relative: RelativeAssessment,
+    volume_assessment: VolumeAssessment,
+    situation: str,
+    catalysts: Sequence[Catalyst],
+) -> dict[str, object]:
+    return {
+        "version": 1,
+        "trading_date": signal.trading_date.isoformat(),
+        "direction": signal.direction.value,
+        "level": signal.level,
+        "situation": situation,
+        "benchmark_outcome": relative.benchmark.value,
+        "peer_outcome": relative.peers.value,
+        "volume_status": (
+            "exploded"
+            if volume_assessment.is_exploded
+            else "normal"
+            if volume_assessment.is_ready
+            else "unavailable"
+        ),
+        "catalyst_ids": [item.canonical_id for item in catalysts],
+        "explanation_status": "related_evidence" if catalysts else "unexplained",
+    }
 
 
 class OutboxDeliveryService:

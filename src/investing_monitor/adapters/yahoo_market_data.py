@@ -14,10 +14,12 @@ from investing_monitor.domain.models import (
     InstrumentProfile,
     MarketCycle,
     MarketFrame,
+    MarketSensitivity,
     MarketSession,
     MarketSnapshot,
     VolumeSnapshot,
 )
+from investing_monitor.domain.situation import build_market_sensitivity
 from investing_monitor.runtime.tick import NEW_YORK
 
 
@@ -196,6 +198,7 @@ class YahooChartClient:
         interval: str,
         range_: str,
         include_prepost: bool,
+        retry_delays: Sequence[float] | None = None,
     ) -> dict[str, YahooChart]:
         normalized = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
         if not normalized:
@@ -210,7 +213,7 @@ class YahooChartClient:
             },
             label=f"spark for {','.join(normalized)}",
             parser=lambda payload: parse_spark_payload(payload, interval),
-            retry_delays=None,
+            retry_delays=retry_delays,
         )
 
     def _fetch_parsed(
@@ -281,6 +284,38 @@ class YahooMarketDataAdapter:
         self.interval = interval
         self.regular_freshness = regular_freshness
         self.extended_freshness = extended_freshness
+
+    def fetch_sensitivity(self, now: datetime) -> MarketSensitivity:
+        now = _utc(now)
+        symbols = (
+            self.profile.ticker,
+            self.profile.benchmark,
+            *self.profile.peers,
+        )
+        charts = self.client.fetch_many(
+            symbols,
+            interval="1d",
+            range_="6mo",
+            include_prepost=False,
+            retry_delays=(0, 5),
+        )
+        closes = {
+            symbol: _daily_closes(charts[symbol])
+            for symbol in symbols
+            if symbol in charts
+        }
+        model = build_market_sensitivity(
+            ticker=self.profile.ticker,
+            benchmark_symbol=self.profile.benchmark,
+            peer_symbols=self.profile.peers,
+            daily_closes=closes,
+            calculated_at=now,
+        )
+        if model.benchmark_beta is None and model.peer_beta is None:
+            raise YahooMarketDataError(
+                "Yahoo daily history is insufficient for a sensitivity model"
+            )
+        return model
 
     def fetch_cycle(
         self,
@@ -732,6 +767,13 @@ def _positive_float(value: Any) -> float | None:
 
 def _change_pct(current: float, reference: float) -> float:
     return (current - reference) / reference * 100
+
+
+def _daily_closes(chart: YahooChart) -> dict[date, float]:
+    closes: dict[date, float] = {}
+    for bar in chart.bars:
+        closes[bar.observed_at.astimezone(NEW_YORK).date()] = bar.close
+    return closes
 
 
 def _interval_seconds(interval: str) -> int:

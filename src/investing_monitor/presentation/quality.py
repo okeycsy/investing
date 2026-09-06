@@ -33,9 +33,10 @@ REQUIRED_TEXT = {
     "catalyst": ("확인된 사실",),
     "filing": ("확인된 사실",),
     "insider": ("거래 규모",),
+    "move_followup": ("후속 확인", "새로 확인된 근거", "인과관계"),
 }
 
-SOURCE_REQUIRED_TYPES = {"catalyst", "filing", "insider"}
+SOURCE_REQUIRED_TYPES = {"catalyst", "filing", "insider", "move_followup"}
 
 
 class MessageQualityError(ValueError):

@@ -17,13 +17,21 @@ from investing_monitor.domain.models import (
     OfficialEvent,
     PriceBandSignal,
     RelativeOutcome,
+    SituationVerdict,
     ThesisImpact,
     VolumeSignal,
     VolumeSnapshot,
 )
-from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessment
+from investing_monitor.domain.policies import (
+    RelativeAssessment,
+    SituationAssessment,
+    VolumeAssessment,
+)
 from investing_monitor.presentation.close_messages import build_close_message
-from investing_monitor.presentation.evidence_messages import build_evidence_message
+from investing_monitor.presentation.evidence_messages import (
+    build_evidence_message,
+    build_move_followup_message,
+)
 from investing_monitor.presentation.quality import audit_message
 from investing_monitor.presentation.slack_messages import (
     build_price_band_message,
@@ -38,6 +46,7 @@ PREVIEW_KINDS = (
     "volume",
     "catalyst",
     "filing",
+    "move-followup",
     "close",
     "weekly",
 )
@@ -103,9 +112,14 @@ def _source_message(
     relative = RelativeAssessment(
         benchmark=RelativeOutcome.OUTPERFORM,
         benchmark_symbol=benchmark,
-        peers=RelativeOutcome.INLINE,
+        peers=RelativeOutcome.OUTPERFORM,
         peer_symbols=peers,
         peer_average_change_pct=1.2,
+    )
+    situation = SituationAssessment(
+        verdict=SituationVerdict.COMPANY_STRENGTH,
+        confidence="high",
+        sensitivity_adjusted=True,
     )
     volume = VolumeSnapshot(
         observed_volume=3_095_486,
@@ -131,6 +145,8 @@ def _source_message(
         confidence="high",
         facts=("냉각 생산능력 확대 일정이 공식 발표됐다.",),
         source_kind="ir",
+        source_tier="official",
+        event_type="capacity",
     )
 
     if kind in {"move-up", "move-down"}:
@@ -154,6 +170,15 @@ def _source_message(
                 volume,
                 volume_assessment,
                 (catalyst,),
+                situation=(
+                    situation
+                    if direction is Direction.UP
+                    else SituationAssessment(
+                        verdict=SituationVerdict.COMPANY_WEAKNESS,
+                        confidence="high",
+                        sensitivity_adjusted=True,
+                    )
+                ),
             ),
         )
 
@@ -182,6 +207,7 @@ def _source_message(
                 relative,
                 volume,
                 volume_assessment,
+                situation=situation,
             ),
         )
     if kind == "close":
@@ -193,6 +219,7 @@ def _source_message(
                 volume,
                 volume_assessment,
                 (catalyst,),
+                situation,
             ),
         )
     if kind == "weekly":
@@ -220,46 +247,84 @@ def _source_message(
             ),
         )
 
-    evidence_kind = EvidenceKind.SEC if kind == "filing" else EvidenceKind.NEWS
+    is_filing = kind == "filing"
+    evidence_kind = EvidenceKind.SEC if is_filing else EvidenceKind.NEWS
+    source_text = (
+        "Vertiv announced a material expansion of liquid cooling capacity."
+        if is_filing
+        else "Vertiv signed a $250 million data center supply contract."
+    )
     candidate = EvidenceCandidate(
         candidate_id=f"preview-{kind}",
         ticker=ticker,
         kind=evidence_kind,
-        headline="Vertiv expands liquid cooling capacity",
-        source_name="SEC EDGAR" if kind == "filing" else "Reuters",
+        headline=(
+            "Vertiv expands liquid cooling capacity"
+            if is_filing
+            else "Vertiv signs $250 million data center supply contract"
+        ),
+        source_name="SEC EDGAR" if is_filing else "Reuters",
         source_url=(
             "https://www.sec.gov/Archives/edgar/data/1674101/"
-            if kind == "filing"
+            if is_filing
             else "https://www.reuters.com/technology/"
         ),
         published_at=now,
-        source_text="Vertiv announced a material expansion of liquid cooling capacity.",
-        metadata={"form": "8-K"} if kind == "filing" else {},
+        source_text=source_text,
+        metadata={"form": "8-K"} if is_filing else {},
     )
     analysis = EvidenceAnalysis(
         candidate_id=candidate.candidate_id,
         relevant=True,
-        headline_ko="버티브, 액체냉각 생산능력 확대 확정",
+        headline_ko=(
+            "버티브, 액체냉각 생산능력 확대 확정"
+            if is_filing
+            else "버티브, 대형 데이터센터 공급 계약 체결"
+        ),
         summary_ko=(
             "회사가 증설 규모와 가동 일정을 공식화했다. "
             "AI 데이터센터 냉각 수요 대응 여력이 커진다."
+            if is_filing
+            else "회사가 2억 5천만 달러 규모의 전력·냉각 공급 계약을 체결했다. "
+            "수주 가시성을 직접 뒷받침하는 새 사실이다."
         ),
         facts=(
             GroundedFact(
                 source_text=candidate.source_text,
-                fact_ko="액체냉각 생산능력 확대 계획이 공식 발표됐다.",
+                fact_ko=(
+                    "액체냉각 생산능력 확대 계획이 공식 발표됐다."
+                    if is_filing
+                    else "2억 5천만 달러 규모 공급 계약을 체결했다."
+                ),
             ),
         ),
         thesis_impact="strengthen",
-        impact_reason_ko="핵심 냉각 사업의 공급 능력 확대가 확인됐다.",
+        impact_reason_ko=(
+            "핵심 냉각 사업의 공급 능력 확대가 확인됐다."
+            if is_filing
+            else "대형 수주가 backlog와 매출 가시성을 강화한다."
+        ),
         confidence="high",
-        event_type="capacity",
+        event_type="capacity" if is_filing else "major_contract",
         company_directness=True,
         new_fact=True,
         materiality="high",
-        source_tier="official" if kind == "filing" else "primary_reporting",
+        source_tier="official" if is_filing else "primary_reporting",
         alert_worthy=True,
     )
+    if kind == "move-followup":
+        return (
+            "move_followup",
+            build_move_followup_message(
+                {
+                    "direction": "up",
+                    "level": 4,
+                },
+                now - timedelta(minutes=35),
+                candidate,
+                analysis,
+            ),
+        )
     return (
         "filing" if kind == "filing" else "catalyst",
         build_evidence_message(candidate, analysis),

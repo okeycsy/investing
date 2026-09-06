@@ -28,6 +28,7 @@ from investing_monitor.domain.models import (
     Catalyst,
     CloseMarketContext,
     MarketFrame,
+    MarketSensitivity,
     MarketSession,
     MarketSnapshot,
     OfficialEvent,
@@ -46,7 +47,7 @@ from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -93,6 +94,19 @@ CREATE TABLE IF NOT EXISTS market_volume_observations (
 CREATE INDEX IF NOT EXISTS idx_market_volume_ticker_date
 ON market_volume_observations(ticker, trading_date, observed_at DESC);
 
+CREATE TABLE IF NOT EXISTS market_sensitivity_models (
+    ticker TEXT PRIMARY KEY,
+    benchmark_symbol TEXT NOT NULL,
+    peer_symbols_json TEXT NOT NULL DEFAULT '[]',
+    calculated_at TEXT NOT NULL,
+    benchmark_beta REAL,
+    benchmark_residual_band_pct REAL,
+    benchmark_samples INTEGER NOT NULL DEFAULT 0,
+    peer_beta REAL,
+    peer_residual_band_pct REAL,
+    peer_samples INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS evidence_candidates (
     candidate_id TEXT PRIMARY KEY,
     ticker TEXT NOT NULL,
@@ -136,6 +150,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     recorded_at TEXT,
     build_sha TEXT NOT NULL DEFAULT '',
     run_id TEXT NOT NULL DEFAULT '',
+    context_json TEXT NOT NULL DEFAULT '{}',
     payload_json TEXT NOT NULL
 );
 
@@ -279,6 +294,12 @@ class SQLiteMonitorRepository:
             )
             self._ensure_column(
                 connection,
+                "alerts",
+                "context_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection,
                 "run_checkpoints",
                 "build_sha",
                 "TEXT NOT NULL DEFAULT ''",
@@ -339,7 +360,7 @@ class SQLiteMonitorRepository:
             connection.execute(
                 "INSERT OR IGNORE INTO alerts "
                 "(event_key, ticker, alert_type, created_at, recorded_at, build_sha, "
-                "run_id, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "run_id, context_json, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     alert.event_key,
                     alert.ticker.upper(),
@@ -348,6 +369,11 @@ class SQLiteMonitorRepository:
                     recorded_at,
                     build_sha,
                     run_id,
+                    json.dumps(
+                        dict(alert.context),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
                     payload_json,
                 ),
             ).rowcount
@@ -375,6 +401,7 @@ class SQLiteMonitorRepository:
         signal: PriceBandSignal,
         state: PriceBandState,
         payload: dict,
+        context: Mapping[str, object] | None = None,
     ) -> bool:
         require_valid_message("price_band", payload)
         payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -385,6 +412,7 @@ class SQLiteMonitorRepository:
             alert_type="price_band",
             created_at=signal.observed_at,
             payload=payload,
+            context=dict(context or {}),
         )
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -424,6 +452,119 @@ class SQLiteMonitorRepository:
                 (ticker.upper(),),
             ).fetchone()
         return _parse_datetime(row["observed_at"]) if row else None
+
+    def load_market_sensitivity(self, ticker: str) -> MarketSensitivity | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT ticker, benchmark_symbol, peer_symbols_json, calculated_at, "
+                "benchmark_beta, benchmark_residual_band_pct, benchmark_samples, "
+                "peer_beta, peer_residual_band_pct, peer_samples "
+                "FROM market_sensitivity_models WHERE ticker = ?",
+                (ticker.upper(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return MarketSensitivity(
+            ticker=row["ticker"],
+            benchmark_symbol=row["benchmark_symbol"],
+            peer_symbols=tuple(json.loads(row["peer_symbols_json"])),
+            calculated_at=_required_datetime(row["calculated_at"]),
+            benchmark_beta=row["benchmark_beta"],
+            benchmark_residual_band_pct=row["benchmark_residual_band_pct"],
+            benchmark_samples=row["benchmark_samples"],
+            peer_beta=row["peer_beta"],
+            peer_residual_band_pct=row["peer_residual_band_pct"],
+            peer_samples=row["peer_samples"],
+        )
+
+    def save_market_sensitivity(self, sensitivity: MarketSensitivity) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO market_sensitivity_models "
+                "(ticker, benchmark_symbol, peer_symbols_json, calculated_at, "
+                "benchmark_beta, benchmark_residual_band_pct, benchmark_samples, "
+                "peer_beta, peer_residual_band_pct, peer_samples) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(ticker) DO UPDATE SET "
+                "benchmark_symbol = excluded.benchmark_symbol, "
+                "peer_symbols_json = excluded.peer_symbols_json, "
+                "calculated_at = excluded.calculated_at, "
+                "benchmark_beta = excluded.benchmark_beta, "
+                "benchmark_residual_band_pct = excluded.benchmark_residual_band_pct, "
+                "benchmark_samples = excluded.benchmark_samples, "
+                "peer_beta = excluded.peer_beta, "
+                "peer_residual_band_pct = excluded.peer_residual_band_pct, "
+                "peer_samples = excluded.peer_samples",
+                (
+                    sensitivity.ticker,
+                    sensitivity.benchmark_symbol,
+                    json.dumps(sensitivity.peer_symbols, separators=(",", ":")),
+                    _utc_iso(sensitivity.calculated_at),
+                    sensitivity.benchmark_beta,
+                    sensitivity.benchmark_residual_band_pct,
+                    sensitivity.benchmark_samples,
+                    sensitivity.peer_beta,
+                    sensitivity.peer_residual_band_pct,
+                    sensitivity.peer_samples,
+                ),
+            )
+
+    def latest_price_alert_context(
+        self,
+        ticker: str,
+        trading_date: date,
+        direction: str,
+    ) -> AlertRecord | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT event_key, ticker, alert_type, created_at, recorded_at, "
+                "build_sha, run_id, context_json, payload_json FROM alerts "
+                "WHERE ticker = ? AND alert_type = 'price_band' "
+                "AND json_extract(context_json, '$.trading_date') = ? "
+                "AND json_extract(context_json, '$.direction') = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (ticker.upper(), trading_date.isoformat(), direction),
+            ).fetchone()
+        return _alert_from_row(row) if row else None
+
+    def unexplained_price_alert_near(
+        self,
+        ticker: str,
+        published_at: datetime,
+        *,
+        window: timedelta = timedelta(hours=6),
+    ) -> AlertRecord | None:
+        start = published_at - window
+        end = published_at + window
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT a.event_key, a.ticker, a.alert_type, a.created_at, "
+                "a.recorded_at, a.build_sha, a.run_id, a.context_json, a.payload_json "
+                "FROM alerts a WHERE a.ticker = ? AND a.alert_type = 'price_band' "
+                "AND a.created_at BETWEEN ? AND ? "
+                "AND json_extract(a.context_json, '$.explanation_status') = 'unexplained' "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM alerts followup "
+                "WHERE followup.alert_type = 'move_followup' "
+                "AND json_extract(followup.context_json, '$.parent_event_key') = a.event_key"
+                ") ORDER BY ABS(julianday(a.created_at) - julianday(?)) ASC LIMIT 1",
+                (
+                    ticker.upper(),
+                    _utc_iso(start),
+                    _utc_iso(end),
+                    _utc_iso(published_at),
+                ),
+            ).fetchone()
+        return _alert_from_row(row) if row else None
+
+    def alert_exists(self, event_key: str) -> bool:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT 1 FROM alerts WHERE event_key = ? "
+                "OR json_extract(context_json, '$.evidence_event_key') = ?",
+                (event_key, event_key),
+            ).fetchone()
+        return row is not None
 
     def record_market_cycle(
         self,
@@ -620,23 +761,11 @@ class SQLiteMonitorRepository:
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT event_key, ticker, alert_type, created_at, recorded_at, "
-                "build_sha, run_id, payload_json FROM alerts "
+                "build_sha, run_id, context_json, payload_json FROM alerts "
                 "ORDER BY COALESCE(recorded_at, created_at) DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [
-            AlertRecord(
-                event_key=row["event_key"],
-                ticker=row["ticker"],
-                alert_type=row["alert_type"],
-                created_at=_required_datetime(row["created_at"]),
-                payload=json.loads(row["payload_json"]),
-                recorded_at=_parse_datetime(row["recorded_at"]),
-                build_sha=row["build_sha"],
-                run_id=row["run_id"],
-            )
-            for row in rows
-        ]
+        return [_alert_from_row(row) for row in rows]
 
     def recent_market_observations(
         self,
@@ -986,6 +1115,8 @@ class SQLiteMonitorRepository:
                     fact["fact_ko"] for fact in payload.get("facts") or []
                 ),
                 source_kind=row["source_kind"],
+                source_tier=analysis.source_tier,
+                event_type=analysis.event_type,
             )
             grouped.setdefault(catalyst.canonical_id, []).append(catalyst)
         catalysts = []
@@ -1353,6 +1484,21 @@ def _utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("runtime timestamps must be timezone-aware")
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _alert_from_row(row: sqlite3.Row) -> AlertRecord:
+    context_json = row["context_json"] if "context_json" in row.keys() else "{}"
+    return AlertRecord(
+        event_key=row["event_key"],
+        ticker=row["ticker"],
+        alert_type=row["alert_type"],
+        created_at=_required_datetime(row["created_at"]),
+        payload=json.loads(row["payload_json"]),
+        recorded_at=_parse_datetime(row["recorded_at"]),
+        build_sha=row["build_sha"],
+        run_id=row["run_id"],
+        context=json.loads(context_json or "{}"),
+    )
 
 
 def _catalyst_source_rank(source_kind: str, source_name: str) -> int:

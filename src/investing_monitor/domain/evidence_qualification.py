@@ -51,7 +51,12 @@ def evidence_disposition(
         and analysis.materiality == EvidenceMateriality.HIGH.value
         and analysis.event_type in IMMEDIATE_EVENT_TYPES
     ):
-        return EvidenceDisposition.IMMEDIATE
+        if analysis.source_tier in {
+            EvidenceSourceTier.OFFICIAL.value,
+            EvidenceSourceTier.PRIMARY_REPORTING.value,
+        }:
+            return EvidenceDisposition.IMMEDIATE
+        return EvidenceDisposition.BRIEFING
     if (
         analysis.materiality
         in {EvidenceMateriality.HIGH.value, EvidenceMateriality.MEDIUM.value}

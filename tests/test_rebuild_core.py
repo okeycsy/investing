@@ -19,15 +19,18 @@ from investing_monitor.domain.models import (
     Catalyst,
     Direction,
     MarketSession,
+    MarketSensitivity,
     MarketSnapshot,
     PriceBandState,
     ThesisImpact,
+    SituationVerdict,
     VolumeSnapshot,
 )
 from investing_monitor.domain.policies import (
     PriceBandPolicy,
     RelativeOutcome,
     assess_intraday_volume,
+    assess_market_situation,
     assess_relative_performance,
 )
 from investing_monitor.ports.providers import DeliveryOutcomeUnknown
@@ -125,6 +128,58 @@ class ContextPolicyTest(unittest.TestCase):
 
         self.assertFalse(assess_intraday_volume(insufficient).is_ready)
         self.assertTrue(assess_intraday_volume(ready).is_exploded)
+
+    def test_sensitivity_adjustment_distinguishes_expected_high_beta_move(self):
+        market = snapshot(
+            4.4,
+            benchmark_change_pct=3.0,
+            peer_changes={"ETN": 2.8, "GEV": 3.0, "NVT": 3.2},
+        )
+        sensitivity = MarketSensitivity(
+            ticker="VRT",
+            benchmark_symbol="SOXX",
+            peer_symbols=("ETN", "GEV", "NVT"),
+            calculated_at=OBSERVED_AT,
+            benchmark_beta=1.5,
+            benchmark_residual_band_pct=1.0,
+            benchmark_samples=80,
+            peer_beta=1.5,
+            peer_residual_band_pct=1.0,
+            peer_samples=80,
+        )
+
+        raw = assess_relative_performance(market)
+        adjusted = assess_relative_performance(
+            market,
+            sensitivity=sensitivity,
+        )
+        situation = assess_market_situation(market, adjusted)
+
+        self.assertEqual(raw.benchmark, RelativeOutcome.OUTPERFORM)
+        self.assertEqual(adjusted.benchmark, RelativeOutcome.INLINE)
+        self.assertEqual(adjusted.peers, RelativeOutcome.INLINE)
+        self.assertEqual(situation.verdict, SituationVerdict.BROADLY_EXPLAINED)
+        self.assertTrue(situation.sensitivity_adjusted)
+
+    def test_company_specific_verdict_requires_both_comparison_axes(self):
+        market = MarketSnapshot(
+            ticker="VRT",
+            trading_date=date(2026, 9, 2),
+            observed_at=OBSERVED_AT,
+            session=MarketSession.REGULAR,
+            change_pct=4.2,
+            benchmark_symbol="SOXX",
+            benchmark_change_pct=0.5,
+            peer_changes={"ETN": 0.4},
+        )
+
+        relative = assess_relative_performance(market)
+        situation = assess_market_situation(market, relative)
+
+        self.assertEqual(relative.benchmark, RelativeOutcome.OUTPERFORM)
+        self.assertEqual(relative.peers, RelativeOutcome.UNAVAILABLE)
+        self.assertEqual(situation.verdict, SituationVerdict.UNAVAILABLE)
+        self.assertEqual(situation.confidence, "low")
 
 
 class MessageContractTest(unittest.TestCase):

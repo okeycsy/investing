@@ -8,11 +8,13 @@ from investing_monitor.domain.models import (
     Catalyst,
     CloseMarketContext,
     MarketSession,
+    MarketSensitivity,
     MarketSnapshot,
     ThesisImpact,
 )
 from investing_monitor.domain.policies import (
     assess_intraday_volume,
+    assess_market_situation,
     assess_relative_performance,
 )
 from investing_monitor.ports.repository import AlertRecord, MonitorRepository
@@ -61,6 +63,7 @@ class CloseBriefService:
         *,
         trading_open_at: datetime,
         created_at: datetime,
+        sensitivity: MarketSensitivity | None = None,
     ) -> CloseBriefReport:
         context = self.repository.load_close_market_context(ticker, trading_date)
         if context is None:
@@ -72,14 +75,19 @@ class CloseBriefService:
             trading_open_at,
             limit=2,
         )
-        relative = assess_relative_performance(context.snapshot)
+        relative = assess_relative_performance(
+            context.snapshot,
+            sensitivity=sensitivity,
+        )
         volume_assessment = assess_intraday_volume(context.volume)
+        situation = assess_market_situation(context.snapshot, relative)
         payload = build_close_message(
             context.snapshot,
             relative,
             context.volume,
             volume_assessment,
             catalysts,
+            situation,
         )
         event_key = f"{ticker.upper()}:{trading_date.isoformat()}:close"
         inserted = self.repository.record_alert(

@@ -35,6 +35,7 @@ on:
           - volume
           - catalyst
           - filing
+          - move-followup
           - close
           - weekly
 

@@ -11,7 +11,13 @@ from investing_monitor.domain.models import (
     VolumeSignal,
     VolumeSnapshot,
 )
-from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessment
+from investing_monitor.domain.policies import (
+    RelativeAssessment,
+    SituationAssessment,
+    VolumeAssessment,
+)
+from investing_monitor.domain.situation import MarketContextDelta
+from investing_monitor.presentation.market_context import delta_text, situation_text
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -25,6 +31,8 @@ def build_price_band_message(
     catalysts: Sequence[Catalyst],
     *,
     detection_delay_seconds: int = 0,
+    situation: SituationAssessment | None = None,
+    delta: MarketContextDelta | None = None,
 ) -> dict:
     direction_icon = "📈" if signal.direction is Direction.UP else "📉"
     direction_label = "상승" if signal.direction is Direction.UP else "하락"
@@ -56,8 +64,14 @@ def build_price_band_message(
                 detection_delay_seconds,
             )
         ),
-        _section(_relative_text(relative)),
     ]
+
+    if situation is not None:
+        blocks.append(_section(situation_text(situation, signal.direction)))
+    rendered_delta = delta_text(delta)
+    if rendered_delta:
+        blocks.append(_section(rendered_delta))
+    blocks.append(_section(_relative_text(relative)))
 
     if volume is not None and volume_assessment.is_ready:
         status = "🔥 거래량 동반" if volume_assessment.is_exploded else "거래량은 아직 평시 범위"
@@ -73,9 +87,19 @@ def build_price_band_message(
 
     selected = list(catalysts[:2])
     if selected:
-        blocks.append(_section("*무슨 일이 있었나*"))
+        blocks.append(_section("📰 *최근 확인된 관련 사건*"))
         for catalyst in selected:
             blocks.append(_section(_catalyst_text(catalyst)))
+        blocks.append(
+            _context("발표 시각이 인접한 근거이며 주가 움직임의 인과관계를 단정하지 않음")
+        )
+    else:
+        blocks.append(
+            _section(
+                "🔎 *직접 촉매 아직 확인되지 않음*\n"
+                "시장 수급 또는 아직 보도되지 않은 종목 고유 요인일 수 있음"
+            )
+        )
 
     return {
         "text": f"${signal.ticker} {signed_level:+.1f}% {direction_label} 구간 진입",
@@ -91,6 +115,7 @@ def build_volume_message(
     volume_assessment: VolumeAssessment,
     *,
     detection_delay_seconds: int = 0,
+    situation: SituationAssessment | None = None,
 ) -> dict:
     timestamp = signal.observed_at.astimezone(KST).strftime("%m/%d %H:%M KST")
     direction_icon = {
@@ -104,23 +129,26 @@ def build_volume_message(
         Direction.FLAT: "보합",
     }[snapshot.direction]
     ratio = volume_assessment.ratio or 0.0
-    return {
-        "text": f"${signal.ticker} 거래량 {ratio:.1f}배 확대",
-        "blocks": [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"🔥 ${signal.ticker} 거래량 {ratio:.1f}배 확대",
-                },
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"🔥 ${signal.ticker} 거래량 {ratio:.1f}배 확대",
             },
-            _context(
-                _detection_context(
-                    "거래량 기준 시각",
-                    timestamp,
-                    detection_delay_seconds,
-                )
-            ),
+        },
+        _context(
+            _detection_context(
+                "거래량 기준 시각",
+                timestamp,
+                detection_delay_seconds,
+            )
+        ),
+    ]
+    if situation is not None:
+        blocks.append(_section(situation_text(situation, snapshot.direction)))
+    blocks.extend(
+        [
             _section(
                 f"*동시간대 거래량 터짐*\n"
                 f"누적 {volume.observed_volume:,}주 | "
@@ -128,7 +156,11 @@ def build_volume_message(
                 f"{volume.expected_volume:,}주 | {ratio:.1f}배"
             ),
             _section(f"{direction_icon} *종목 방향: {direction_label}*\n{_relative_text(relative)}"),
-        ],
+        ]
+    )
+    return {
+        "text": f"${signal.ticker} 거래량 {ratio:.1f}배 확대",
+        "blocks": blocks,
     }
 
 

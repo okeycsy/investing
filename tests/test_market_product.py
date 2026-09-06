@@ -29,13 +29,17 @@ from investing_monitor.adapters.yahoo_market_data import (
 )
 from investing_monitor.application.monitor import MarketCycleService
 from investing_monitor.domain.models import (
+    Catalyst,
     InstrumentProfile,
     MarketCycle,
     MarketFrame,
+    MarketSensitivity,
     MarketSession,
     MarketSnapshot,
+    ThesisImpact,
     VolumeSnapshot,
 )
+from investing_monitor.domain.situation import build_market_sensitivity
 from investing_monitor.runtime.tick import NEW_YORK
 
 
@@ -356,6 +360,97 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
         self.assertTrue(all(value is None for value in snapshot.peer_changes.values()))
 
 
+class SensitivityModelTest(unittest.TestCase):
+    def test_six_month_history_estimates_benchmark_and_peer_sensitivity(self):
+        dates = [TRADING_DATE - timedelta(days=70 - index) for index in range(61)]
+        factors = [
+            (-1 if index % 2 else 1) * (0.4 + (index % 5) * 0.1)
+            for index in range(60)
+        ]
+
+        def closes(multiplier: float) -> dict[date, float]:
+            result = {dates[0]: 100.0}
+            price = 100.0
+            for trading_date, change in zip(dates[1:], factors, strict=True):
+                price *= 1.0 + (change * multiplier) / 100.0
+                result[trading_date] = price
+            return result
+
+        model = build_market_sensitivity(
+            ticker="VRT",
+            benchmark_symbol="SOXX",
+            peer_symbols=("ETN", "GEV", "NVT"),
+            daily_closes={
+                "VRT": closes(1.6),
+                "SOXX": closes(1.0),
+                "ETN": closes(1.0),
+                "GEV": closes(1.0),
+                "NVT": closes(1.0),
+            },
+            calculated_at=et(TRADING_DATE, 10, 0),
+        )
+
+        self.assertAlmostEqual(model.benchmark_beta, 1.6, places=2)
+        self.assertAlmostEqual(model.peer_beta, 1.6, places=2)
+        self.assertEqual(model.benchmark_samples, 60)
+        self.assertEqual(model.peer_samples, 60)
+        self.assertEqual(model.benchmark_residual_band_pct, 0.75)
+
+    def test_yahoo_adapter_builds_sensitivity_from_daily_charts(self):
+        dates = [TRADING_DATE - timedelta(days=70 - index) for index in range(61)]
+
+        def chart(symbol: str, multiplier: float) -> YahooChart:
+            price = 100.0
+            bars = [YahooBar(et(dates[0], 16, 0), price, 0)]
+            for index, trading_date in enumerate(dates[1:]):
+                factor = (-1 if index % 2 else 1) * (0.4 + (index % 5) * 0.1)
+                price *= 1.0 + (factor * multiplier) / 100.0
+                bars.append(YahooBar(et(trading_date, 16, 0), price, 0))
+            return YahooChart(
+                symbol=symbol,
+                interval=timedelta(days=1),
+                bars=tuple(bars),
+                metadata={},
+            )
+
+        client = FakeChartClient(
+            {
+                "VRT": chart("VRT", 1.5),
+                "SOXX": chart("SOXX", 1.0),
+                "ETN": chart("ETN", 1.0),
+                "GEV": chart("GEV", 1.0),
+                "NVT": chart("NVT", 1.0),
+            }
+        )
+        adapter = YahooMarketDataAdapter(client, XNYSCalendar(), PROFILE)
+
+        model = adapter.fetch_sensitivity(et(TRADING_DATE, 10, 0))
+
+        self.assertAlmostEqual(model.benchmark_beta, 1.5, places=2)
+        self.assertAlmostEqual(model.peer_beta, 1.5, places=2)
+        self.assertEqual(client.calls, ["VRT,SOXX,ETN,GEV,NVT"])
+
+    def test_sensitivity_model_survives_repository_round_trip(self):
+        model = MarketSensitivity(
+            ticker="vrt",
+            benchmark_symbol="soxx",
+            peer_symbols=("etn", "nvt", "gev"),
+            calculated_at=et(TRADING_DATE, 10, 0),
+            benchmark_beta=0.875,
+            benchmark_residual_band_pct=2.972,
+            benchmark_samples=127,
+            peer_beta=1.225,
+            peer_residual_band_pct=2.464,
+            peer_samples=127,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+
+            repository.save_market_sensitivity(model)
+
+            self.assertEqual(repository.load_market_sensitivity("VRT"), model)
+
+
 class MarketCycleServiceTest(unittest.TestCase):
     def test_replay_collapses_multiple_upward_bands_to_highest_event(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -470,6 +565,78 @@ class MarketCycleServiceTest(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             self.assertIn("거래량 동반", json.dumps(pending[0].payload, ensure_ascii=False))
             self.assertTrue(repository.load_price_band_state("VRT").volume_alerted)
+
+    def test_next_price_band_leads_with_context_changes_since_prior_alert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = MarketCycleService(repository)
+
+            first = service.process(
+                self._cycle(change=4.2, minute=0, observed=100, expected=200)
+            )
+            second = service.process(
+                self._cycle(change=5.2, minute=5, observed=400, expected=200)
+            )
+
+            first_text = json.dumps(first.messages[0], ensure_ascii=False)
+            second_text = json.dumps(second.messages[0], ensure_ascii=False)
+            self.assertIn("직접 촉매 아직 확인되지 않음", first_text)
+            self.assertIn("종목 고유 강세 가능성 있음", first_text)
+            self.assertIn("직전 가격 알림 이후", second_text)
+            self.assertIn("거래량: 평시 범위 → 평시 범위 초과", second_text)
+            previous = repository.latest_price_alert_context(
+                "VRT",
+                TRADING_DATE,
+                "up",
+            )
+            self.assertEqual(previous.context["level"], 5)
+            self.assertEqual(previous.context["explanation_status"], "unexplained")
+
+    def test_move_context_skips_secondary_sources_without_hiding_official_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            catalysts = (
+                Catalyst(
+                    canonical_id="secondary-one",
+                    headline="2차 분석 1",
+                    summary="공식 확인 전 분석이다.",
+                    source_name="Industry Blog",
+                    source_url="https://example.com/secondary-one",
+                    published_at=et(TRADING_DATE, 9, 55),
+                    source_tier="secondary",
+                ),
+                Catalyst(
+                    canonical_id="secondary-two",
+                    headline="2차 분석 2",
+                    summary="공식 확인 전 분석이다.",
+                    source_name="Market Blog",
+                    source_url="https://example.com/secondary-two",
+                    published_at=et(TRADING_DATE, 9, 50),
+                    source_tier="secondary",
+                ),
+                Catalyst(
+                    canonical_id="official-contract",
+                    headline="대형 데이터센터 공급 계약 공식 발표",
+                    summary="회사가 계약 규모와 납품 일정을 공개했다.",
+                    source_name="Vertiv Investor Relations",
+                    source_url="https://investors.vertiv.com/contract",
+                    published_at=et(TRADING_DATE, 9, 30),
+                    impact=ThesisImpact.STRENGTHEN,
+                    confidence="high",
+                    source_tier="official",
+                    event_type="major_contract",
+                ),
+            )
+
+            report = MarketCycleService(repository).process(
+                self._cycle(change=4.2, minute=0, observed=100, expected=200),
+                catalysts,
+            )
+            rendered = json.dumps(report.messages[0], ensure_ascii=False)
+
+            self.assertIn("대형 데이터센터 공급 계약 공식 발표", rendered)
+            self.assertNotIn("2차 분석 1", rendered)
+            self.assertNotIn("2차 분석 2", rendered)
 
     def test_volume_without_move_creates_one_independent_alert(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -44,7 +44,10 @@ from investing_monitor.application.monitor import MarketCycleService, OutboxDeli
 from investing_monitor.application.quality import QualityReportService
 from investing_monitor.application.replay import MarketReplayLab
 from investing_monitor.application.sec_monitor import SecMonitorService
-from investing_monitor.presentation.evidence_messages import build_evidence_message
+from investing_monitor.presentation.evidence_messages import (
+    build_evidence_message,
+    build_move_followup_message,
+)
 from investing_monitor.presentation.operations import (
     build_quality_summary,
     build_tick_summary,
@@ -337,12 +340,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         service = MarketCycleService(repository, enqueue_alerts=production)
+        sensitivity = repository.load_market_sensitivity(profile.ticker)
+        if sensitivity is not None and (
+            sensitivity.benchmark_symbol != profile.benchmark
+            or sensitivity.peer_symbols != profile.peers
+        ):
+            sensitivity = None
         market_result: dict[str, object] = {}
         evidence_result: dict[str, object] = {}
         close_result: dict[str, object] = {}
         weekly_result: dict[str, object] = {}
 
         def handle_market(_task):
+            nonlocal sensitivity
             provider_started = monotonic()
             try:
                 cycle = adapter.fetch_cycle(
@@ -363,17 +373,54 @@ def main(argv: Sequence[str] | None = None) -> int:
                         }
                     },
                 ) from exc
+            sensitivity_status = "cached"
+            sensitivity_error = ""
+            if (
+                sensitivity is None
+                or now - sensitivity.calculated_at.astimezone(timezone.utc)
+                >= timedelta(days=7)
+            ):
+                try:
+                    refreshed = adapter.fetch_sensitivity(now)
+                except Exception as exc:
+                    sensitivity_error = str(exc)
+                    if (
+                        sensitivity is None
+                        or now - sensitivity.calculated_at.astimezone(timezone.utc)
+                        > timedelta(days=30)
+                    ):
+                        sensitivity = None
+                        sensitivity_status = "unavailable"
+                    else:
+                        sensitivity_status = "stale-cache"
+                else:
+                    repository.save_market_sensitivity(refreshed)
+                    sensitivity = refreshed
+                    sensitivity_status = "refreshed"
             report = service.process(
                 cycle,
                 repository.recent_catalysts(
                     profile.ticker,
                     now - timedelta(hours=24),
-                    limit=2,
+                    limit=20,
                 ),
                 detected_at=now,
+                sensitivity=sensitivity,
             )
             market_result.update(report.as_dict())
             market_result["source_age_seconds"] = cycle.source_age_seconds
+            market_result["sensitivity_model"] = {
+                "status": sensitivity_status,
+                "samples": (
+                    min(
+                        sensitivity.benchmark_samples,
+                        sensitivity.peer_samples,
+                    )
+                    if sensitivity
+                    else 0
+                ),
+                "error": sensitivity_error,
+            }
             return {
                 "observed_frames": report.observed_frames,
                 "replayed_frames": report.replayed_frames,
@@ -381,6 +428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "delayed_events": len(report.delayed_event_keys),
                 "max_detection_delay_seconds": report.max_detection_delay_seconds,
                 "source_age_seconds": cycle.source_age_seconds,
+                "sensitivity_model": market_result["sensitivity_model"],
                 "providers": {
                     "yahoo_market": {
                         "status": "success",
@@ -400,6 +448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 article_text=YahooArticleTextClient(),
                 filing_text=SecFilingTextClient(evidence_profile.sec_contact),
                 alert_builder=build_evidence_message,
+                move_followup_builder=build_move_followup_message,
                 enqueue_alerts=production,
             )
             yahoo_news = YahooNewsAdapter()
@@ -503,6 +552,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     close_date,
                     trading_open_at=calendar.regular_open(close_date),
                     created_at=now,
+                    sensitivity=sensitivity,
                 )
                 close_result.update(report.as_dict())
                 return {

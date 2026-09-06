@@ -751,12 +751,15 @@ def _product_quality(
 
     classifications = Counter()
     findings = []
-    evidence_alert_types = {"catalyst", "filing", "insider"}
+    evidence_alert_types = {"catalyst", "filing", "insider", "move_followup"}
     for alert in alerts:
         if alert.alert_type not in evidence_alert_types:
             continue
         source_url = _message_source_url(alert.payload)
         record = evidence_by_url.get(source_url)
+        evidence_event_key = str(
+            alert.context.get("evidence_event_key") or alert.event_key
+        )
         classification = "unassessed"
         reason = "source evidence is unavailable in the retained quality window"
         current_cluster = ""
@@ -772,7 +775,7 @@ def _product_quality(
                 classification = "retrospectively_filtered"
                 reason = record.status_reason or "current evidence rule filters this item"
             elif record.status == "analyzed" and record.relevant is True:
-                if record.cluster_key != alert.event_key:
+                if record.cluster_key != evidence_event_key:
                     classification = "duplicate_cluster_reconciled"
                     reason = "source was relinked to an earlier canonical event"
                 elif record.alert_disposition == "immediate":
@@ -794,6 +797,7 @@ def _product_quality(
         findings.append(
             {
                 "event_key": alert.event_key,
+                "evidence_event_key": evidence_event_key,
                 "created_at": alert.created_at.isoformat(),
                 "recorded_at": (
                     alert.recorded_at.isoformat() if alert.recorded_at else None

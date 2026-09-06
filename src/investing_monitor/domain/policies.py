@@ -5,10 +5,12 @@ from math import floor
 
 from .models import (
     Direction,
+    MarketSensitivity,
     MarketSnapshot,
     PriceBandSignal,
     PriceBandState,
     RelativeOutcome,
+    SituationVerdict,
     VolumeSnapshot,
 )
 
@@ -20,6 +22,16 @@ class RelativeAssessment:
     peers: RelativeOutcome
     peer_symbols: tuple[str, ...]
     peer_average_change_pct: float | None
+    benchmark_normalized: bool = False
+    peers_normalized: bool = False
+    model_samples: int = 0
+
+
+@dataclass(frozen=True)
+class SituationAssessment:
+    verdict: SituationVerdict
+    confidence: str
+    sensitivity_adjusted: bool
 
 
 @dataclass(frozen=True)
@@ -97,11 +109,18 @@ def assess_relative_performance(
     *,
     neutral_band_pct: float = 0.5,
     minimum_peers: int = 2,
+    sensitivity: MarketSensitivity | None = None,
 ) -> RelativeAssessment:
+    valid_model = _matching_sensitivity(snapshot, sensitivity)
+    benchmark_beta = valid_model.benchmark_beta if valid_model else None
+    benchmark_band = (
+        valid_model.benchmark_residual_band_pct if valid_model else None
+    )
     benchmark = _relative_outcome(
         snapshot.change_pct,
         snapshot.benchmark_change_pct,
-        neutral_band_pct,
+        benchmark_band or neutral_band_pct,
+        beta=benchmark_beta,
     )
     valid_peers = tuple(
         sorted(
@@ -117,15 +136,73 @@ def assess_relative_performance(
             peers=RelativeOutcome.UNAVAILABLE,
             peer_symbols=tuple(symbol for symbol, _ in valid_peers),
             peer_average_change_pct=None,
+            benchmark_normalized=benchmark_beta is not None,
+            model_samples=(valid_model.benchmark_samples if valid_model else 0),
         )
 
     peer_average = sum(change for _, change in valid_peers) / len(valid_peers)
+    peer_beta = valid_model.peer_beta if valid_model else None
+    peer_band = valid_model.peer_residual_band_pct if valid_model else None
     return RelativeAssessment(
         benchmark=benchmark,
         benchmark_symbol=snapshot.benchmark_symbol.upper(),
-        peers=_relative_outcome(snapshot.change_pct, peer_average, neutral_band_pct),
+        peers=_relative_outcome(
+            snapshot.change_pct,
+            peer_average,
+            peer_band or neutral_band_pct,
+            beta=peer_beta,
+        ),
         peer_symbols=tuple(symbol for symbol, _ in valid_peers),
         peer_average_change_pct=peer_average,
+        benchmark_normalized=benchmark_beta is not None,
+        peers_normalized=peer_beta is not None,
+        model_samples=min(
+            valid_model.benchmark_samples,
+            valid_model.peer_samples,
+        )
+        if valid_model
+        else 0,
+    )
+
+
+def assess_market_situation(
+    snapshot: MarketSnapshot,
+    relative: RelativeAssessment,
+) -> SituationAssessment:
+    outcomes = tuple(
+        outcome
+        for outcome in (relative.benchmark, relative.peers)
+        if outcome is not RelativeOutcome.UNAVAILABLE
+    )
+    if len(outcomes) < 2:
+        return SituationAssessment(
+            verdict=SituationVerdict.UNAVAILABLE,
+            confidence="low",
+            sensitivity_adjusted=False,
+        )
+    adjusted = relative.benchmark_normalized and relative.peers_normalized
+    confidence = "high" if adjusted else "medium"
+
+    if snapshot.direction is Direction.UP:
+        if all(outcome is RelativeOutcome.OUTPERFORM for outcome in outcomes):
+            verdict = SituationVerdict.COMPANY_STRENGTH
+        elif all(outcome is not RelativeOutcome.OUTPERFORM for outcome in outcomes):
+            verdict = SituationVerdict.BROADLY_EXPLAINED
+        else:
+            verdict = SituationVerdict.MIXED
+    elif snapshot.direction is Direction.DOWN:
+        if all(outcome is RelativeOutcome.UNDERPERFORM for outcome in outcomes):
+            verdict = SituationVerdict.COMPANY_WEAKNESS
+        elif all(outcome is not RelativeOutcome.UNDERPERFORM for outcome in outcomes):
+            verdict = SituationVerdict.BROADLY_EXPLAINED
+        else:
+            verdict = SituationVerdict.MIXED
+    else:
+        verdict = SituationVerdict.BROADLY_EXPLAINED
+    return SituationAssessment(
+        verdict=verdict,
+        confidence=confidence,
+        sensitivity_adjusted=adjusted,
     )
 
 
@@ -151,12 +228,36 @@ def _relative_outcome(
     actual_change_pct: float,
     comparison_change_pct: float | None,
     neutral_band_pct: float,
+    *,
+    beta: float | None = None,
 ) -> RelativeOutcome:
     if comparison_change_pct is None:
         return RelativeOutcome.UNAVAILABLE
-    difference = actual_change_pct - comparison_change_pct
+    expected_change = (
+        comparison_change_pct
+        if beta is None
+        else beta * comparison_change_pct
+    )
+    difference = actual_change_pct - expected_change
     if difference > neutral_band_pct:
         return RelativeOutcome.OUTPERFORM
     if difference < -neutral_band_pct:
         return RelativeOutcome.UNDERPERFORM
     return RelativeOutcome.INLINE
+
+
+def _matching_sensitivity(
+    snapshot: MarketSnapshot,
+    sensitivity: MarketSensitivity | None,
+) -> MarketSensitivity | None:
+    if sensitivity is None:
+        return None
+    if sensitivity.ticker != snapshot.ticker.upper():
+        return None
+    if sensitivity.benchmark_symbol != snapshot.benchmark_symbol.upper():
+        return None
+    if not set(sensitivity.peer_symbols).issuperset(
+        symbol.upper() for symbol in snapshot.peer_changes
+    ):
+        return None
+    return sensitivity

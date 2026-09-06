@@ -9,7 +9,12 @@ from investing_monitor.domain.models import (
     ThesisImpact,
     VolumeSnapshot,
 )
-from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessment
+from investing_monitor.domain.policies import (
+    RelativeAssessment,
+    SituationAssessment,
+    VolumeAssessment,
+)
+from investing_monitor.presentation.market_context import situation_text
 
 
 def build_close_message(
@@ -18,6 +23,7 @@ def build_close_message(
     volume: VolumeSnapshot | None,
     volume_assessment: VolumeAssessment,
     catalysts: Sequence[Catalyst],
+    situation: SituationAssessment | None = None,
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "양전"),
@@ -33,13 +39,17 @@ def build_close_message(
             },
         },
         _section(f"{direction_icon} *종목 방향 · {direction_label}*"),
+    ]
+    if situation is not None:
+        blocks.append(_section(situation_text(situation, snapshot.direction)))
+    blocks.append(
         _section(
             _outcome_line(
                 f"반도체 지수({relative.benchmark_symbol})",
                 relative.benchmark.value,
             )
-        ),
-    ]
+        )
+    )
 
     if relative.peers.value != "unavailable":
         peer_symbols = "·".join(relative.peer_symbols)

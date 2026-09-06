@@ -4,7 +4,7 @@ import hashlib
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Protocol, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -486,6 +486,11 @@ class EvidenceIngestionService:
         filing_text: FilingTextProvider | None = None,
         alert_builder: Callable[[EvidenceCandidate, EvidenceAnalysis], dict]
         | None = None,
+        move_followup_builder: Callable[
+            [Mapping[str, object], datetime, EvidenceCandidate, EvidenceAnalysis],
+            dict,
+        ]
+        | None = None,
         lookback: timedelta = timedelta(hours=24),
         retry_delay: timedelta = timedelta(minutes=5),
         batch_limit: int = 5,
@@ -497,6 +502,7 @@ class EvidenceIngestionService:
         self.article_text = article_text
         self.filing_text = filing_text
         self.alert_builder = alert_builder
+        self.move_followup_builder = move_followup_builder
         self.lookback = lookback
         self.retry_delay = retry_delay
         self.batch_limit = batch_limit
@@ -803,12 +809,13 @@ class EvidenceIngestionService:
             or candidate.metadata.get("calendar_only")
         ):
             return None
+        disposition = evidence_disposition(candidate.kind, analysis)
         if (
             candidate.kind in {EvidenceKind.NEWS, EvidenceKind.IR}
-            and evidence_disposition(candidate.kind, analysis)
-            is not EvidenceDisposition.IMMEDIATE
+            and disposition is not EvidenceDisposition.IMMEDIATE
         ):
             return None
+        event_key = self.repository.evidence_cluster_key(candidate.candidate_id)
         for existing in self.repository.recent_analyzed_evidence(
             candidate.ticker,
             candidate.published_at - timedelta(days=7),
@@ -824,9 +831,41 @@ class EvidenceIngestionService:
                     candidate.candidate_id,
                     existing.cluster_key,
                 )
-                return None
+                event_key = existing.cluster_key
+                break
+        if self.repository.alert_exists(event_key):
+            return None
+
+        if (
+            candidate.kind is not EvidenceKind.INSIDER
+            and self.move_followup_builder is not None
+        ):
+            parent = self.repository.unexplained_price_alert_near(
+                candidate.ticker,
+                candidate.published_at,
+            )
+            if parent is not None:
+                followup_key = f"{parent.event_key}:context-update"
+                if not self.repository.alert_exists(followup_key):
+                    return AlertRecord(
+                        event_key=followup_key,
+                        ticker=candidate.ticker,
+                        alert_type="move_followup",
+                        created_at=candidate.published_at,
+                        payload=self.move_followup_builder(
+                            parent.context,
+                            parent.created_at,
+                            candidate,
+                            analysis,
+                        ),
+                        context={
+                            "parent_event_key": parent.event_key,
+                            "evidence_event_key": event_key,
+                            "source_tier": analysis.source_tier,
+                        },
+                    )
         return AlertRecord(
-            event_key=self.repository.evidence_cluster_key(candidate.candidate_id),
+            event_key=event_key,
             ticker=candidate.ticker,
             alert_type={
                 EvidenceKind.NEWS: "catalyst",
