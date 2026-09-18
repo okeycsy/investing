@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from investing_monitor.domain.models import (
     Catalyst,
@@ -15,6 +16,7 @@ from investing_monitor.domain.policies import (
     VolumeAssessment,
 )
 from investing_monitor.presentation.market_context import relative_outcome_line, situation_text
+from investing_monitor.presentation.timing import session_label, timestamp, volume_basis
 
 
 def build_close_message(
@@ -24,12 +26,20 @@ def build_close_message(
     volume_assessment: VolumeAssessment,
     catalysts: Sequence[Catalyst],
     situation: SituationAssessment | None = None,
+    *,
+    created_at: datetime | None = None,
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "양전"),
         Direction.DOWN: ("📉", "음전"),
         Direction.FLAT: ("➖", "보합"),
     }[snapshot.direction]
+    timing = (
+        f"미국 거래일 {snapshot.trading_date:%m/%d} · {session_label(snapshot.session)}\n"
+        f"시장 자료 {timestamp(snapshot.observed_at)}"
+    )
+    if created_at is not None:
+        timing += f" · 브리프 작성 {timestamp(created_at)}"
     blocks = [
         {
             "type": "header",
@@ -38,6 +48,7 @@ def build_close_message(
                 "text": f"📊 ${snapshot.ticker} 장 마감 — {snapshot.trading_date:%m/%d}",
             },
         },
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": timing}]},
         _section(f"{direction_icon} *종목 방향 · {direction_label}*"),
     ]
     blocks.append(
@@ -71,7 +82,7 @@ def build_close_message(
         )
         blocks.append(
             _section(
-                f"*{status}*\n"
+                f"*{status}*\n{volume_basis(volume)}\n"
                 f"당일 {volume.observed_volume:,}주 | "
                 f"최근 {volume.baseline_sessions}거래일 평균 "
                 f"{volume.expected_volume:,}주 | {ratio:.1f}배"
@@ -84,7 +95,11 @@ def build_close_message(
         blocks.extend(_section(_catalyst_text(catalyst)) for catalyst in selected)
 
     return {
-        "text": f"${snapshot.ticker} {snapshot.trading_date:%m/%d} 장 마감 브리프",
+        "text": (
+            f"${snapshot.ticker} {snapshot.trading_date:%m/%d} 장 마감 브리프 "
+            f"| 자료 {timestamp(snapshot.observed_at)}"
+            + (f" | 작성 {timestamp(created_at)}" if created_at else "")
+        ),
         "blocks": blocks,
     }
 
@@ -102,7 +117,7 @@ def _catalyst_text(catalyst: Catalyst) -> str:
     return (
         f"{icon} *{label} · <{catalyst.source_url}|{_clip(catalyst.headline, 180)}>*\n"
         f"{_clip(catalyst.summary, 420)}\n"
-        f"_{_clip(catalyst.source_name, 100)}_"
+        f"_{_clip(catalyst.source_name, 100)} · 발표 {timestamp(catalyst.published_at)}_"
     )
 
 

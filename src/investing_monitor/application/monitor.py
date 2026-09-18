@@ -204,6 +204,9 @@ class MarketCycleService:
                 signals.append((signal, frame))
 
         volume_assessment = assess_intraday_volume(cycle.volume)
+        latest = cycle.frames[-1].snapshot
+        latest_relative = assess_relative_performance(latest, sensitivity=sensitivity)
+        latest_situation = assess_market_situation(latest, latest_relative)
         consume_volume = volume_assessment.is_exploded and not state.volume_alerted
         alerts: list[AlertRecord] = []
         payloads: dict[str, dict] = {}
@@ -229,6 +232,15 @@ class MarketCycleService:
                 situation.verdict.value,
                 contextual_catalysts,
             )
+            context["timing"] = {
+                "observed_at": signal.observed_at.isoformat(),
+                "detected_at": detected_at.isoformat() if detected_at else None,
+                "latest_observed_at": latest.observed_at.isoformat(),
+                "volume_observed_at": (
+                    cycle.volume.observed_at.isoformat()
+                    if cycle.volume and cycle.volume.observed_at else None
+                ),
+            }
             previous = self.repository.latest_price_alert_context(
                 cycle.ticker,
                 cycle.trading_date,
@@ -241,6 +253,10 @@ class MarketCycleService:
                 volume_assessment,
                 contextual_catalysts,
                 detection_delay_seconds=detection_delay,
+                detected_at=detected_at,
+                latest_snapshot=latest,
+                latest_relative=latest_relative,
+                latest_situation=latest_situation,
                 situation=situation,
                 delta=compare_market_context(
                     previous.context if previous else None,
@@ -260,12 +276,6 @@ class MarketCycleService:
             payloads[signal.event_key] = payload
             detection_delays[signal.event_key] = detection_delay
 
-        latest = cycle.frames[-1].snapshot
-        latest_relative = assess_relative_performance(
-            latest,
-            sensitivity=sensitivity,
-        )
-        latest_situation = assess_market_situation(latest, latest_relative)
         if consume_volume and not signals and cycle.volume is not None:
             signal = VolumeSignal(
                 event_key=(
@@ -273,7 +283,7 @@ class MarketCycleService:
                 ),
                 ticker=cycle.ticker.upper(),
                 trading_date=cycle.trading_date,
-                observed_at=latest.observed_at,
+                observed_at=cycle.volume.observed_at or latest.observed_at,
             )
             detection_delay = self._detection_delay(
                 signal.observed_at,
@@ -286,6 +296,7 @@ class MarketCycleService:
                 cycle.volume,
                 volume_assessment,
                 detection_delay_seconds=detection_delay,
+                detected_at=detected_at,
                 situation=latest_situation,
             )
             alerts.append(

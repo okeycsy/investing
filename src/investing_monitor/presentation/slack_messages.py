@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from zoneinfo import ZoneInfo
+from dataclasses import replace
+from datetime import datetime
 
 from investing_monitor.domain.models import (
     Catalyst,
@@ -22,9 +23,15 @@ from investing_monitor.presentation.market_context import (
     relative_outcome_line,
     situation_text,
 )
-
-
-KST = ZoneInfo("Asia/Seoul")
+from investing_monitor.presentation.timing import (
+    DELAYED_DETECTION_SECONDS,
+    delay_seconds,
+    duration_label,
+    observation_context,
+    session_label,
+    timestamp,
+    volume_basis,
+)
 
 
 def build_price_band_message(
@@ -35,6 +42,10 @@ def build_price_band_message(
     catalysts: Sequence[Catalyst],
     *,
     detection_delay_seconds: int = 0,
+    detected_at: datetime | None = None,
+    latest_snapshot: MarketSnapshot | None = None,
+    latest_relative: RelativeAssessment | None = None,
+    latest_situation: SituationAssessment | None = None,
     situation: SituationAssessment | None = None,
     delta: MarketContextDelta | None = None,
 ) -> dict:
@@ -42,46 +53,85 @@ def build_price_band_message(
     direction_label = "상승" if signal.direction is Direction.UP else "하락"
     signed_level = signal.level if signal.direction is Direction.UP else -signal.level
     reversal = " · 장중 방향 반전" if signal.is_reversal else ""
-    timestamp = signal.observed_at.astimezone(KST).strftime("%m/%d %H:%M KST")
-    session_label = {
-        "pre": "프리마켓",
-        "regular": "정규장",
-        "post": "애프터마켓",
-        "closed": "장외",
-    }[signal.session.value]
+    if detected_at is not None:
+        detection_delay_seconds = delay_seconds(signal.observed_at, detected_at)
+    if latest_snapshot is not None and (
+        latest_snapshot.ticker != signal.ticker
+        or latest_snapshot.trading_date != signal.trading_date
+        or latest_snapshot.observed_at < signal.observed_at
+    ):
+        raise ValueError("latest snapshot must belong to the same event timeline")
+    delayed = detection_delay_seconds > DELAYED_DETECTION_SECONDS
+    historical = delayed or (
+        latest_snapshot is not None and latest_snapshot.observed_at > signal.observed_at
+    )
+    event_label = "도달 기록" if historical else "구간 진입"
+    title = f"${signal.ticker} {signed_level:+.1f}% {direction_label} {event_label}"
+    if delayed:
+        title += " · 지연 확인"
 
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": (
-                    f"{direction_icon} ${signal.ticker} {signed_level:+.1f}% "
-                    f"{direction_label} 구간 진입{reversal}"
-                ),
+                "text": f"{direction_icon} {title}{reversal}",
             },
         },
         _context(
-            _detection_context(
-                session_label,
-                timestamp,
+            observation_context(
+                signal.observed_at,
+                session_label(signal.session),
+                detected_at,
                 detection_delay_seconds,
             )
         ),
     ]
 
-    rendered_delta = delta_text(delta)
-    if rendered_delta:
-        blocks.append(_section(rendered_delta))
-    blocks.append(_section(_relative_text(relative)))
-    if situation is not None:
-        blocks.append(_section(situation_text(situation, signal.direction)))
+    # Historical moves cannot borrow a later volume reading as event-time context.
+    rendered_delta = delta_text(replace(delta, volume=None) if historical and delta else delta)
+    latest_status = ""
+    if historical:
+        if latest_snapshot is not None:
+            latest_status = _band_status(signal, latest_snapshot)
+            blocks.append(_section(
+                f"*마지막 관측 · {session_label(latest_snapshot.session)} "
+                f"{timestamp(latest_snapshot.observed_at)}*\n"
+                f"{_direction_text(latest_snapshot)} · {latest_status}"
+            ))
+            source_age = delay_seconds(latest_snapshot.observed_at, detected_at)
+            if source_age > DELAYED_DETECTION_SECONDS:
+                blocks.append(_context(
+                    f"마지막 자료도 봇 확인보다 {duration_label(source_age)} 이전 · "
+                    "이후 상태는 확인되지 않음"
+                ))
+            if latest_relative is not None:
+                blocks.append(_section(_relative_text(latest_relative)))
+            else:
+                blocks.append(_section(
+                    f"반도체 지수({relative.benchmark_symbol}) · 마지막 관측 비교 자료 없음"
+                ))
+            if latest_situation is not None:
+                blocks.append(_section(situation_text(latest_situation, latest_snapshot.direction)))
+        else:
+            blocks.append(_context("이후 관측 자료 없음 · 아래 상대 흐름은 도달 당시 기준"))
+            blocks.append(_section(_relative_text(relative)))
+            if situation is not None:
+                blocks.append(_section(situation_text(situation, signal.direction)))
+        if rendered_delta:
+            blocks.append(_section(f"*도달 당시 · 이전 도달 기록과 비교*\n{rendered_delta}"))
+    else:
+        if rendered_delta:
+            blocks.append(_section(rendered_delta))
+        blocks.append(_section(_relative_text(relative)))
+        if situation is not None:
+            blocks.append(_section(situation_text(situation, signal.direction)))
 
     if volume is not None and volume_assessment.is_ready:
-        status = "🔥 거래량 동반" if volume_assessment.is_exploded else "거래량은 아직 평시 범위"
+        status = "🔥 거래량 확대" if volume_assessment.is_exploded else "거래량 평시 범위"
         blocks.append(
             _section(
-                f"*{status}*\n"
+                f"*{status}*\n{volume_basis(volume)}\n"
                 f"누적 {volume.observed_volume:,}주 | "
                 f"동시간대 {volume.baseline_sessions}거래일 평균 "
                 f"{volume.expected_volume:,}주 | "
@@ -105,8 +155,13 @@ def build_price_band_message(
             )
         )
 
+    fallback = f"{title} | 관측 {timestamp(signal.observed_at)}"
+    if detected_at is not None:
+        fallback += f" | 확인 {timestamp(detected_at)}"
+    if historical and latest_snapshot is not None:
+        fallback += f" | 마지막 관측 {timestamp(latest_snapshot.observed_at)}: {latest_status}"
     return {
-        "text": f"${signal.ticker} {signed_level:+.1f}% {direction_label} 구간 진입",
+        "text": fallback,
         "blocks": blocks,
     }
 
@@ -119,9 +174,12 @@ def build_volume_message(
     volume_assessment: VolumeAssessment,
     *,
     detection_delay_seconds: int = 0,
+    detected_at: datetime | None = None,
     situation: SituationAssessment | None = None,
 ) -> dict:
-    timestamp = signal.observed_at.astimezone(KST).strftime("%m/%d %H:%M KST")
+    observed_at = volume.observed_at or signal.observed_at
+    if detected_at is not None:
+        detection_delay_seconds = delay_seconds(observed_at, detected_at)
     direction_icon = {
         Direction.UP: "📈",
         Direction.DOWN: "📉",
@@ -133,18 +191,23 @@ def build_volume_message(
         Direction.FLAT: "보합",
     }[snapshot.direction]
     ratio = volume_assessment.ratio or 0.0
+    delayed = detection_delay_seconds > DELAYED_DETECTION_SECONDS
+    title = f"${signal.ticker} 거래량 {ratio:.1f}배 확대"
+    if delayed:
+        title += " · 지연 확인"
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"🔥 ${signal.ticker} 거래량 {ratio:.1f}배 확대",
+                "text": f"🔥 {title}",
             },
         },
         _context(
-            _detection_context(
+            observation_context(
+                observed_at,
                 "거래량 기준 시각",
-                timestamp,
+                detected_at,
                 detection_delay_seconds,
             )
         ),
@@ -152,18 +215,24 @@ def build_volume_message(
     blocks.extend(
         [
             _section(
-                f"*동시간대 거래량 터짐*\n"
+                f"*동시간대 거래량 터짐*\n{volume_basis(volume)}\n"
                 f"누적 {volume.observed_volume:,}주 | "
                 f"과거 {volume.baseline_sessions}거래일 동시간 평균 "
                 f"{volume.expected_volume:,}주 | {ratio:.1f}배"
             ),
-            _section(f"{direction_icon} *종목 방향: {direction_label}*\n{_relative_text(relative)}"),
+            _section(
+                f"*시장 관측 · {session_label(snapshot.session)} {timestamp(snapshot.observed_at)}*\n"
+                f"{direction_icon} *종목 방향: {direction_label}*\n{_relative_text(relative)}"
+            ),
         ]
     )
     if situation is not None:
         blocks.append(_section(situation_text(situation, snapshot.direction)))
+    fallback = f"{title} | 자료 {timestamp(observed_at)}"
+    if detected_at is not None:
+        fallback += f" | 확인 {timestamp(detected_at)}"
     return {
-        "text": f"${signal.ticker} 거래량 {ratio:.1f}배 확대",
+        "text": fallback,
         "blocks": blocks,
     }
 
@@ -189,31 +258,29 @@ def _catalyst_text(catalyst: Catalyst) -> str:
     return (
         f"{impact_icon} *<{catalyst.source_url}|{catalyst.headline}>*\n"
         f"{catalyst.summary}\n"
-        f"_{catalyst.source_name}_"
+        f"_{catalyst.source_name} · 발표 {timestamp(catalyst.published_at)}_"
     )
 
 
-def _detection_context(
-    session_label: str,
-    timestamp: str,
-    detection_delay_seconds: int,
-) -> str:
-    if detection_delay_seconds <= 10 * 60:
-        return f"{session_label} · {timestamp}"
+def _band_status(signal: PriceBandSignal, snapshot: MarketSnapshot) -> str:
+    change = round(snapshot.change_pct, 10)
+    if signal.direction is Direction.UP:
+        return (
+            f"+{signal.level:.1f}% 구간 유지"
+            if change >= signal.level else f"+{signal.level:.1f}% 구간 아래로 되돌림"
+        )
     return (
-        f"⏱️ 지연 감지 · {session_label} {timestamp} 발생 · "
-        f"{_duration_label(detection_delay_seconds)} 뒤 복구"
+        f"-{signal.level:.1f}% 구간 유지"
+        if change <= -signal.level else f"-{signal.level:.1f}% 구간에서 반등"
     )
 
 
-def _duration_label(seconds: int) -> str:
-    minutes = max(1, round(seconds / 60))
-    hours, remaining = divmod(minutes, 60)
-    if not hours:
-        return f"{remaining}분"
-    if not remaining:
-        return f"{hours}시간"
-    return f"{hours}시간 {remaining}분"
+def _direction_text(snapshot: MarketSnapshot) -> str:
+    return {
+        Direction.UP: "📈 양전",
+        Direction.DOWN: "📉 음전",
+        Direction.FLAT: "➖ 보합",
+    }[snapshot.direction]
 
 
 def _section(text: str) -> dict:

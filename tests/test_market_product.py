@@ -227,6 +227,7 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
         self.assertEqual(cycle.volume.expected_volume, 200)
         self.assertEqual(cycle.volume.baseline_sessions, 20)
         self.assertEqual(cycle.volume.ratio, 2.0)
+        self.assertEqual(cycle.volume.observed_at, et(TRADING_DATE, 10, 0))
         snapshot = cycle.frames[-1].snapshot
         self.assertEqual(snapshot.peer_changes["NVT"], None)
         self.assertAlmostEqual(snapshot.peer_changes["ETN"], 2.0)
@@ -257,6 +258,31 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
         self.assertEqual(len(cycle.frames), 3)
         self.assertEqual(cycle.replayed_frames, 2)
         self.assertEqual(cycle.frames[0].snapshot.observed_at, et(TRADING_DATE, 9, 35))
+
+    def test_postmarket_volume_keeps_actual_regular_bar_time_including_early_close(self):
+        for trading_date, last_hour in ((TRADING_DATE, 15), (date(2026, 11, 27), 12)):
+            with self.subTest(trading_date=trading_date):
+                previous = self.calendar.previous_trading_day(trading_date)
+                history = [bar(previous, 9, 30, 99, 100), bar(previous, 15, 55, 100, 100)]
+                regular_bar = bar(trading_date, last_hour, 55, 101, 200)
+                post_bar = bar(trading_date, 17, 0, 102, 5_000)
+                primary = make_chart("VRT", history + [regular_bar, post_bar])
+                adapter = YahooMarketDataAdapter(
+                    FakeChartClient({"VRT": primary}), self.calendar, PROFILE,
+                )
+                cycle = adapter.fetch_cycle(et(trading_date, 17, 1), last_observed_at=None)
+                self.assertEqual(cycle.volume.observed_at, regular_bar.observed_at)
+                self.assertEqual(cycle.volume.observed_volume, 200)
+
+    def test_missing_final_regular_bar_does_not_fabricate_volume_timestamp(self):
+        primary = make_chart("VRT", history_bars(self.calendar) + [
+            bar(TRADING_DATE, 10, 0, 101, 200),
+            bar(TRADING_DATE, 17, 0, 102, 5_000),
+        ])
+        adapter = YahooMarketDataAdapter(FakeChartClient({"VRT": primary}), self.calendar, PROFILE)
+        cycle = adapter.fetch_cycle(et(TRADING_DATE, 17, 1), last_observed_at=None)
+        self.assertEqual(cycle.volume.observed_at, et(TRADING_DATE, 10, 0))
+        self.assertEqual(cycle.volume.expected_volume, 200)
 
     def test_first_run_of_day_recovers_missed_intraday_extreme(self):
         current = [
@@ -303,8 +329,9 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
         )
         self.assertEqual(report.delayed_event_keys, report.inserted_event_keys)
         rendered = json.dumps(report.messages[0], ensure_ascii=False)
-        self.assertIn("+6.0% 상승 구간 진입", rendered)
-        self.assertIn("2시간 26분 뒤 복구", rendered)
+        self.assertIn("+6.0% 상승 도달 기록", rendered)
+        self.assertIn("관측 후 2시간 26분", rendered)
+        self.assertIn("+6.0% 구간 아래로 되돌림", rendered)
 
     def test_abnormal_move_requires_independent_quote_confirmation(self):
         primary = make_chart(
@@ -488,8 +515,8 @@ class MarketCycleServiceTest(unittest.TestCase):
                 datetime(2026, 9, 3, tzinfo=timezone.utc)
             )
             rendered = json.dumps(pending[0].payload, ensure_ascii=False)
-            self.assertIn("+6.0% 상승 구간 진입", rendered)
-            self.assertIn("정규장 · 09/02 23:10 KST", rendered)
+            self.assertIn("+6.0% 상승 도달 기록", rendered)
+            self.assertIn("정규장 · 관측 09/02 23:10 KST", rendered)
             self.assertNotIn("104.7", rendered)
             self.assertNotIn("change_pct", json.dumps(report.as_dict()))
             self.assertEqual(report.latest_context["benchmark"]["outcome"], "outperform")
@@ -540,9 +567,14 @@ class MarketCycleServiceTest(unittest.TestCase):
                 ("VRT:2026-09-02:price-band:up:4",),
             )
             self.assertEqual(report.max_detection_delay_seconds, 2 * 60 * 60 + 20 * 60)
-            self.assertIn("⏱️ 지연 감지", rendered)
-            self.assertIn("정규장 09/02 23:00 KST 발생", rendered)
-            self.assertIn("2시간 20분 뒤 복구", rendered)
+            self.assertIn("⏱️ 지연 확인", rendered)
+            self.assertIn("정규장 · 관측 09/02 23:00 KST", rendered)
+            self.assertIn("봇 확인 09/03 01:20 KST", rendered)
+            self.assertIn("관측 후 2시간 20분", rendered)
+            self.assertIn("마지막 관측 · 정규장 09/02 23:05 KST", rendered)
+            self.assertIn("+4.0% 구간 아래로 되돌림", rendered)
+            self.assertIn("이후 상태는 확인되지 않음", rendered)
+            self.assertIn("지연 확인", report.messages[0]["text"])
 
     def test_volume_alert_is_once_per_day_and_combines_with_move(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -563,7 +595,7 @@ class MarketCycleServiceTest(unittest.TestCase):
                 datetime(2026, 9, 3, tzinfo=timezone.utc)
             )
             self.assertEqual(len(pending), 1)
-            self.assertIn("거래량 동반", json.dumps(pending[0].payload, ensure_ascii=False))
+            self.assertIn("거래량 확대", json.dumps(pending[0].payload, ensure_ascii=False))
             self.assertTrue(repository.load_price_band_state("VRT").volume_alerted)
 
     def test_next_price_band_leads_with_context_changes_since_prior_alert(self):
@@ -656,8 +688,8 @@ class MarketCycleServiceTest(unittest.TestCase):
             self.assertEqual(second.inserted_event_keys, ())
             rendered = json.dumps(first.messages[0], ensure_ascii=False)
             self.assertIn("거래량 1.5배 확대", rendered)
-            self.assertIn("⏱️ 지연 감지", rendered)
-            self.assertIn("2시간 뒤 복구", rendered)
+            self.assertIn("⏱️ 지연 확인", rendered)
+            self.assertIn("관측 후 2시간", rendered)
 
     def test_shadow_records_alert_without_creating_delivery_intent(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -598,12 +598,15 @@ class YahooMarketDataAdapter:
             return None
         window = self.calendar.window(trading_date)
         latest_at = min(latest.observed_at, window.close_at - self.interval)
-        offset = max(timedelta(0), latest_at - window.open_at)
-        observed = sum(
-            max(0, bar.volume)
+        included_bars = [
+            bar
             for bar in current_bars
             if window.open_at <= bar.observed_at <= latest_at
-        )
+        ]
+        observed = sum(max(0, bar.volume) for bar in included_bars)
+        if observed <= 0:
+            return None
+        offset = max(timedelta(0), included_bars[-1].observed_at - window.open_at)
 
         grouped: dict[date, list[YahooBar]] = {}
         for bar in chart.bars:
@@ -635,6 +638,7 @@ class YahooMarketDataAdapter:
             expected_volume=int(sum(baselines) / len(baselines)),
             baseline_sessions=len(baselines),
             lookback_sessions=20,
+            observed_at=included_bars[-1].observed_at,
         )
 
 

@@ -125,6 +125,11 @@ class VolumeSnapshot:
     expected_volume: int
     baseline_sessions: int
     lookback_sessions: int = 20
+    observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.observed_at is not None and self.observed_at.tzinfo is None:
+            raise ValueError("volume timestamp must be timezone-aware")
 
     @property
     def ratio(self) -> float | None:

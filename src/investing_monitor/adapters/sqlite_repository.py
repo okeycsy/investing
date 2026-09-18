@@ -47,7 +47,7 @@ from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS market_volume_observations (
     expected_volume INTEGER NOT NULL,
     baseline_sessions INTEGER NOT NULL,
     lookback_sessions INTEGER NOT NULL,
+    data_observed_at TEXT,
     PRIMARY KEY(ticker, observed_at)
 );
 
@@ -280,6 +281,9 @@ class SQLiteMonitorRepository:
                 "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column(connection, "alerts", "recorded_at", "TEXT")
+            self._ensure_column(
+                connection, "market_volume_observations", "data_observed_at", "TEXT",
+            )
             self._ensure_column(
                 connection,
                 "alerts",
@@ -622,13 +626,14 @@ class SQLiteMonitorRepository:
                 connection.execute(
                     "INSERT INTO market_volume_observations "
                     "(ticker, observed_at, trading_date, observed_volume, "
-                    "expected_volume, baseline_sessions, lookback_sessions) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "expected_volume, baseline_sessions, lookback_sessions, data_observed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(ticker, observed_at) DO UPDATE SET "
                     "observed_volume = excluded.observed_volume, "
                     "expected_volume = excluded.expected_volume, "
                     "baseline_sessions = excluded.baseline_sessions, "
-                    "lookback_sessions = excluded.lookback_sessions",
+                    "lookback_sessions = excluded.lookback_sessions, "
+                    "data_observed_at = excluded.data_observed_at",
                     (
                         ticker,
                         _utc_iso(frames[-1].snapshot.observed_at),
@@ -637,6 +642,7 @@ class SQLiteMonitorRepository:
                         volume.expected_volume,
                         volume.baseline_sessions,
                         volume.lookback_sessions,
+                        _utc_iso(volume.observed_at) if volume.observed_at else None,
                     ),
                 )
             connection.execute(
@@ -693,7 +699,7 @@ class SQLiteMonitorRepository:
             ).fetchone()
             volume_row = connection.execute(
                 "SELECT observed_volume, expected_volume, baseline_sessions, "
-                "lookback_sessions FROM market_volume_observations "
+                "lookback_sessions, data_observed_at FROM market_volume_observations "
                 "WHERE ticker = ? AND trading_date = ? "
                 "ORDER BY observed_at DESC LIMIT 1",
                 (ticker, trading_date.isoformat()),
@@ -717,6 +723,10 @@ class SQLiteMonitorRepository:
                 expected_volume=volume_row["expected_volume"],
                 baseline_sessions=volume_row["baseline_sessions"],
                 lookback_sessions=volume_row["lookback_sessions"],
+                observed_at=(
+                    _required_datetime(volume_row["data_observed_at"])
+                    if volume_row["data_observed_at"] else None
+                ),
             )
         return CloseMarketContext(snapshot=snapshot, volume=volume)
 

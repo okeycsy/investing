@@ -88,6 +88,7 @@ class CloseBriefService:
             volume_assessment,
             catalysts,
             situation,
+            created_at=created_at,
         )
         event_key = f"{ticker.upper()}:{trading_date.isoformat()}:close"
         inserted = self.repository.record_alert(

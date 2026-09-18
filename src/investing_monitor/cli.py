@@ -404,7 +404,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     now - timedelta(hours=24),
                     limit=20,
                 ),
-                detected_at=now,
+                detected_at=now if args.now else datetime.now(timezone.utc),
                 sensitivity=sensitivity,
             )
             market_result.update(report.as_dict())
@@ -551,7 +551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     profile.ticker,
                     close_date,
                     trading_open_at=calendar.regular_open(close_date),
-                    created_at=now,
+                    created_at=now if args.now else datetime.now(timezone.utc),
                     sensitivity=sensitivity,
                 )
                 close_result.update(report.as_dict())

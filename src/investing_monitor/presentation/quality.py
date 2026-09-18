@@ -26,7 +26,7 @@ FORBIDDEN_TEXT = (
 )
 
 REQUIRED_TEXT = {
-    "price_band": ("구간 진입", "반도체 지수("),
+    "price_band": ("반도체 지수(",),
     "volume_spike": ("거래량", "종목 방향", "반도체 지수("),
     "daily_close": ("장 마감", "종목 방향", "반도체 지수("),
     "weekly_review": ("주간 논지 리뷰", "주간 방향", "반도체 지수("),
@@ -107,6 +107,10 @@ def audit_message(alert_type: str, payload: Mapping[str, object]) -> MessageQual
     for required in REQUIRED_TEXT.get(alert_type, ()):
         if required not in visible:
             violations.append(f"missing required user text: {required}")
+    if alert_type == "price_band" and not any(
+        label in visible for label in ("구간 진입", "도달 기록")
+    ):
+        violations.append("missing required user text: 구간 진입 / 도달 기록")
     if alert_type in SOURCE_REQUIRED_TYPES and "<http" not in visible:
         violations.append("missing traceable source link")
 
