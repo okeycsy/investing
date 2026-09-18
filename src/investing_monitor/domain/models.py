@@ -26,6 +26,12 @@ class RelativeOutcome(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class RelativeStrength(str, Enum):
+    SLIGHT = "slight"
+    SIGNIFICANT = "significant"
+    STRONG = "strong"
+
+
 class ThesisImpact(str, Enum):
     STRENGTHEN = "strengthen"
     NEUTRAL = "neutral"

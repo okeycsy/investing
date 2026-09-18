@@ -17,7 +17,11 @@ from investing_monitor.domain.policies import (
     VolumeAssessment,
 )
 from investing_monitor.domain.situation import MarketContextDelta
-from investing_monitor.presentation.market_context import delta_text, situation_text
+from investing_monitor.presentation.market_context import (
+    delta_text,
+    relative_outcome_line,
+    situation_text,
+)
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -66,12 +70,12 @@ def build_price_band_message(
         ),
     ]
 
-    if situation is not None:
-        blocks.append(_section(situation_text(situation, signal.direction)))
     rendered_delta = delta_text(delta)
     if rendered_delta:
         blocks.append(_section(rendered_delta))
     blocks.append(_section(_relative_text(relative)))
+    if situation is not None:
+        blocks.append(_section(situation_text(situation, signal.direction)))
 
     if volume is not None and volume_assessment.is_ready:
         status = "🔥 거래량 동반" if volume_assessment.is_exploded else "거래량은 아직 평시 범위"
@@ -145,8 +149,6 @@ def build_volume_message(
             )
         ),
     ]
-    if situation is not None:
-        blocks.append(_section(situation_text(situation, snapshot.direction)))
     blocks.extend(
         [
             _section(
@@ -158,6 +160,8 @@ def build_volume_message(
             _section(f"{direction_icon} *종목 방향: {direction_label}*\n{_relative_text(relative)}"),
         ]
     )
+    if situation is not None:
+        blocks.append(_section(situation_text(situation, snapshot.direction)))
     return {
         "text": f"${signal.ticker} 거래량 {ratio:.1f}배 확대",
         "blocks": blocks,
@@ -166,22 +170,13 @@ def build_volume_message(
 
 def _relative_text(relative: RelativeAssessment) -> str:
     benchmark_label = f"반도체 지수({relative.benchmark_symbol})"
-    lines = [_outcome_line(benchmark_label, relative.benchmark)]
+    lines = [
+        relative_outcome_line(benchmark_label, relative.benchmark, relative.benchmark_strength)
+    ]
     if relative.peers.value != "unavailable":
         peer_label = f"피어({'·'.join(relative.peer_symbols)})"
-        lines.append(_outcome_line(peer_label, relative.peers))
+        lines.append(relative_outcome_line(peer_label, relative.peers, relative.peer_strength))
     return "\n".join(lines)
-
-
-def _outcome_line(label: str, outcome) -> str:
-    mapping = {
-        "outperform": ("↗️", "아웃퍼폼"),
-        "underperform": ("↘️", "언더퍼폼"),
-        "inline": ("↔️", "동조"),
-        "unavailable": ("", "비교 불가"),
-    }
-    icon, text = mapping[outcome.value]
-    return f"{icon} *{label} 대비 {text}*".strip()
 
 
 def _catalyst_text(catalyst: Catalyst) -> str:

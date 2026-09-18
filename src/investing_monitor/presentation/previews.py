@@ -17,6 +17,7 @@ from investing_monitor.domain.models import (
     OfficialEvent,
     PriceBandSignal,
     RelativeOutcome,
+    RelativeStrength,
     SituationVerdict,
     ThesisImpact,
     VolumeSignal,
@@ -109,12 +110,17 @@ def _source_message(
     peers: tuple[str, ...],
     now: datetime,
 ) -> tuple[str, dict]:
+    outcome = (
+        RelativeOutcome.UNDERPERFORM if kind == "move-down" else RelativeOutcome.OUTPERFORM
+    )
     relative = RelativeAssessment(
-        benchmark=RelativeOutcome.OUTPERFORM,
+        benchmark=outcome,
         benchmark_symbol=benchmark,
-        peers=RelativeOutcome.OUTPERFORM,
+        peers=outcome,
         peer_symbols=peers,
         peer_average_change_pct=1.2,
+        benchmark_strength=RelativeStrength.STRONG,
+        peer_strength=RelativeStrength.STRONG,
     )
     situation = SituationAssessment(
         verdict=SituationVerdict.COMPANY_STRENGTH,

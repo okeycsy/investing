@@ -92,8 +92,8 @@ class CloseBriefServiceTest(unittest.TestCase):
 
             rendered = json.dumps(first.payload, ensure_ascii=False)
             direction_at = rendered.index("종목 방향 · 양전")
-            benchmark_at = rendered.index("반도체 지수(SOXX) 대비 아웃퍼폼")
-            peers_at = rendered.index("피어 평균(ETN·GEV·NVT) 대비 아웃퍼폼")
+            benchmark_at = rendered.index("반도체 지수(SOXX) 대비 상당한 아웃퍼폼")
+            peers_at = rendered.index("피어 평균(ETN·GEV·NVT) 대비 상당한 아웃퍼폼")
             volume_at = rendered.index("거래량 평시 범위")
             self.assertLess(direction_at, benchmark_at)
             self.assertLess(benchmark_at, peers_at)

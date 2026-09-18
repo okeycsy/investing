@@ -156,8 +156,10 @@ class ContextPolicyTest(unittest.TestCase):
         situation = assess_market_situation(market, adjusted)
 
         self.assertEqual(raw.benchmark, RelativeOutcome.OUTPERFORM)
-        self.assertEqual(adjusted.benchmark, RelativeOutcome.INLINE)
-        self.assertEqual(adjusted.peers, RelativeOutcome.INLINE)
+        self.assertEqual(adjusted.benchmark, RelativeOutcome.OUTPERFORM)
+        self.assertEqual(adjusted.peers, RelativeOutcome.OUTPERFORM)
+        self.assertEqual(adjusted.benchmark_expected, RelativeOutcome.INLINE)
+        self.assertEqual(adjusted.peers_expected, RelativeOutcome.INLINE)
         self.assertEqual(situation.verdict, SituationVerdict.BROADLY_EXPLAINED)
         self.assertTrue(situation.sensitivity_adjusted)
 

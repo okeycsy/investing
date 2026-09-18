@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from investing_monitor.domain.models import Direction, SituationVerdict
+from investing_monitor.domain.models import (
+    Direction,
+    RelativeOutcome,
+    RelativeStrength,
+    SituationVerdict,
+)
 from investing_monitor.domain.policies import SituationAssessment
 from investing_monitor.domain.situation import MarketContextDelta
 
@@ -9,37 +14,33 @@ def situation_text(
     assessment: SituationAssessment,
     direction: Direction,
 ) -> str:
+    heading = "민감도 참고" if assessment.sensitivity_adjusted else "상대 흐름 참고"
     if assessment.verdict is SituationVerdict.COMPANY_STRENGTH:
         label = _company_signal_label(assessment, "강세")
         detail = _expectation_detail(
             assessment,
             "반도체·피어 흐름을 함께 웃돎",
         )
-        return f"🧭 *오늘의 판정 · {label}*\n{detail}"
+        return f"🧭 *{heading} · {label}*\n{detail}"
     if assessment.verdict is SituationVerdict.COMPANY_WEAKNESS:
         label = _company_signal_label(assessment, "약세")
         detail = _expectation_detail(
             assessment,
             "반도체·피어 흐름을 함께 밑돎",
         )
-        return f"🧭 *오늘의 판정 · {label}*\n{detail}"
+        return f"🧭 *{heading} · {label}*\n{detail}"
     if assessment.verdict is SituationVerdict.BROADLY_EXPLAINED:
-        move = {
-            Direction.UP: "상승",
-            Direction.DOWN: "하락",
-            Direction.FLAT: "보합",
-        }[direction]
         return (
-            f"🌐 *오늘의 판정 · 시장·피어 흐름으로 설명되는 {move}*\n"
-            "현재 상대 흐름만으로 종목 고유 사건을 단정하기 어려움"
+            f"🧭 *{heading} · 종목 고유 요인 판단 유보*\n"
+            "상대 움직임만으로 상승·하락 원인을 확정하지 않음"
         )
     if assessment.verdict is SituationVerdict.MIXED:
         return (
-            "🧭 *오늘의 판정 · 상대 흐름 혼합*\n"
+            f"🧭 *{heading} · 비교축 판정 혼합*\n"
             "종목 고유 움직임인지 추가 근거 확인 필요"
         )
     return (
-        "⚪ *오늘의 판정 · 판단 보류*\n"
+        f"⚪ *{heading} · 판단 보류*\n"
         "반도체 또는 피어 데이터가 부족해 상대 맥락을 확정하지 않음"
     )
 
@@ -93,20 +94,48 @@ def _company_signal_label(
     return f"종목 고유 {direction} 가능성 {confidence}"
 
 
-def _outcome_label(value: str) -> str:
-    return {
+def relative_outcome_label(outcome: str, strength: str = "") -> str:
+    label = {
         "outperform": "아웃퍼폼",
         "underperform": "언더퍼폼",
-        "inline": "동조",
+        "inline": "비슷한 흐름",
         "unavailable": "비교 불가",
-    }.get(value, value)
+    }.get(outcome, outcome)
+    qualifier = {
+        "slight": "약간",
+        "significant": "상당한",
+        "strong": "강한",
+    }.get(strength, "")
+    if qualifier and outcome in {"outperform", "underperform"}:
+        return f"{qualifier} {label}"
+    return label
+
+
+def relative_outcome_line(
+    label: str,
+    outcome: RelativeOutcome,
+    strength: RelativeStrength | None,
+) -> str:
+    icon = {
+        RelativeOutcome.OUTPERFORM: "↗️",
+        RelativeOutcome.UNDERPERFORM: "↘️",
+        RelativeOutcome.INLINE: "↔️",
+        RelativeOutcome.UNAVAILABLE: "⚪",
+    }[outcome]
+    text = relative_outcome_label(outcome.value, strength.value if strength else "")
+    return f"{icon} *{label} 대비 {text}*"
+
+
+def _outcome_label(value: str) -> str:
+    outcome, _, strength = value.partition(":")
+    return relative_outcome_label(outcome, strength)
 
 
 def _situation_label(value: str) -> str:
     return {
         "company_strength": "종목 고유 강세",
         "company_weakness": "종목 고유 약세",
-        "broadly_explained": "시장·피어 설명 범위",
+        "broadly_explained": "고유 요인 판단 유보",
         "mixed": "혼합",
         "unavailable": "판단 보류",
     }.get(value, value)

@@ -53,6 +53,20 @@ def compare_market_context(
             return None
         return before, after
 
+    def relative_transition(outcome_key: str, strength_key: str) -> tuple[str, str] | None:
+        # Older alerts stored beta-adjusted outcomes, not raw return comparisons.
+        if previous.get("relative_basis") != current.get("relative_basis"):
+            return None
+        before = str(previous.get(outcome_key) or "")
+        after = str(current.get(outcome_key) or "")
+        if not before or not after:
+            return None
+        if previous.get(strength_key):
+            before += f":{previous[strength_key]}"
+        if current.get(strength_key):
+            after += f":{current[strength_key]}"
+        return (before, after) if before != after else None
+
     previous_ids = {
         str(value) for value in previous.get("catalyst_ids", ()) if str(value)
     }
@@ -61,8 +75,8 @@ def compare_market_context(
     }
     return MarketContextDelta(
         situation=transition("situation"),
-        benchmark=transition("benchmark_outcome"),
-        peers=transition("peer_outcome"),
+        benchmark=relative_transition("benchmark_outcome", "benchmark_strength"),
+        peers=relative_transition("peer_outcome", "peer_strength"),
         volume=transition("volume_status"),
         new_catalyst_count=len(current_ids - previous_ids),
     )

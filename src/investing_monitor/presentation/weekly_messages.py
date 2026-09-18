@@ -11,6 +11,7 @@ from investing_monitor.domain.models import (
     VolumeSnapshot,
 )
 from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessment
+from investing_monitor.presentation.market_context import relative_outcome_line
 
 
 def build_weekly_message(
@@ -45,15 +46,18 @@ def build_weekly_message(
         _context(f"완료된 정규장 {session_count}거래일 기준"),
         _section(f"{direction_icon} *주간 방향 · {direction_label}*"),
         _section(
-            _outcome_line(
+            relative_outcome_line(
                 f"반도체 지수({relative.benchmark_symbol})",
-                relative.benchmark.value,
+                relative.benchmark,
+                relative.benchmark_strength,
             )
         ),
     ]
     if relative.peers.value != "unavailable":
         peers = "·".join(relative.peer_symbols)
-        blocks.append(_section(_outcome_line(f"피어 평균({peers})", relative.peers.value)))
+        blocks.append(
+            _section(relative_outcome_line(f"피어 평균({peers})", relative.peers, relative.peer_strength))
+        )
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0
@@ -89,16 +93,6 @@ def build_weekly_message(
         "text": f"${snapshot.ticker} {period_end:%m/%d} 주간 논지 리뷰",
         "blocks": blocks,
     }
-
-
-def _outcome_line(label: str, outcome: str) -> str:
-    icon, text = {
-        "outperform": ("↗️", "아웃퍼폼"),
-        "underperform": ("↘️", "언더퍼폼"),
-        "inline": ("↔️", "비슷한 흐름"),
-        "unavailable": ("⚪", "비교 불가"),
-    }[outcome]
-    return f"{icon} *{label} 대비 {text}*"
 
 
 def _evidence_text(catalyst: Catalyst) -> str:

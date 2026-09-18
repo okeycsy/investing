@@ -10,6 +10,7 @@ from .models import (
     PriceBandSignal,
     PriceBandState,
     RelativeOutcome,
+    RelativeStrength,
     SituationVerdict,
     VolumeSnapshot,
 )
@@ -22,9 +23,14 @@ class RelativeAssessment:
     peers: RelativeOutcome
     peer_symbols: tuple[str, ...]
     peer_average_change_pct: float | None
+    # Model flags apply to the separate expected outcomes, not displayed returns.
     benchmark_normalized: bool = False
     peers_normalized: bool = False
     model_samples: int = 0
+    benchmark_strength: RelativeStrength | None = None
+    peer_strength: RelativeStrength | None = None
+    benchmark_expected: RelativeOutcome | None = None
+    peers_expected: RelativeOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +113,7 @@ class PriceBandPolicy:
 def assess_relative_performance(
     snapshot: MarketSnapshot,
     *,
-    neutral_band_pct: float = 0.5,
+    neutral_band_pct: float = 0.3,
     minimum_peers: int = 2,
     sensitivity: MarketSensitivity | None = None,
 ) -> RelativeAssessment:
@@ -119,8 +125,22 @@ def assess_relative_performance(
     benchmark = _relative_outcome(
         snapshot.change_pct,
         snapshot.benchmark_change_pct,
-        benchmark_band or neutral_band_pct,
-        beta=benchmark_beta,
+        neutral_band_pct,
+    )
+    benchmark_strength = _relative_strength(
+        snapshot.change_pct,
+        snapshot.benchmark_change_pct,
+        benchmark,
+    )
+    benchmark_expected = (
+        _relative_outcome(
+            snapshot.change_pct,
+            snapshot.benchmark_change_pct,
+            benchmark_band or neutral_band_pct,
+            beta=benchmark_beta,
+        )
+        if benchmark_beta is not None
+        else None
     )
     valid_peers = tuple(
         sorted(
@@ -138,20 +158,18 @@ def assess_relative_performance(
             peer_average_change_pct=None,
             benchmark_normalized=benchmark_beta is not None,
             model_samples=(valid_model.benchmark_samples if valid_model else 0),
+            benchmark_strength=benchmark_strength,
+            benchmark_expected=benchmark_expected,
         )
 
     peer_average = sum(change for _, change in valid_peers) / len(valid_peers)
     peer_beta = valid_model.peer_beta if valid_model else None
     peer_band = valid_model.peer_residual_band_pct if valid_model else None
+    peers = _relative_outcome(snapshot.change_pct, peer_average, neutral_band_pct)
     return RelativeAssessment(
         benchmark=benchmark,
         benchmark_symbol=snapshot.benchmark_symbol.upper(),
-        peers=_relative_outcome(
-            snapshot.change_pct,
-            peer_average,
-            peer_band or neutral_band_pct,
-            beta=peer_beta,
-        ),
+        peers=peers,
         peer_symbols=tuple(symbol for symbol, _ in valid_peers),
         peer_average_change_pct=peer_average,
         benchmark_normalized=benchmark_beta is not None,
@@ -162,6 +180,19 @@ def assess_relative_performance(
         )
         if valid_model
         else 0,
+        benchmark_strength=benchmark_strength,
+        peer_strength=_relative_strength(snapshot.change_pct, peer_average, peers),
+        benchmark_expected=benchmark_expected,
+        peers_expected=(
+            _relative_outcome(
+                snapshot.change_pct,
+                peer_average,
+                peer_band or neutral_band_pct,
+                beta=peer_beta,
+            )
+            if peer_beta is not None
+            else None
+        ),
     )
 
 
@@ -171,7 +202,10 @@ def assess_market_situation(
 ) -> SituationAssessment:
     outcomes = tuple(
         outcome
-        for outcome in (relative.benchmark, relative.peers)
+        for outcome in (
+            relative.benchmark_expected or relative.benchmark,
+            relative.peers_expected or relative.peers,
+        )
         if outcome is not RelativeOutcome.UNAVAILABLE
     )
     if len(outcomes) < 2:
@@ -238,12 +272,31 @@ def _relative_outcome(
         if beta is None
         else beta * comparison_change_pct
     )
-    difference = actual_change_pct - expected_change
+    # Subtracting returns can put an exact boundary just above it in binary floats.
+    difference = round(actual_change_pct - expected_change, 10)
     if difference > neutral_band_pct:
         return RelativeOutcome.OUTPERFORM
     if difference < -neutral_band_pct:
         return RelativeOutcome.UNDERPERFORM
     return RelativeOutcome.INLINE
+
+
+def _relative_strength(
+    actual_change_pct: float,
+    comparison_change_pct: float | None,
+    outcome: RelativeOutcome,
+) -> RelativeStrength | None:
+    if comparison_change_pct is None or outcome in {
+        RelativeOutcome.INLINE,
+        RelativeOutcome.UNAVAILABLE,
+    }:
+        return None
+    difference = round(abs(actual_change_pct - comparison_change_pct), 10)
+    if difference <= 0.8:
+        return RelativeStrength.SLIGHT
+    if difference <= 2.0:
+        return RelativeStrength.SIGNIFICANT
+    return RelativeStrength.STRONG
 
 
 def _matching_sensitivity(

@@ -14,7 +14,7 @@ from investing_monitor.domain.policies import (
     SituationAssessment,
     VolumeAssessment,
 )
-from investing_monitor.presentation.market_context import situation_text
+from investing_monitor.presentation.market_context import relative_outcome_line, situation_text
 
 
 def build_close_message(
@@ -40,13 +40,12 @@ def build_close_message(
         },
         _section(f"{direction_icon} *종목 방향 · {direction_label}*"),
     ]
-    if situation is not None:
-        blocks.append(_section(situation_text(situation, snapshot.direction)))
     blocks.append(
         _section(
-            _outcome_line(
+            relative_outcome_line(
                 f"반도체 지수({relative.benchmark_symbol})",
-                relative.benchmark.value,
+                relative.benchmark,
+                relative.benchmark_strength,
             )
         )
     )
@@ -54,8 +53,14 @@ def build_close_message(
     if relative.peers.value != "unavailable":
         peer_symbols = "·".join(relative.peer_symbols)
         blocks.append(
-            _section(_outcome_line(f"피어 평균({peer_symbols})", relative.peers.value))
+            _section(
+                relative_outcome_line(
+                    f"피어 평균({peer_symbols})", relative.peers, relative.peer_strength,
+                )
+            )
         )
+    if situation is not None:
+        blocks.append(_section(situation_text(situation, snapshot.direction)))
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0
@@ -82,16 +87,6 @@ def build_close_message(
         "text": f"${snapshot.ticker} {snapshot.trading_date:%m/%d} 장 마감 브리프",
         "blocks": blocks,
     }
-
-
-def _outcome_line(label: str, outcome: str) -> str:
-    icon, text = {
-        "outperform": ("↗️", "아웃퍼폼"),
-        "underperform": ("↘️", "언더퍼폼"),
-        "inline": ("↔️", "비슷한 흐름"),
-        "unavailable": ("⚪", "비교 불가"),
-    }[outcome]
-    return f"{icon} *{label} 대비 {text}*"
 
 
 def _catalyst_text(catalyst: Catalyst) -> str:

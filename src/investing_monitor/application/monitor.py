@@ -391,10 +391,14 @@ class MarketCycleService:
             "benchmark": {
                 "symbol": relative.benchmark_symbol,
                 "outcome": relative.benchmark.value,
+                "strength": (
+                    relative.benchmark_strength.value if relative.benchmark_strength else None
+                ),
             },
             "peers": {
                 "symbols": list(relative.peer_symbols),
                 "outcome": relative.peers.value,
+                "strength": relative.peer_strength.value if relative.peer_strength else None,
             },
             "situation": {
                 "verdict": situation,
@@ -439,13 +443,18 @@ def _alert_context(
     catalysts: Sequence[Catalyst],
 ) -> dict[str, object]:
     return {
-        "version": 1,
+        "version": 2,
+        "relative_basis": "raw_return_gap_v1",
         "trading_date": signal.trading_date.isoformat(),
         "direction": signal.direction.value,
         "level": signal.level,
         "situation": situation,
         "benchmark_outcome": relative.benchmark.value,
         "peer_outcome": relative.peers.value,
+        "benchmark_strength": (
+            relative.benchmark_strength.value if relative.benchmark_strength else None
+        ),
+        "peer_strength": relative.peer_strength.value if relative.peer_strength else None,
         "volume_status": (
             "exploded"
             if volume_assessment.is_exploded
