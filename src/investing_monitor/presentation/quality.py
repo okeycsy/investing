@@ -28,6 +28,7 @@ FORBIDDEN_TEXT = (
 REQUIRED_TEXT = {
     "price_band": ("반도체 지수(",),
     "volume_spike": ("거래량", "종목 방향", "반도체 지수("),
+    "rapid_move": ("15분", "거래량", "반도체 지수(", "자동 감지"),
     "daily_close": ("장 마감", "종목 방향", "반도체 지수("),
     "weekly_review": ("주간 논지 리뷰", "주간 방향", "반도체 지수("),
     "catalyst": ("확인된 사실",),

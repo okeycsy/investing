@@ -48,7 +48,7 @@ from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS market_sessions (
     upward_high_watermark INTEGER NOT NULL DEFAULT 0,
     downward_high_watermark INTEGER NOT NULL DEFAULT 0,
     volume_alerted INTEGER NOT NULL DEFAULT 0,
+    rapid_up_last_at TEXT,
+    rapid_down_last_at TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -323,6 +325,18 @@ class SQLiteMonitorRepository:
                 "workflow_name",
                 "TEXT NOT NULL DEFAULT ''",
             )
+            self._ensure_column(
+                connection,
+                "market_sessions",
+                "rapid_up_last_at",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "market_sessions",
+                "rapid_down_last_at",
+                "TEXT",
+            )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
@@ -396,7 +410,7 @@ class SQLiteMonitorRepository:
         with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT trading_date, upward_high_watermark, downward_high_watermark, "
-                "volume_alerted "
+                "volume_alerted, rapid_up_last_at, rapid_down_last_at "
                 "FROM market_sessions WHERE ticker = ?",
                 (ticker.upper(),),
             ).fetchone()
@@ -407,6 +421,8 @@ class SQLiteMonitorRepository:
             upward_high_watermark=row["upward_high_watermark"],
             downward_high_watermark=row["downward_high_watermark"],
             volume_alerted=bool(row["volume_alerted"]),
+            rapid_up_last_at=_parse_datetime(row["rapid_up_last_at"]),
+            rapid_down_last_at=_parse_datetime(row["rapid_down_last_at"]),
         )
 
     def record_price_signal(
@@ -435,12 +451,15 @@ class SQLiteMonitorRepository:
             connection.execute(
                 "INSERT INTO market_sessions "
                 "(ticker, trading_date, upward_high_watermark, downward_high_watermark, "
-                "volume_alerted, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "volume_alerted, rapid_up_last_at, rapid_down_last_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(ticker) DO UPDATE SET "
                 "trading_date = excluded.trading_date, "
                 "upward_high_watermark = excluded.upward_high_watermark, "
                 "downward_high_watermark = excluded.downward_high_watermark, "
                 "volume_alerted = excluded.volume_alerted, "
+                "rapid_up_last_at = excluded.rapid_up_last_at, "
+                "rapid_down_last_at = excluded.rapid_down_last_at, "
                 "updated_at = excluded.updated_at",
                 (
                     signal.ticker,
@@ -448,6 +467,8 @@ class SQLiteMonitorRepository:
                     state.upward_high_watermark,
                     state.downward_high_watermark,
                     int(state.volume_alerted),
+                    _utc_iso(state.rapid_up_last_at) if state.rapid_up_last_at else None,
+                    _utc_iso(state.rapid_down_last_at) if state.rapid_down_last_at else None,
                     observed_at,
                 ),
             )
@@ -689,12 +710,15 @@ class SQLiteMonitorRepository:
             connection.execute(
                 "INSERT INTO market_sessions "
                 "(ticker, trading_date, upward_high_watermark, downward_high_watermark, "
-                "volume_alerted, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "volume_alerted, rapid_up_last_at, rapid_down_last_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(ticker) DO UPDATE SET "
                 "trading_date = excluded.trading_date, "
                 "upward_high_watermark = excluded.upward_high_watermark, "
                 "downward_high_watermark = excluded.downward_high_watermark, "
                 "volume_alerted = excluded.volume_alerted, "
+                "rapid_up_last_at = excluded.rapid_up_last_at, "
+                "rapid_down_last_at = excluded.rapid_down_last_at, "
                 "updated_at = excluded.updated_at",
                 (
                     ticker,
@@ -702,6 +726,8 @@ class SQLiteMonitorRepository:
                     state.upward_high_watermark,
                     state.downward_high_watermark,
                     int(state.volume_alerted),
+                    _utc_iso(state.rapid_up_last_at) if state.rapid_up_last_at else None,
+                    _utc_iso(state.rapid_down_last_at) if state.rapid_down_last_at else None,
                     updated_at,
                 ),
             )

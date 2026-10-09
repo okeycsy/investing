@@ -36,6 +36,60 @@ def position_text(position: Position, current_price: float | None) -> str:
     return line
 
 
+def day_level_review(
+    levels: PriceLevels,
+    close_price: float | None,
+    day_low: float | None,
+    day_high: float | None,
+) -> str:
+    """How today's session interacted with the pre-computed level map."""
+    if close_price is None or day_low is None or day_high is None:
+        return ""
+    tolerance = max((levels.atr14 or 0.0) * 0.15, close_price * 0.003)
+    lines: list[str] = []
+    for support in levels.supports:
+        if day_low > support.price + tolerance:
+            continue
+        if close_price < support.price - tolerance:
+            lines.append(
+                f"⚠️ 지지 {price_label(support.price)}({support.touches}회) 이탈 마감"
+                f" — 저가 {price_label(day_low)}"
+            )
+        else:
+            lines.append(
+                f"🛡️ 지지 {price_label(support.price)}({support.touches}회) 테스트 후 사수"
+                f" — 저가 {price_label(day_low)}"
+            )
+    for resistance in levels.resistances:
+        if day_high < resistance.price - tolerance:
+            continue
+        if close_price > resistance.price + tolerance:
+            lines.append(
+                f"🚀 저항 {price_label(resistance.price)}({resistance.touches}회) 돌파 마감"
+            )
+        else:
+            lines.append(
+                f"🧲 저항 {price_label(resistance.price)}({resistance.touches}회) 터치 후 반락"
+                f" — 고가 {price_label(day_high)}"
+            )
+    previous_close = levels.last_close
+    if previous_close is not None:
+        for label, value in (
+            ("SMA20", levels.sma20),
+            ("SMA50", levels.sma50),
+            ("SMA200", levels.sma200),
+        ):
+            if value is None:
+                continue
+            if previous_close < value <= close_price:
+                lines.append(f"📈 {label} {price_label(value)} 상향 돌파 마감")
+            elif previous_close > value >= close_price:
+                lines.append(f"📉 {label} {price_label(value)} 하향 이탈 마감")
+    if not lines:
+        return ""
+    return "📐 *오늘의 레벨 리뷰*\n" + "\n".join(lines)
+
+
 def _structural_line(levels: PriceLevels, reference: float | None) -> str:
     parts = []
     if levels.supports:

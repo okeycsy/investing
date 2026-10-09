@@ -403,6 +403,7 @@ class YahooMarketDataAdapter:
             for symbol, chart in comparisons.items()
         }
         cumulative = self._cumulative_regular_volume(current_bars, trading_date)
+        rapid_metrics = self._rapid_metrics(current_bars, trading_date)
 
         replay_bars = self._bars_after_cursor(
             current_bars,
@@ -418,6 +419,7 @@ class YahooMarketDataAdapter:
                 comparisons,
                 comparison_references,
                 comparison_quotes,
+                rapid_metrics,
             )
             for bar in replay_bars
         )
@@ -479,6 +481,7 @@ class YahooMarketDataAdapter:
         comparisons: Mapping[str, YahooChart | None],
         comparison_references: Mapping[str, float | None],
         comparison_quotes: Mapping[str, YahooQuote] | None,
+        rapid_metrics: Mapping[datetime, tuple[float | None, float | None]] | None = None,
     ) -> MarketFrame:
         if comparison_quotes is not None:
             comparison_changes = {
@@ -507,11 +510,18 @@ class YahooMarketDataAdapter:
                 peer: comparison_changes.get(peer) for peer in self.profile.peers
             },
         )
+        change_15m, ratio_15m = (
+            rapid_metrics.get(bar.observed_at, (None, None))
+            if rapid_metrics is not None
+            else (None, None)
+        )
         return MarketFrame(
             snapshot=snapshot,
             close_price=bar.close,
             reference_close=reference_close,
             cumulative_volume=cumulative_volume,
+            change_15m_pct=change_15m,
+            volume_15m_ratio=ratio_15m,
         )
 
     def _reference_close(self, chart: YahooChart, trading_date: date) -> float:
@@ -608,6 +618,44 @@ class YahooMarketDataAdapter:
                 bar_index += 1
             cumulative[bar.observed_at] = running
         return cumulative
+
+    def _rapid_metrics(
+        self,
+        current_bars: Sequence[YahooBar],
+        trading_date: date,
+    ) -> dict[datetime, tuple[float | None, float | None]]:
+        """15-minute move and volume burst ratio per bar.
+
+        The volume ratio compares the trailing three bars against three
+        typical (median) regular-session bars seen so far, after echo-glitch
+        sanitisation, so one burst bar stands out instead of poisoning the
+        baseline.
+        """
+        window = self.calendar.window(trading_date)
+        metrics: dict[datetime, tuple[float | None, float | None]] = {}
+        regular_volumes: list[int] = []
+        for index, bar in enumerate(current_bars):
+            change: float | None = None
+            if index >= 3 and current_bars[index - 3].close > 0:
+                change = _change_pct(bar.close, current_bars[index - 3].close)
+            ratio: float | None = None
+            is_regular = window.open_at <= bar.observed_at < window.close_at
+            if is_regular and len(regular_volumes) >= 6:
+                ordered = sorted(regular_volumes)
+                median = ordered[len(ordered) // 2]
+                if median > 0 and index >= 3:
+                    recent = sum(
+                        max(0, item.volume)
+                        for item in current_bars[index - 2 : index + 1]
+                    )
+                    ratio = recent / (3 * median)
+            metrics[bar.observed_at] = (change, ratio)
+            if is_regular:
+                running = sum(regular_volumes)
+                regular_volumes.append(
+                    _sanitized_bar_volume(bar.volume, running, len(regular_volumes))
+                )
+        return metrics
 
     def _bars_after_cursor(
         self,

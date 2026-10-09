@@ -13,7 +13,19 @@ from investing_monitor.domain.levels import (
     compute_price_levels,
 )
 from investing_monitor.domain.models import Position
-from investing_monitor.presentation.levels import levels_text, position_text
+from investing_monitor.domain.policies import RapidMovePolicy
+from investing_monitor.domain.models import (
+    Direction,
+    MarketFrame,
+    MarketSession,
+    MarketSnapshot,
+    PriceBandState,
+)
+from investing_monitor.presentation.levels import (
+    day_level_review,
+    levels_text,
+    position_text,
+)
 
 TODAY = date(2026, 10, 9)
 AT = datetime(2026, 10, 9, 18, 0, tzinfo=timezone.utc)
@@ -137,6 +149,126 @@ class LevelsPresentationTest(unittest.TestCase):
 
         self.assertIn("-31.13%", text)
         self.assertNotIn("주 ·", text)
+
+    def test_day_level_review_marks_defended_support_and_sma_cross(self):
+        closes = [250.0] * 57 + [246.0, 244.0, 244.5]
+        bars = history(closes, spread=0.5)
+        for index in (-3, -2, -1):
+            bar = bars[index]
+            bars[index] = DailyBar(
+                trading_date=bar.trading_date,
+                close=bar.close,
+                high=bar.close + 0.5,
+                low=239.9,
+            )
+        levels = compute_price_levels("VRT", bars, trading_date=TODAY, computed_at=AT)
+
+        held = day_level_review(levels, 244.4, 239.95, 248.0)
+        broken = day_level_review(levels, 236.0, 235.5, 245.0)
+
+        self.assertIn("오늘의 레벨 리뷰", held)
+        self.assertIn("테스트 후 사수", held)
+        self.assertIn("이탈 마감", broken)
+
+    def test_day_level_review_silent_when_no_level_was_touched(self):
+        from investing_monitor.domain.levels import ClusteredLevel
+
+        levels = PriceLevels(
+            ticker="VRT",
+            trading_date=TODAY,
+            computed_at=AT,
+            atr14=2.0,
+            supports=(ClusteredLevel(230.0, 3),),
+            resistances=(ClusteredLevel(260.0, 4),),
+            last_close=250.0,
+        )
+
+        self.assertEqual(day_level_review(levels, 250.1, 249.8, 250.4), "")
+
+
+def frame(change_15m, ratio_15m, *, minute=0):
+    observed = AT + timedelta(minutes=minute)
+    snapshot = MarketSnapshot(
+        ticker="VRT",
+        trading_date=TODAY,
+        observed_at=observed,
+        session=MarketSession.REGULAR,
+        change_pct=-2.0,
+    )
+    return MarketFrame(
+        snapshot=snapshot,
+        close_price=240.0,
+        reference_close=245.0,
+        change_15m_pct=change_15m,
+        volume_15m_ratio=ratio_15m,
+    )
+
+
+class RapidMoveMessageTest(unittest.TestCase):
+    def test_rapid_move_message_passes_audit(self):
+        from investing_monitor.domain.models import RapidMoveSignal
+        from investing_monitor.domain.policies import assess_relative_performance
+        from investing_monitor.presentation.quality import audit_message
+        from investing_monitor.presentation.slack_messages import (
+            build_rapid_move_message,
+        )
+
+        sample = frame(-1.8, 3.4)
+        signal = RapidMoveSignal(
+            event_key="VRT:2026-10-09:rapid:down:1800",
+            ticker="VRT",
+            trading_date=TODAY,
+            direction=Direction.DOWN,
+            change_15m_pct=-1.8,
+            volume_15m_ratio=3.4,
+            observed_at=sample.snapshot.observed_at,
+        )
+
+        payload = build_rapid_move_message(
+            signal,
+            sample.snapshot,
+            assess_relative_performance(sample.snapshot),
+            (),
+            detected_at=AT + timedelta(minutes=2),
+            price=240.0,
+            reference_close=245.0,
+            position=Position(average_price=355.0),
+        )
+
+        self.assertTrue(audit_message("rapid_move", payload).passed)
+        self.assertIn("15분 급락 감지 -1.8%", payload["text"])
+        self.assertIn("3.4배", payload["text"])
+
+
+class RapidMovePolicyTest(unittest.TestCase):
+    def test_fires_on_fast_move_with_volume_burst_and_cooldown(self):
+        policy = RapidMovePolicy()
+        state = PriceBandState(trading_date=TODAY)
+
+        first, state = policy.evaluate(frame(-1.8, 3.2), state)
+        muted, state = policy.evaluate(frame(-2.1, 4.0, minute=10), state)
+        opposite, state = policy.evaluate(frame(1.7, 3.0, minute=20), state)
+        after_cooldown, state = policy.evaluate(frame(-1.6, 2.6, minute=70), state)
+
+        self.assertIsNotNone(first)
+        self.assertEqual(first.direction, Direction.DOWN)
+        self.assertIsNone(muted)
+        self.assertIsNotNone(opposite)
+        self.assertEqual(opposite.direction, Direction.UP)
+        self.assertIsNotNone(after_cooldown)
+
+    def test_requires_both_speed_and_volume(self):
+        policy = RapidMovePolicy()
+        state = PriceBandState(trading_date=TODAY)
+
+        slow, state = policy.evaluate(frame(-0.9, 5.0), state)
+        quiet, state = policy.evaluate(frame(-2.5, 1.2), state)
+        missing, _ = policy.evaluate(frame(None, None), state)
+
+        self.assertIsNone(slow)
+        self.assertIsNone(quiet)
+        self.assertIsNone(missing)
+
 
     def test_levels_payload_is_json_serializable(self):
         levels = compute_price_levels(

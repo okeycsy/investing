@@ -92,6 +92,8 @@ class MarketFrame:
     close_price: float
     reference_close: float
     cumulative_volume: int = 0
+    change_15m_pct: float | None = None
+    volume_15m_ratio: float | None = None
 
     def __post_init__(self) -> None:
         if self.snapshot.observed_at.tzinfo is None:
@@ -236,6 +238,8 @@ class PriceBandState:
     upward_high_watermark: int = 0
     downward_high_watermark: int = 0
     volume_alerted: bool = False
+    rapid_up_last_at: datetime | None = None
+    rapid_down_last_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +250,18 @@ class PriceBandSignal:
     direction: Direction
     level: int
     is_reversal: bool
+    observed_at: datetime
+    session: MarketSession = MarketSession.REGULAR
+
+
+@dataclass(frozen=True)
+class RapidMoveSignal:
+    event_key: str
+    ticker: str
+    trading_date: date
+    direction: Direction
+    change_15m_pct: float
+    volume_15m_ratio: float
     observed_at: datetime
     session: MarketSession = MarketSession.REGULAR
 

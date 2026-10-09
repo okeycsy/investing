@@ -11,6 +11,7 @@ from investing_monitor.domain.models import (
     MarketSnapshot,
     Position,
     PriceBandSignal,
+    RapidMoveSignal,
     VolumeSignal,
     VolumeSnapshot,
 )
@@ -294,6 +295,88 @@ def build_volume_message(
         "text": fallback,
         "blocks": blocks,
     }
+
+
+def build_rapid_move_message(
+    signal: RapidMoveSignal,
+    snapshot: MarketSnapshot,
+    relative: RelativeAssessment,
+    catalysts: Sequence[Catalyst],
+    *,
+    detected_at: datetime | None = None,
+    situation: SituationAssessment | None = None,
+    price: float | None = None,
+    reference_close: float | None = None,
+    levels: PriceLevels | None = None,
+    position: Position | None = None,
+) -> dict:
+    direction_icon = "📈" if signal.direction is Direction.UP else "📉"
+    direction_label = "급등" if signal.direction is Direction.UP else "급락"
+    title = (
+        f"${signal.ticker} 15분 {direction_label} 감지 "
+        f"{signal.change_15m_pct:+.1f}%"
+    )
+    detection_delay = (
+        delay_seconds(signal.observed_at, detected_at) if detected_at else 0
+    )
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"⚡ {title}"},
+        },
+        _context(
+            observation_context(
+                signal.observed_at,
+                session_label(signal.session),
+                detected_at,
+                detection_delay,
+            )
+        ),
+        _section(
+            f"{direction_icon} *15분간 {pct_label(signal.change_15m_pct)}*"
+            + (
+                f" · 현재 {price_label(price)} ({pct_label(snapshot.change_pct)})"
+                if price is not None else ""
+            )
+            + (
+                f" · 전일 종가 {price_label(reference_close)}"
+                if reference_close is not None else ""
+            )
+            + f"\n같은 15분 거래량이 당일 평시 봉의 *{signal.volume_15m_ratio:.1f}배*"
+        ),
+        _section(_relative_text(relative, snapshot)),
+    ]
+    if situation is not None:
+        blocks.append(_section(situation_text(situation, signal.direction)))
+    if levels is not None:
+        rendered_levels = levels_text(levels, price)
+        if rendered_levels:
+            blocks.append(_section(rendered_levels))
+    if position is not None:
+        rendered_position = position_text(position, price)
+        if rendered_position:
+            blocks.append(_section(rendered_position))
+    selected = list(catalysts[:2])
+    if selected:
+        blocks.append(_section("📰 *최근 확인된 관련 사건*"))
+        blocks.extend(_section(_catalyst_text(catalyst)) for catalyst in selected)
+    else:
+        blocks.append(
+            _section(
+                "🔎 *직접 촉매 아직 확인되지 않음*\n"
+                "대형 주문·수급 또는 아직 보도되지 않은 요인일 수 있음"
+            )
+        )
+    blocks.append(
+        _context("속도·거래량 기반 자동 감지 신호이며 원인과 지속 여부는 미확정")
+    )
+    fallback = (
+        f"{title} | 거래량 {signal.volume_15m_ratio:.1f}배 "
+        f"| 관측 {timestamp(signal.observed_at)}"
+    )
+    if detected_at is not None:
+        fallback += f" | 확인 {timestamp(detected_at)}"
+    return {"text": fallback, "blocks": blocks}
 
 
 def _relative_text(

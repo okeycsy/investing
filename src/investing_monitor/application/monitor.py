@@ -19,6 +19,7 @@ from investing_monitor.domain.models import (
     VolumeSnapshot,
 )
 from investing_monitor.domain.policies import (
+    RapidMovePolicy,
     PriceBandPolicy,
     RelativeAssessment,
     VolumeAssessment,
@@ -35,6 +36,7 @@ from investing_monitor.ports.providers import (
 from investing_monitor.ports.repository import AlertRecord, MonitorRepository
 from investing_monitor.presentation.slack_messages import (
     build_price_band_message,
+    build_rapid_move_message,
     build_volume_message,
 )
 
@@ -167,11 +169,13 @@ class MarketCycleService:
         repository: MonitorRepository,
         *,
         price_policy: PriceBandPolicy | None = None,
+        rapid_policy: RapidMovePolicy | None = None,
         enqueue_alerts: bool = True,
         position: Position | None = None,
     ) -> None:
         self.repository = repository
         self.price_policy = price_policy or PriceBandPolicy()
+        self.rapid_policy = rapid_policy or RapidMovePolicy()
         self.enqueue_alerts = enqueue_alerts
         self.position = position
 
@@ -325,6 +329,47 @@ class MarketCycleService:
             )
             payloads[signal.event_key] = payload
             detection_delays[signal.event_key] = detection_delay
+
+        # Velocity alarms only make sense on fresh data: stale replays of a
+        # long scheduler gap are already covered by band alerts and briefs.
+        if not signals and detected_at is not None:
+            for frame in cycle.frames:
+                if detected_at - frame.snapshot.observed_at > timedelta(minutes=15):
+                    continue
+                rapid_signal, state = self.rapid_policy.evaluate(frame, state)
+                if rapid_signal is None:
+                    continue
+                relative = assess_relative_performance(
+                    frame.snapshot,
+                    sensitivity=sensitivity,
+                )
+                situation = assess_market_situation(frame.snapshot, relative)
+                payload = build_rapid_move_message(
+                    rapid_signal,
+                    frame.snapshot,
+                    relative,
+                    _contextual_catalysts(catalysts, rapid_signal.observed_at),
+                    detected_at=detected_at,
+                    situation=situation,
+                    price=frame.close_price,
+                    reference_close=frame.reference_close,
+                    levels=levels,
+                    position=self.position,
+                )
+                alerts.append(
+                    AlertRecord(
+                        event_key=rapid_signal.event_key,
+                        ticker=rapid_signal.ticker,
+                        alert_type="rapid_move",
+                        created_at=rapid_signal.observed_at,
+                        payload=payload,
+                    )
+                )
+                payloads[rapid_signal.event_key] = payload
+                detection_delays[rapid_signal.event_key] = self._detection_delay(
+                    rapid_signal.observed_at,
+                    detected_at,
+                )
 
         if consume_volume:
             state = replace(state, volume_alerted=True)

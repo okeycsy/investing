@@ -12,7 +12,11 @@ from investing_monitor.domain.models import (
     ThesisImpact,
     VolumeSnapshot,
 )
-from investing_monitor.presentation.levels import levels_text, position_text
+from investing_monitor.presentation.levels import (
+    day_level_review,
+    levels_text,
+    position_text,
+)
 from investing_monitor.domain.policies import (
     RelativeAssessment,
     SituationAssessment,
@@ -120,6 +124,9 @@ def build_close_message(
         )
 
     if levels is not None:
+        rendered_review = day_level_review(levels, close_price, day_low, day_high)
+        if rendered_review:
+            blocks.append(_section(rendered_review))
         rendered_levels = levels_text(levels, close_price)
         if rendered_levels:
             blocks.append(_section(rendered_levels))

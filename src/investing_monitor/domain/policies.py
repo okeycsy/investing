@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from math import floor
 
 from .models import (
     Direction,
+    MarketFrame,
     MarketSensitivity,
     MarketSnapshot,
     PriceBandSignal,
     PriceBandState,
+    RapidMoveSignal,
     RelativeOutcome,
     RelativeStrength,
     SituationVerdict,
@@ -45,6 +48,69 @@ class VolumeAssessment:
     ratio: float | None
     is_ready: bool
     is_exploded: bool
+
+
+class RapidMovePolicy:
+    """Velocity alarm: a sharp move on burst volume inside 15 minutes.
+
+    Fires when the 15-minute price change and the 15-minute volume (vs the
+    session's typical bar) both spike, then stays quiet per direction for
+    the cooldown so a fast market does not spam the channel.
+    """
+
+    def __init__(
+        self,
+        *,
+        move_threshold_pct: float = 1.5,
+        volume_ratio_threshold: float = 2.5,
+        cooldown: timedelta = timedelta(minutes=60),
+    ) -> None:
+        if move_threshold_pct <= 0 or volume_ratio_threshold <= 0:
+            raise ValueError("rapid-move thresholds must be positive")
+        self.move_threshold_pct = move_threshold_pct
+        self.volume_ratio_threshold = volume_ratio_threshold
+        self.cooldown = cooldown
+
+    def evaluate(
+        self,
+        frame: MarketFrame,
+        state: PriceBandState,
+    ) -> tuple[RapidMoveSignal | None, PriceBandState]:
+        change = frame.change_15m_pct
+        ratio = frame.volume_15m_ratio
+        if change is None or ratio is None:
+            return None, state
+        if abs(change) < self.move_threshold_pct or ratio < self.volume_ratio_threshold:
+            return None, state
+        direction = Direction.UP if change > 0 else Direction.DOWN
+        observed_at = frame.snapshot.observed_at
+        last_at = (
+            state.rapid_up_last_at
+            if direction is Direction.UP
+            else state.rapid_down_last_at
+        )
+        if last_at is not None and observed_at - last_at < self.cooldown:
+            return None, state
+        if direction is Direction.UP:
+            next_state = replace(state, rapid_up_last_at=observed_at)
+        else:
+            next_state = replace(state, rapid_down_last_at=observed_at)
+        direction_token = "up" if direction is Direction.UP else "down"
+        event_key = (
+            f"{frame.snapshot.ticker.upper()}:{frame.snapshot.trading_date.isoformat()}:"
+            f"rapid:{direction_token}:{observed_at.strftime('%H%M')}"
+        )
+        signal = RapidMoveSignal(
+            event_key=event_key,
+            ticker=frame.snapshot.ticker.upper(),
+            trading_date=frame.snapshot.trading_date,
+            direction=direction,
+            change_15m_pct=change,
+            volume_15m_ratio=ratio,
+            observed_at=observed_at,
+            session=frame.snapshot.session,
+        )
+        return signal, next_state
 
 
 class PriceBandPolicy:
