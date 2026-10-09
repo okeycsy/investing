@@ -4,14 +4,17 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 
+from investing_monitor.domain.levels import PriceLevels
 from investing_monitor.domain.models import (
     Catalyst,
     Direction,
     MarketSnapshot,
+    Position,
     PriceBandSignal,
     VolumeSignal,
     VolumeSnapshot,
 )
+from investing_monitor.presentation.levels import levels_text, position_text
 from investing_monitor.domain.policies import (
     RelativeAssessment,
     SituationAssessment,
@@ -55,6 +58,8 @@ def build_price_band_message(
     event_price: float | None = None,
     latest_price: float | None = None,
     reference_close: float | None = None,
+    levels: PriceLevels | None = None,
+    position: Position | None = None,
 ) -> dict:
     direction_icon = "📈" if signal.direction is Direction.UP else "📉"
     direction_label = "상승" if signal.direction is Direction.UP else "하락"
@@ -108,6 +113,16 @@ def build_price_band_message(
     )
     if price_line:
         blocks.append(_section(price_line))
+
+    display_price = latest_price if latest_price is not None else event_price
+    if levels is not None:
+        rendered_levels = levels_text(levels, display_price)
+        if rendered_levels:
+            blocks.append(_section(rendered_levels))
+    if position is not None:
+        rendered_position = position_text(position, display_price)
+        if rendered_position:
+            blocks.append(_section(rendered_position))
 
     # Historical moves cannot borrow a later volume reading as event-time context.
     rendered_delta = delta_text(replace(delta, volume=None) if historical and delta else delta)
@@ -201,6 +216,8 @@ def build_volume_message(
     situation: SituationAssessment | None = None,
     price: float | None = None,
     reference_close: float | None = None,
+    levels: PriceLevels | None = None,
+    position: Position | None = None,
 ) -> dict:
     observed_at = volume.observed_at or signal.observed_at
     if detected_at is not None:
@@ -262,6 +279,14 @@ def build_volume_message(
     )
     if situation is not None:
         blocks.append(_section(situation_text(situation, snapshot.direction)))
+    if levels is not None:
+        rendered_levels = levels_text(levels, price)
+        if rendered_levels:
+            blocks.append(_section(rendered_levels))
+    if position is not None:
+        rendered_position = position_text(position, price)
+        if rendered_position:
+            blocks.append(_section(rendered_position))
     fallback = f"{title} | 자료 {timestamp(observed_at)}"
     if detected_at is not None:
         fallback += f" | 확인 {timestamp(detected_at)}"

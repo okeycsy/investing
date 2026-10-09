@@ -149,6 +149,14 @@ class CloseMarketContext:
 
 
 @dataclass(frozen=True)
+class Position:
+    """User-declared holding, supplied via environment, never persisted."""
+
+    average_price: float
+    shares: int = 0
+
+
+@dataclass(frozen=True)
 class MarketSensitivity:
     ticker: str
     benchmark_symbol: str

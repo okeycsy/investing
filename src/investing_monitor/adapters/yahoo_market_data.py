@@ -10,6 +10,7 @@ from typing import Any
 import requests
 
 from investing_monitor.adapters.exchange_calendar import XNYSCalendar
+from investing_monitor.domain.levels import DailyBar, PriceLevels, compute_price_levels
 from investing_monitor.domain.models import (
     InstrumentProfile,
     MarketCycle,
@@ -61,6 +62,8 @@ class YahooBar:
     observed_at: datetime
     close: float
     volume: int
+    high: float | None = None
+    low: float | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +287,37 @@ class YahooMarketDataAdapter:
         self.interval = interval
         self.regular_freshness = regular_freshness
         self.extended_freshness = extended_freshness
+
+    def fetch_price_levels(self, now: datetime) -> PriceLevels:
+        """Compute technical levels from one year of completed daily bars."""
+        now = _utc(now)
+        trading_date = now.astimezone(NEW_YORK).date()
+        chart = self.client.fetch(
+            self.profile.ticker,
+            interval="1d",
+            range_="1y",
+            include_prepost=False,
+        )
+        daily_bars = [
+            DailyBar(
+                trading_date=bar.observed_at.astimezone(NEW_YORK).date(),
+                close=bar.close,
+                high=bar.high,
+                low=bar.low,
+            )
+            for bar in chart.bars
+        ]
+        levels = compute_price_levels(
+            self.profile.ticker,
+            daily_bars,
+            trading_date=trading_date,
+            computed_at=now,
+        )
+        if levels.last_close is None:
+            raise YahooMarketDataError(
+                "Yahoo daily history is insufficient for price levels"
+            )
+        return levels
 
     def fetch_sensitivity(self, now: datetime) -> MarketSensitivity:
         now = _utc(now)
@@ -680,6 +714,8 @@ def parse_chart_payload(payload: Mapping[str, Any], symbol: str, interval: str) 
     quotes = ((result.get("indicators") or {}).get("quote") or [{}])[0]
     closes = quotes.get("close") or []
     volumes = quotes.get("volume") or []
+    highs = quotes.get("high") or []
+    lows = quotes.get("low") or []
     bars: dict[datetime, YahooBar] = {}
     for index, raw_timestamp in enumerate(timestamps):
         close = closes[index] if index < len(closes) else None
@@ -687,10 +723,14 @@ def parse_chart_payload(payload: Mapping[str, Any], symbol: str, interval: str) 
             continue
         observed_at = datetime.fromtimestamp(int(raw_timestamp), timezone.utc)
         raw_volume = volumes[index] if index < len(volumes) else 0
+        raw_high = highs[index] if index < len(highs) else None
+        raw_low = lows[index] if index < len(lows) else None
         bars[observed_at] = YahooBar(
             observed_at=observed_at,
             close=float(close),
             volume=max(0, int(raw_volume or 0)),
+            high=float(raw_high) if raw_high is not None else None,
+            low=float(raw_low) if raw_low is not None else None,
         )
     if not bars:
         raise ValueError("chart contains no valid bars")

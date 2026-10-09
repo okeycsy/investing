@@ -55,6 +55,7 @@ from investing_monitor.presentation.operations import (
 )
 from investing_monitor.presentation.previews import PREVIEW_KINDS, build_preview_message
 from investing_monitor.presentation.quality import audit_message
+from investing_monitor.domain.models import Position
 from investing_monitor.ports.repository import AlertRecord
 from investing_monitor.runtime.tick import (
     NEW_YORK,
@@ -339,7 +340,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "v2 shadow runtime does not deliver Slack",
             )
         )
-        service = MarketCycleService(repository, enqueue_alerts=production)
+        position = _position_from_env()
+        service = MarketCycleService(
+            repository,
+            enqueue_alerts=production,
+            position=position,
+        )
         sensitivity = repository.load_market_sensitivity(profile.ticker)
         if sensitivity is not None and (
             sensitivity.benchmark_symbol != profile.benchmark
@@ -397,6 +403,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     repository.save_market_sensitivity(refreshed)
                     sensitivity = refreshed
                     sensitivity_status = "refreshed"
+            levels = repository.load_price_levels(profile.ticker, cycle.trading_date)
+            levels_status = "cached" if levels is not None else "unavailable"
+            levels_error = ""
+            if levels is None:
+                try:
+                    levels = adapter.fetch_price_levels(now)
+                except Exception as exc:
+                    levels_error = str(exc)
+                else:
+                    repository.save_price_levels(levels)
+                    levels_status = "refreshed"
             report = service.process(
                 cycle,
                 repository.recent_catalysts(
@@ -406,9 +423,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 detected_at=now if args.now else datetime.now(timezone.utc),
                 sensitivity=sensitivity,
+                levels=levels,
             )
             market_result.update(report.as_dict())
             market_result["source_age_seconds"] = cycle.source_age_seconds
+            market_result["price_levels"] = {
+                "status": levels_status,
+                "error": levels_error,
+            }
             market_result["sensitivity_model"] = {
                 "status": sensitivity_status,
                 "samples": (
@@ -542,7 +564,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
                 return evidence_result["sec"]
 
-            close_service = CloseBriefService(repository, enqueue_alerts=production)
+            close_service = CloseBriefService(
+                repository,
+                enqueue_alerts=production,
+                position=position,
+            )
             weekly_service = WeeklyBriefService(repository, enqueue_alerts=production)
 
             def handle_close(task):
@@ -854,6 +880,25 @@ def _deliver_test_message(
         ).deliver_pending(event_key=event_key)
     )
     return report, len(checkpoints)
+
+
+def _position_from_env() -> Position | None:
+    """Holding comes from env/secrets only, keeping it out of the public repo."""
+    raw_price = os.environ.get("MONITOR_POSITION_AVG_PRICE", "").strip()
+    if not raw_price:
+        return None
+    try:
+        average_price = float(raw_price)
+    except ValueError:
+        return None
+    if average_price <= 0:
+        return None
+    raw_shares = os.environ.get("MONITOR_POSITION_SHARES", "").strip()
+    try:
+        shares = int(raw_shares) if raw_shares else 0
+    except ValueError:
+        shares = 0
+    return Position(average_price=average_price, shares=max(0, shares))
 
 
 def _parse_timestamp(value: str) -> datetime:

@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
+from investing_monitor.domain.levels import PriceLevels
 from investing_monitor.domain.models import (
     Catalyst,
     Direction,
@@ -11,6 +12,7 @@ from investing_monitor.domain.models import (
     MarketFrame,
     MarketSensitivity,
     MarketSnapshot,
+    Position,
     PriceBandSignal,
     PriceBandState,
     VolumeSignal,
@@ -166,10 +168,12 @@ class MarketCycleService:
         *,
         price_policy: PriceBandPolicy | None = None,
         enqueue_alerts: bool = True,
+        position: Position | None = None,
     ) -> None:
         self.repository = repository
         self.price_policy = price_policy or PriceBandPolicy()
         self.enqueue_alerts = enqueue_alerts
+        self.position = position
 
     def process(
         self,
@@ -178,6 +182,7 @@ class MarketCycleService:
         *,
         detected_at: datetime | None = None,
         sensitivity: MarketSensitivity | None = None,
+        levels: PriceLevels | None = None,
     ) -> MarketCycleReport:
         if detected_at is not None and detected_at.tzinfo is None:
             raise ValueError("detected_at must be timezone-aware")
@@ -266,6 +271,8 @@ class MarketCycleService:
                 event_price=frame.close_price,
                 latest_price=cycle.frames[-1].close_price,
                 reference_close=frame.reference_close,
+                levels=levels,
+                position=self.position,
             )
             alerts.append(
                 AlertRecord(
@@ -304,6 +311,8 @@ class MarketCycleService:
                 situation=latest_situation,
                 price=cycle.frames[-1].close_price,
                 reference_close=cycle.frames[-1].reference_close,
+                levels=levels,
+                position=self.position,
             )
             alerts.append(
                 AlertRecord(

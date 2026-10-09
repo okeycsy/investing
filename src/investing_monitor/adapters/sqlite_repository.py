@@ -20,6 +20,7 @@ from investing_monitor.domain.evidence import (
     GroundedFact,
     candidate_identity,
 )
+from investing_monitor.domain.levels import PriceLevels
 from investing_monitor.domain.evidence_qualification import (
     evidence_disposition,
     legacy_evidence_qualification,
@@ -47,7 +48,7 @@ from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -94,6 +95,14 @@ CREATE TABLE IF NOT EXISTS market_volume_observations (
 
 CREATE INDEX IF NOT EXISTS idx_market_volume_ticker_date
 ON market_volume_observations(ticker, trading_date, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS price_levels (
+    ticker TEXT NOT NULL,
+    trading_date TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, trading_date)
+);
 
 CREATE TABLE IF NOT EXISTS market_sensitivity_models (
     ticker TEXT PRIMARY KEY,
@@ -456,6 +465,38 @@ class SQLiteMonitorRepository:
                 (ticker.upper(),),
             ).fetchone()
         return _parse_datetime(row["observed_at"]) if row else None
+
+    def save_price_levels(self, levels: PriceLevels) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO price_levels "
+                "(ticker, trading_date, payload_json, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    levels.ticker.upper(),
+                    levels.trading_date.isoformat(),
+                    json.dumps(levels.as_dict(), ensure_ascii=False),
+                    levels.computed_at.isoformat(),
+                ),
+            )
+
+    def load_price_levels(
+        self,
+        ticker: str,
+        trading_date: date,
+    ) -> PriceLevels | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT payload_json FROM price_levels "
+                "WHERE ticker = ? AND trading_date = ?",
+                (ticker.upper(), trading_date.isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return PriceLevels.from_dict(json.loads(row["payload_json"]))
+        except (ValueError, TypeError, KeyError):
+            return None
 
     def load_market_sensitivity(self, ticker: str) -> MarketSensitivity | None:
         with closing(self._connect()) as connection, connection:

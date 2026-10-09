@@ -101,6 +101,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SEC_CONTACT: maybe2213@naver.com
           V2_PRODUCTION_ENABLED: 'true'
+          MONITOR_POSITION_AVG_PRICE: ${{ secrets.MONITOR_POSITION_AVG_PRICE }}
+          MONITOR_POSITION_SHARES: ${{ secrets.MONITOR_POSITION_SHARES }}
         run: investing-monitor --db .runtime/monitor.db production-tick --scheduled-at "${{ steps.run-metadata.outputs.created_at }}" --trigger "${{ github.event_name }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Run production doctor

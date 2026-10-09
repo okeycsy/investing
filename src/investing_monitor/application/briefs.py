@@ -10,6 +10,7 @@ from investing_monitor.domain.models import (
     MarketSession,
     MarketSensitivity,
     MarketSnapshot,
+    Position,
     ThesisImpact,
 )
 from investing_monitor.domain.policies import (
@@ -52,9 +53,11 @@ class CloseBriefService:
         repository: MonitorRepository,
         *,
         enqueue_alerts: bool = True,
+        position: Position | None = None,
     ) -> None:
         self.repository = repository
         self.enqueue_alerts = enqueue_alerts
+        self.position = position
 
     def process(
         self,
@@ -93,6 +96,8 @@ class CloseBriefService:
             reference_close=context.reference_close,
             day_low=context.day_low,
             day_high=context.day_high,
+            levels=self.repository.load_price_levels(ticker, trading_date),
+            position=self.position,
         )
         event_key = f"{ticker.upper()}:{trading_date.isoformat()}:close"
         inserted = self.repository.record_alert(

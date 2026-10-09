@@ -3,13 +3,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
+from investing_monitor.domain.levels import PriceLevels
 from investing_monitor.domain.models import (
     Catalyst,
     Direction,
     MarketSnapshot,
+    Position,
     ThesisImpact,
     VolumeSnapshot,
 )
+from investing_monitor.presentation.levels import levels_text, position_text
 from investing_monitor.domain.policies import (
     RelativeAssessment,
     SituationAssessment,
@@ -38,6 +41,8 @@ def build_close_message(
     reference_close: float | None = None,
     day_low: float | None = None,
     day_high: float | None = None,
+    levels: PriceLevels | None = None,
+    position: Position | None = None,
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "양전"),
@@ -113,6 +118,15 @@ def build_close_message(
                 f"{volume.expected_volume:,}주 | {ratio:.1f}배"
             )
         )
+
+    if levels is not None:
+        rendered_levels = levels_text(levels, close_price)
+        if rendered_levels:
+            blocks.append(_section(rendered_levels))
+    if position is not None:
+        rendered_position = position_text(position, close_price)
+        if rendered_position:
+            blocks.append(_section(rendered_position))
 
     selected = list(catalysts[:2])
     if selected:
