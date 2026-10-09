@@ -212,6 +212,54 @@ class EvidenceDispositionTest(unittest.TestCase):
             EvidenceDisposition.BRIEFING,
         )
 
+    def test_relaxed_gate_promotes_capacity_and_single_high_axis_news(self):
+        base = dict(
+            candidate_id="candidate",
+            relevant=True,
+            headline_ko="버티브 생산능력 확대",
+            summary_ko="냉각 생산능력을 두 배로 늘린다.",
+            facts=(GroundedFact("capacity", "생산능력을 확대한다."),),
+            thesis_impact="strengthen",
+            impact_reason_ko="병목이 완화된다.",
+        )
+        capacity_medium = EvidenceAnalysis(
+            **base,
+            confidence="high",
+            **qualification("capacity", materiality="medium", alert_worthy=False),
+        )
+        high_materiality_medium_confidence = EvidenceAnalysis(
+            **base,
+            confidence="medium",
+            **qualification("guidance", materiality="high", alert_worthy=False),
+        )
+        medium_both = EvidenceAnalysis(
+            **base,
+            confidence="medium",
+            **qualification("guidance", materiality="medium", alert_worthy=False),
+        )
+        low_materiality = EvidenceAnalysis(
+            **base,
+            confidence="high",
+            **qualification("guidance", materiality="low", alert_worthy=False),
+        )
+
+        self.assertEqual(
+            evidence_disposition(EvidenceKind.NEWS, capacity_medium),
+            EvidenceDisposition.IMMEDIATE,
+        )
+        self.assertEqual(
+            evidence_disposition(EvidenceKind.NEWS, high_materiality_medium_confidence),
+            EvidenceDisposition.IMMEDIATE,
+        )
+        self.assertEqual(
+            evidence_disposition(EvidenceKind.NEWS, medium_both),
+            EvidenceDisposition.BRIEFING,
+        )
+        self.assertEqual(
+            evidence_disposition(EvidenceKind.NEWS, low_materiality),
+            EvidenceDisposition.LEDGER,
+        )
+
     def test_news_without_company_in_headline_is_not_an_independent_catalyst(self):
         decision = screen_candidate(
             raw(
@@ -1508,7 +1556,7 @@ class EvidenceIngestionServiceTest(unittest.TestCase):
                     impact_reason_ko="수요 대응 병목을 완화할 수 있다.",
                     confidence="high",
                     **qualification(
-                        "capacity",
+                        "product",
                         materiality="medium",
                         alert_worthy=False,
                     ),

@@ -566,10 +566,12 @@ class YahooMarketDataAdapter:
     ) -> dict[datetime, int]:
         window = self.calendar.window(trading_date)
         running = 0
+        bar_index = 0
         cumulative: dict[datetime, int] = {}
         for bar in current_bars:
             if window.open_at <= bar.observed_at < window.close_at:
-                running += max(0, bar.volume)
+                running += _sanitized_bar_volume(bar.volume, running, bar_index)
+                bar_index += 1
             cumulative[bar.observed_at] = running
         return cumulative
 
@@ -603,7 +605,7 @@ class YahooMarketDataAdapter:
             for bar in current_bars
             if window.open_at <= bar.observed_at <= latest_at
         ]
-        observed = sum(max(0, bar.volume) for bar in included_bars)
+        observed = _sum_sanitized_volumes(included_bars)
         if observed <= 0:
             return None
         offset = max(timedelta(0), included_bars[-1].observed_at - window.open_at)
@@ -622,10 +624,12 @@ class YahooMarketDataAdapter:
                 prior_window.open_at + offset,
                 prior_window.close_at - self.interval,
             )
-            cumulative = sum(
-                max(0, bar.volume)
-                for bar in grouped[prior_date]
-                if prior_window.open_at <= bar.observed_at <= cutoff
+            cumulative = _sum_sanitized_volumes(
+                [
+                    bar
+                    for bar in grouped[prior_date]
+                    if prior_window.open_at <= bar.observed_at <= cutoff
+                ]
             )
             if cumulative > 0:
                 baselines.append(cumulative)
@@ -640,6 +644,28 @@ class YahooMarketDataAdapter:
             lookback_sessions=20,
             observed_at=included_bars[-1].observed_at,
         )
+
+
+def _sanitized_bar_volume(volume: int, running_total: int, bar_index: int) -> int:
+    """Drop Yahoo's "cumulative echo" glitch bars.
+
+    The live chart feed occasionally reports a 5-minute bar whose volume
+    field holds the session's cumulative total instead of the bar's own
+    volume, which inflated daily volume up to ~2.6x. After the opening
+    half hour, a single bar matching (or exceeding) 90% of everything
+    traded so far is that glitch, not real flow.
+    """
+    volume = max(0, volume)
+    if bar_index >= 6 and running_total > 0 and volume >= int(0.9 * running_total):
+        return 0
+    return volume
+
+
+def _sum_sanitized_volumes(bars: Sequence[YahooBar]) -> int:
+    running = 0
+    for index, bar in enumerate(bars):
+        running += _sanitized_bar_volume(bar.volume, running, index)
+    return running
 
 
 def parse_chart_payload(payload: Mapping[str, Any], symbol: str, interval: str) -> YahooChart:

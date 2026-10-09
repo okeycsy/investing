@@ -899,5 +899,38 @@ class YahooChartClientTest(unittest.TestCase):
         self.assertEqual(quote.change_pct, 0.0)
 
 
+class SanitizedVolumeTest(unittest.TestCase):
+    def test_cumulative_echo_bar_is_dropped_from_volume_sums(self):
+        from investing_monitor.adapters.yahoo_market_data import (
+            _sum_sanitized_volumes,
+        )
+
+        day = date(2026, 10, 8)
+        bars = [
+            bar(day, 9 + (30 + 5 * index) // 60, (30 + 5 * index) % 60, 100.0, 60_000)
+            for index in range(10)
+        ]
+        # Yahoo live-feed glitch: a mid-session bar reports the session's
+        # cumulative total (observed 2026-10-08, inflating volume 2.6x).
+        bars.append(bar(day, 10, 25, 100.0, 600_000))
+        bars.append(bar(day, 10, 30, 100.0, 60_000))
+
+        self.assertEqual(_sum_sanitized_volumes(bars), 60_000 * 11)
+
+    def test_genuine_opening_surge_is_kept(self):
+        from investing_monitor.adapters.yahoo_market_data import (
+            _sum_sanitized_volumes,
+        )
+
+        day = date(2026, 10, 8)
+        bars = [
+            bar(day, 9, 30, 100.0, 900_000),
+            bar(day, 9, 35, 100.0, 850_000),
+            bar(day, 9, 40, 100.0, 400_000),
+        ]
+
+        self.assertEqual(_sum_sanitized_volumes(bars), 2_150_000)
+
+
 if __name__ == "__main__":
     unittest.main()

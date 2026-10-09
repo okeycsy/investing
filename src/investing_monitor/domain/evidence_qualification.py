@@ -21,13 +21,13 @@ IMMEDIATE_EVENT_TYPES = {
     EvidenceEventType.MAJOR_CUSTOMER.value,
     EvidenceEventType.MANAGEMENT.value,
     EvidenceEventType.REGULATORY.value,
+    EvidenceEventType.CAPACITY.value,
+    EvidenceEventType.PARTNERSHIP.value,
 }
 
 BRIEFING_EVENT_TYPES = IMMEDIATE_EVENT_TYPES | {
     EvidenceEventType.FINANCING.value,
-    EvidenceEventType.CAPACITY.value,
     EvidenceEventType.PRODUCT.value,
-    EvidenceEventType.PARTNERSHIP.value,
 }
 
 
@@ -45,12 +45,17 @@ def evidence_disposition(
         or analysis.confidence == "low"
     ):
         return EvidenceDisposition.LEDGER
-    if (
-        analysis.alert_worthy
-        and analysis.confidence == "high"
-        and analysis.materiality == EvidenceMateriality.HIGH.value
-        and analysis.event_type in IMMEDIATE_EVENT_TYPES
-    ):
+    # Immediate alerts need a qualifying event where at least one of
+    # confidence/materiality is high and neither is low; the old gate
+    # (high confidence AND high materiality AND alert_worthy) proved so
+    # strict that a month of news produced zero alerts.
+    if analysis.event_type in IMMEDIATE_EVENT_TYPES and (
+        analysis.confidence == "high"
+        or analysis.materiality == EvidenceMateriality.HIGH.value
+    ) and analysis.materiality in {
+        EvidenceMateriality.HIGH.value,
+        EvidenceMateriality.MEDIUM.value,
+    }:
         if analysis.source_tier in {
             EvidenceSourceTier.OFFICIAL.value,
             EvidenceSourceTier.PRIMARY_REPORTING.value,
