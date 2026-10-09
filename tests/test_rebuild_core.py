@@ -72,6 +72,18 @@ class PriceBandPolicyTest(unittest.TestCase):
         self.assertIsNone(retracement)
         self.assertEqual(state.upward_high_watermark, 5)
 
+    def test_default_policy_alerts_from_three_percent_band(self):
+        policy = PriceBandPolicy()
+
+        below, state = policy.evaluate(snapshot(2.9), None)
+        first, state = policy.evaluate(snapshot(3.1), state)
+        downward, _ = policy.evaluate(snapshot(-3.4), None)
+
+        self.assertIsNone(below)
+        self.assertEqual(first.level, 3)
+        self.assertEqual(state.upward_high_watermark, 3)
+        self.assertEqual(downward.level, 3)
+
     def test_large_first_observation_sends_one_current_band_alert(self):
         signal, state = PriceBandPolicy().evaluate(snapshot(7.8), None)
 

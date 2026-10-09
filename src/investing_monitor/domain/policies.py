@@ -48,7 +48,7 @@ class VolumeAssessment:
 
 
 class PriceBandPolicy:
-    def __init__(self, start_level: int = 4, step: int = 1) -> None:
+    def __init__(self, start_level: int = 3, step: int = 1) -> None:
         if start_level < 1 or step < 1:
             raise ValueError("start_level and step must be positive")
         self.start_level = start_level
