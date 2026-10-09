@@ -100,7 +100,9 @@ class CloseBriefServiceTest(unittest.TestCase):
             self.assertLess(peers_at, volume_at)
             self.assertIn("당일 1,200,000주", rendered)
             self.assertIn("최근 20거래일 평균 1,000,000주", rendered)
-            self.assertNotIn("102.5", rendered)
+            self.assertIn("종가 $102.50", rendered)
+            self.assertIn("(+2.50%)", rendered)
+            self.assertIn("전일 $100.00", rendered)
             for forbidden in ("DCA", "RSI", "MACD", "PCR", "FINRA", "점수"):
                 self.assertNotIn(forbidden, rendered)
             self.assertTrue(first.inserted)

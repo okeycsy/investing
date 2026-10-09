@@ -89,6 +89,10 @@ class CloseBriefService:
             catalysts,
             situation,
             created_at=created_at,
+            close_price=context.close_price,
+            reference_close=context.reference_close,
+            day_low=context.day_low,
+            day_high=context.day_high,
         )
         event_key = f"{ticker.upper()}:{trading_date.isoformat()}:close"
         inserted = self.repository.record_alert(
@@ -194,6 +198,12 @@ class WeeklyBriefService:
             next_period_start + timedelta(days=6),
             limit=3,
         )
+        week_lows = tuple(
+            context.day_low for context in contexts if context.day_low is not None
+        )
+        week_highs = tuple(
+            context.day_high for context in contexts if context.day_high is not None
+        )
         payload = build_weekly_message(
             snapshot,
             assess_relative_performance(snapshot),
@@ -205,6 +215,9 @@ class WeeklyBriefService:
             period_start=period_start,
             period_end=period_end,
             session_count=len(contexts),
+            last_close_price=contexts[-1].close_price,
+            week_low=min(week_lows) if week_lows else None,
+            week_high=max(week_highs) if week_highs else None,
         )
         iso_year, iso_week, _ = period_end.isocalendar()
         event_key = f"{ticker.upper()}:{iso_year}-W{iso_week:02d}:weekly"

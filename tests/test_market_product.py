@@ -517,7 +517,8 @@ class MarketCycleServiceTest(unittest.TestCase):
             rendered = json.dumps(pending[0].payload, ensure_ascii=False)
             self.assertIn("+6.0% 상승 도달 기록", rendered)
             self.assertIn("정규장 · 관측 09/02 23:10 KST", rendered)
-            self.assertNotIn("104.7", rendered)
+            self.assertIn("$106.20 (+6.20%)", rendered)
+            self.assertIn("마지막 관측 $104.70 (+4.70%)", rendered)
             self.assertNotIn("change_pct", json.dumps(report.as_dict()))
             self.assertEqual(report.latest_context["benchmark"]["outcome"], "outperform")
             with closing(sqlite3.connect(repository.path)) as connection, connection:

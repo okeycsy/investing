@@ -53,6 +53,7 @@ class SecFetchResult:
     candidates: tuple[RawEvidenceCandidate, ...]
     provider: str
     recovered: bool = False
+    primary_error: str = ""
 
 
 class SecMirror(Protocol):
@@ -243,7 +244,12 @@ class ResilientSecFilingsAdapter:
                 raise SecFilingError(
                     f"SEC primary and mirror failed: {primary_error}; {mirror_error}"
                 ) from mirror_error
-            return SecFetchResult(candidates, provider="yahoo-sec-mirror", recovered=True)
+            return SecFetchResult(
+                candidates,
+                provider="yahoo-sec-mirror",
+                recovered=True,
+                primary_error=str(primary_error),
+            )
 
 
 def parse_sec_submissions(

@@ -11,7 +11,12 @@ from investing_monitor.domain.models import (
     VolumeSnapshot,
 )
 from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessment
-from investing_monitor.presentation.market_context import relative_outcome_line
+from investing_monitor.presentation.market_context import (
+    pct_label,
+    price_label,
+    relative_detail_line,
+    relative_outcome_line,
+)
 
 
 def build_weekly_message(
@@ -26,6 +31,9 @@ def build_weekly_message(
     period_start: date,
     period_end: date,
     session_count: int,
+    last_close_price: float | None = None,
+    week_low: float | None = None,
+    week_high: float | None = None,
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "상승"),
@@ -44,15 +52,29 @@ def build_weekly_message(
             },
         },
         _context(f"완료된 정규장 {session_count}거래일 기준"),
-        _section(f"{direction_icon} *주간 방향 · {direction_label}*"),
+        _section(
+            f"{direction_icon} *주간 방향 · {direction_label} "
+            f"({pct_label(snapshot.change_pct)})*"
+        ),
+    ]
+    if last_close_price is not None:
+        price_text = f"💵 *주간 마지막 종가 {price_label(last_close_price)}*"
+        if week_low is not None and week_high is not None:
+            price_text += (
+                f" · 주간 범위 {price_label(week_low)} ~ {price_label(week_high)}"
+                " (5분봉 종가 기준)"
+            )
+        blocks.append(_section(price_text))
+    blocks.append(
         _section(
             relative_outcome_line(
                 f"반도체 지수({relative.benchmark_symbol})",
                 relative.benchmark,
                 relative.benchmark_strength,
             )
-        ),
-    ]
+            + f"\n{relative_detail_line(snapshot, relative)}"
+        )
+    )
     if relative.peers.value != "unavailable":
         peers = "·".join(relative.peer_symbols)
         blocks.append(

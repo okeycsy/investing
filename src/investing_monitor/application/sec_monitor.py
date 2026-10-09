@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from investing_monitor.adapters.sec_filings import (
     ResilientSecFilingsAdapter,
@@ -16,6 +16,11 @@ from investing_monitor.domain.evidence import EvidenceProfile
 from investing_monitor.ports.repository import MonitorRepository
 
 
+# Filings reach the Yahoo mirror (and a sparsely polled EDGAR) later than the
+# news feeds, so SEC evidence gets a wider ingestion window than the default.
+SEC_EVIDENCE_LOOKBACK = timedelta(hours=72)
+
+
 @dataclass(frozen=True)
 class SecPollReport:
     provider: str
@@ -23,6 +28,7 @@ class SecPollReport:
     baseline_created: bool
     baseline_candidates: int
     ingestion: EvidenceIngestionReport | None = None
+    primary_error: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -31,6 +37,7 @@ class SecPollReport:
             "baseline_created": self.baseline_created,
             "baseline_candidates": self.baseline_candidates,
             "ingestion": self.ingestion.as_dict() if self.ingestion else None,
+            "primary_error": self.primary_error,
         }
 
 
@@ -67,12 +74,18 @@ class SecMonitorService:
                 recovered=result.recovered,
                 baseline_created=True,
                 baseline_candidates=count,
+                primary_error=result.primary_error,
             )
-        report = self.ingestion.ingest(result.candidates, now)
+        report = self.ingestion.ingest(
+            result.candidates,
+            now,
+            lookback=SEC_EVIDENCE_LOOKBACK,
+        )
         return SecPollReport(
             provider=result.provider,
             recovered=result.recovered,
             baseline_created=False,
             baseline_candidates=0,
             ingestion=report,
+            primary_error=result.primary_error,
         )

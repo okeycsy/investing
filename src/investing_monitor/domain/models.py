@@ -142,6 +142,10 @@ class VolumeSnapshot:
 class CloseMarketContext:
     snapshot: MarketSnapshot
     volume: VolumeSnapshot | None
+    close_price: float | None = None
+    reference_close: float | None = None
+    day_low: float | None = None
+    day_high: float | None = None
 
 
 @dataclass(frozen=True)

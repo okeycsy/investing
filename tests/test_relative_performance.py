@@ -156,7 +156,8 @@ class RelativeMessageTest(unittest.TestCase):
                         self.assertIn(f"반도체 지수(SOXX) 대비 {outcome_label}", text)
                         self.assertIn(f"대비 {outcome_label}", text)
                         self.assertEqual(text.count(outcome_label), 2)
-                        self.assertNotIn("4.73", text)
+                        if kind != "price_band":
+                            self.assertIn("4.73%", text)
                         self.assertNotIn("%p", text)
                         self.assertTrue(audit_message(kind, payload).passed)
 

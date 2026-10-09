@@ -512,10 +512,15 @@ class EvidenceIngestionService:
         self,
         raw_candidates: Sequence[RawEvidenceCandidate],
         now: datetime,
+        *,
+        lookback: timedelta | None = None,
     ) -> EvidenceIngestionReport:
         now = now.astimezone(timezone.utc)
         decisions = [screen_candidate(raw, self.profile) for raw in raw_candidates]
-        decisions = [self._apply_lookback(decision, now) for decision in decisions]
+        decisions = [
+            self._apply_lookback(decision, now, lookback=lookback)
+            for decision in decisions
+        ]
         pending = [
             decision.candidate
             for decision in decisions
@@ -707,12 +712,14 @@ class EvidenceIngestionService:
         self,
         decision: CandidateDecision,
         now: datetime,
+        *,
+        lookback: timedelta | None = None,
     ) -> CandidateDecision:
         candidate = decision.candidate
         if (
             decision.status is EvidenceStatus.PENDING
             and candidate is not None
-            and candidate.published_at < now - self.lookback
+            and candidate.published_at < now - (lookback or self.lookback)
         ):
             return CandidateDecision(
                 status=EvidenceStatus.FILTERED,

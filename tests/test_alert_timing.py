@@ -72,8 +72,8 @@ class AlertTimingTest(unittest.TestCase):
         self.assertNotIn("아웃퍼폼", text)
         self.assertIn("정규장 누적 · 09/17 23:55 KST 봉까지", text)
         self.assertNotIn("거래량 동반", text)
-        self.assertNotIn("-1.25%", text)
-        self.assertNotIn("98.75", text)
+        self.assertIn("$104.25 (+4.25%)", text)
+        self.assertIn("마지막 관측 $98.75 (-1.25%)", text)
         self.assertTrue(audit_message("price_band", payload).passed)
         for value in ("지연 확인", "21:30 KST", "23:57 KST", "23:55 KST", "되돌림"):
             self.assertIn(value, payload["text"])

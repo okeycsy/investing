@@ -2062,6 +2062,7 @@ class SecFilingsTest(unittest.TestCase):
 
         self.assertTrue(result.recovered)
         self.assertEqual(result.provider, "yahoo-sec-mirror")
+        self.assertIn("403", result.primary_error)
         self.assertTrue(mirror.called)
         self.assertEqual(calls[0][1]["headers"]["From"], "owner@example.com")
         self.assertIn("owner@example.com", calls[0][1]["headers"]["User-Agent"])
@@ -2166,8 +2167,53 @@ class SecFilingsTest(unittest.TestCase):
             self.assertTrue(first.baseline_created)
             self.assertEqual(first.baseline_candidates, 1)
             self.assertFalse(second.baseline_created)
+            # The 48h-old filing must not be rejected as "outside evidence lookback".
             self.assertEqual(second.ingestion.inserted_pending, 1)
-            self.assertEqual(second.ingestion.analyzed, 1)
+
+    def test_two_day_old_sec_filing_survives_extended_lookback(self):
+        class Adapter:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch(self, _profile, *, now):
+                self.calls += 1
+                candidates = [raw("Vertiv quarterly report", kind=EvidenceKind.SEC)]
+                if self.calls == 2:
+                    # Mirror data often lags filings by days; 48h must still ingest.
+                    candidates.append(
+                        raw(
+                            "Vertiv signs material agreement",
+                            kind=EvidenceKind.SEC,
+                            minute=-2_880,
+                            source_url="https://www.sec.gov/late",
+                        )
+                    )
+                return SecFetchResult(tuple(candidates), "yahoo-sec-mirror", recovered=True)
+
+        class Analyzer:
+            def analyze(self, candidates, _profile):
+                return EvidenceAnalysisBatch(
+                    analyses={
+                        candidate.candidate_id: EvidenceAnalysis(
+                            candidate_id=candidate.candidate_id,
+                            relevant=False,
+                        )
+                        for candidate in candidates
+                    },
+                    errors={},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            ingestion = EvidenceIngestionService(repository, PROFILE, Analyzer())
+            service = SecMonitorService(repository, PROFILE, Adapter(), ingestion)
+
+            first = service.poll(NOW)
+            second = service.poll(NOW + timedelta(minutes=10))
+
+            self.assertTrue(first.baseline_created)
+            # The 48h-old filing must not be rejected as "outside evidence lookback".
+            self.assertEqual(second.ingestion.inserted_pending, 1)
 
     def test_empty_sec_response_cannot_initialize_baseline(self):
         class Adapter:

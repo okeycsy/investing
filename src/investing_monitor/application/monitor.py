@@ -262,6 +262,10 @@ class MarketCycleService:
                     previous.context if previous else None,
                     context,
                 ),
+                event_snapshot=frame.snapshot,
+                event_price=frame.close_price,
+                latest_price=cycle.frames[-1].close_price,
+                reference_close=frame.reference_close,
             )
             alerts.append(
                 AlertRecord(
@@ -298,6 +302,8 @@ class MarketCycleService:
                 detection_delay_seconds=detection_delay,
                 detected_at=detected_at,
                 situation=latest_situation,
+                price=cycle.frames[-1].close_price,
+                reference_close=cycle.frames[-1].reference_close,
             )
             alerts.append(
                 AlertRecord(

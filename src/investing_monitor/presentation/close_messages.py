@@ -15,7 +15,13 @@ from investing_monitor.domain.policies import (
     SituationAssessment,
     VolumeAssessment,
 )
-from investing_monitor.presentation.market_context import relative_outcome_line, situation_text
+from investing_monitor.presentation.market_context import (
+    pct_label,
+    price_label,
+    relative_detail_line,
+    relative_outcome_line,
+    situation_text,
+)
 from investing_monitor.presentation.timing import session_label, timestamp, volume_basis
 
 
@@ -28,6 +34,10 @@ def build_close_message(
     situation: SituationAssessment | None = None,
     *,
     created_at: datetime | None = None,
+    close_price: float | None = None,
+    reference_close: float | None = None,
+    day_low: float | None = None,
+    day_high: float | None = None,
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "양전"),
@@ -49,8 +59,22 @@ def build_close_message(
             },
         },
         {"type": "context", "elements": [{"type": "mrkdwn", "text": timing}]},
-        _section(f"{direction_icon} *종목 방향 · {direction_label}*"),
+        _section(
+            f"{direction_icon} *종목 방향 · {direction_label}"
+            + (f" ({pct_label(snapshot.change_pct)})" if close_price is not None else "")
+            + "*"
+        ),
     ]
+    if close_price is not None:
+        price_text = f"💵 *종가 {price_label(close_price)}*"
+        if reference_close is not None:
+            price_text += f" · 전일 {price_label(reference_close)}"
+        if day_low is not None and day_high is not None:
+            price_text += (
+                f"\n당일 범위 {price_label(day_low)} ~ {price_label(day_high)}"
+                " (5분봉 종가 기준)"
+            )
+        blocks.append(_section(price_text))
     blocks.append(
         _section(
             relative_outcome_line(
@@ -58,6 +82,7 @@ def build_close_message(
                 relative.benchmark,
                 relative.benchmark_strength,
             )
+            + f"\n{relative_detail_line(snapshot, relative)}"
         )
     )
 
@@ -97,7 +122,11 @@ def build_close_message(
     return {
         "text": (
             f"${snapshot.ticker} {snapshot.trading_date:%m/%d} 장 마감 브리프 "
-            f"| 자료 {timestamp(snapshot.observed_at)}"
+            + (
+                f"| {price_label(close_price)} ({pct_label(snapshot.change_pct)}) "
+                if close_price is not None else ""
+            )
+            + f"| 자료 {timestamp(snapshot.observed_at)}"
             + (f" | 작성 {timestamp(created_at)}" if created_at else "")
         ),
         "blocks": blocks,

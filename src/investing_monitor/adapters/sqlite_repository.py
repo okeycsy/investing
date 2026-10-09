@@ -691,10 +691,17 @@ class SQLiteMonitorRepository:
         with closing(self._connect()) as connection, connection:
             market_row = connection.execute(
                 "SELECT ticker, trading_date, observed_at, session, change_pct, "
-                "benchmark_symbol, benchmark_change_pct, peer_changes_json "
+                "benchmark_symbol, benchmark_change_pct, peer_changes_json, "
+                "close_price, reference_close "
                 "FROM market_observations WHERE ticker = ? AND trading_date = ? "
                 "ORDER BY CASE WHEN session = 'regular' THEN 0 ELSE 1 END, "
                 "observed_at DESC LIMIT 1",
+                (ticker, trading_date.isoformat()),
+            ).fetchone()
+            range_row = connection.execute(
+                "SELECT MIN(close_price) AS day_low, MAX(close_price) AS day_high "
+                "FROM market_observations WHERE ticker = ? AND trading_date = ? "
+                "AND session = 'regular'",
                 (ticker, trading_date.isoformat()),
             ).fetchone()
             volume_row = connection.execute(
@@ -728,7 +735,14 @@ class SQLiteMonitorRepository:
                     if volume_row["data_observed_at"] else None
                 ),
             )
-        return CloseMarketContext(snapshot=snapshot, volume=volume)
+        return CloseMarketContext(
+            snapshot=snapshot,
+            volume=volume,
+            close_price=market_row["close_price"],
+            reference_close=market_row["reference_close"],
+            day_low=range_row["day_low"] if range_row is not None else None,
+            day_high=range_row["day_high"] if range_row is not None else None,
+        )
 
     def load_close_market_contexts(
         self,

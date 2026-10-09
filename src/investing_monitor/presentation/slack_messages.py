@@ -20,6 +20,9 @@ from investing_monitor.domain.policies import (
 from investing_monitor.domain.situation import MarketContextDelta
 from investing_monitor.presentation.market_context import (
     delta_text,
+    pct_label,
+    price_label,
+    relative_detail_line,
     relative_outcome_line,
     situation_text,
 )
@@ -48,6 +51,10 @@ def build_price_band_message(
     latest_situation: SituationAssessment | None = None,
     situation: SituationAssessment | None = None,
     delta: MarketContextDelta | None = None,
+    event_snapshot: MarketSnapshot | None = None,
+    event_price: float | None = None,
+    latest_price: float | None = None,
+    reference_close: float | None = None,
 ) -> dict:
     direction_icon = "📈" if signal.direction is Direction.UP else "📉"
     direction_label = "상승" if signal.direction is Direction.UP else "하락"
@@ -88,6 +95,20 @@ def build_price_band_message(
         ),
     ]
 
+    price_line = _price_line(
+        event_price,
+        event_snapshot.change_pct if event_snapshot is not None else None,
+        reference_close,
+        latest_price=latest_price if historical else None,
+        latest_change_pct=(
+            latest_snapshot.change_pct
+            if historical and latest_snapshot is not None and latest_price is not None
+            else None
+        ),
+    )
+    if price_line:
+        blocks.append(_section(price_line))
+
     # Historical moves cannot borrow a later volume reading as event-time context.
     rendered_delta = delta_text(replace(delta, volume=None) if historical and delta else delta)
     latest_status = ""
@@ -106,7 +127,7 @@ def build_price_band_message(
                     "이후 상태는 확인되지 않음"
                 ))
             if latest_relative is not None:
-                blocks.append(_section(_relative_text(latest_relative)))
+                blocks.append(_section(_relative_text(latest_relative, latest_snapshot)))
             else:
                 blocks.append(_section(
                     f"반도체 지수({relative.benchmark_symbol}) · 마지막 관측 비교 자료 없음"
@@ -115,7 +136,7 @@ def build_price_band_message(
                 blocks.append(_section(situation_text(latest_situation, latest_snapshot.direction)))
         else:
             blocks.append(_context("이후 관측 자료 없음 · 아래 상대 흐름은 도달 당시 기준"))
-            blocks.append(_section(_relative_text(relative)))
+            blocks.append(_section(_relative_text(relative, event_snapshot)))
             if situation is not None:
                 blocks.append(_section(situation_text(situation, signal.direction)))
         if rendered_delta:
@@ -123,7 +144,7 @@ def build_price_band_message(
     else:
         if rendered_delta:
             blocks.append(_section(rendered_delta))
-        blocks.append(_section(_relative_text(relative)))
+        blocks.append(_section(_relative_text(relative, event_snapshot)))
         if situation is not None:
             blocks.append(_section(situation_text(situation, signal.direction)))
 
@@ -156,6 +177,8 @@ def build_price_band_message(
         )
 
     fallback = f"{title} | 관측 {timestamp(signal.observed_at)}"
+    if event_price is not None and event_snapshot is not None:
+        fallback += f" | {price_label(event_price)} ({pct_label(event_snapshot.change_pct)})"
     if detected_at is not None:
         fallback += f" | 확인 {timestamp(detected_at)}"
     if historical and latest_snapshot is not None:
@@ -176,6 +199,8 @@ def build_volume_message(
     detection_delay_seconds: int = 0,
     detected_at: datetime | None = None,
     situation: SituationAssessment | None = None,
+    price: float | None = None,
+    reference_close: float | None = None,
 ) -> dict:
     observed_at = volume.observed_at or signal.observed_at
     if detected_at is not None:
@@ -222,7 +247,16 @@ def build_volume_message(
             ),
             _section(
                 f"*시장 관측 · {session_label(snapshot.session)} {timestamp(snapshot.observed_at)}*\n"
-                f"{direction_icon} *종목 방향: {direction_label}*\n{_relative_text(relative)}"
+                f"{direction_icon} *종목 방향: {direction_label}*"
+                + (
+                    f" · {price_label(price)} ({pct_label(snapshot.change_pct)})"
+                    if price is not None else ""
+                )
+                + (
+                    f" · 전일 종가 {price_label(reference_close)}"
+                    if reference_close is not None else ""
+                )
+                + f"\n{_relative_text(relative, snapshot)}"
             ),
         ]
     )
@@ -237,7 +271,10 @@ def build_volume_message(
     }
 
 
-def _relative_text(relative: RelativeAssessment) -> str:
+def _relative_text(
+    relative: RelativeAssessment,
+    snapshot: MarketSnapshot | None = None,
+) -> str:
     benchmark_label = f"반도체 지수({relative.benchmark_symbol})"
     lines = [
         relative_outcome_line(benchmark_label, relative.benchmark, relative.benchmark_strength)
@@ -245,7 +282,34 @@ def _relative_text(relative: RelativeAssessment) -> str:
     if relative.peers.value != "unavailable":
         peer_label = f"피어({'·'.join(relative.peer_symbols)})"
         lines.append(relative_outcome_line(peer_label, relative.peers, relative.peer_strength))
+    if snapshot is not None:
+        lines.append(relative_detail_line(snapshot, relative))
     return "\n".join(lines)
+
+
+def _price_line(
+    event_price: float | None,
+    event_change_pct: float | None,
+    reference_close: float | None,
+    *,
+    latest_price: float | None = None,
+    latest_change_pct: float | None = None,
+) -> str:
+    if event_price is None:
+        return ""
+    parts = [f"💵 *{price_label(event_price)}"]
+    if event_change_pct is not None:
+        parts[0] += f" ({pct_label(event_change_pct)})"
+    parts[0] += "*"
+    if reference_close is not None:
+        parts.append(f"전일 종가 {price_label(reference_close)}")
+    line = " · ".join(parts)
+    if latest_price is not None:
+        latest = f"마지막 관측 {price_label(latest_price)}"
+        if latest_change_pct is not None:
+            latest += f" ({pct_label(latest_change_pct)})"
+        line += f"\n{latest}"
+    return line
 
 
 def _catalyst_text(catalyst: Catalyst) -> str:
