@@ -11,6 +11,8 @@ class DailyBar:
     close: float
     high: float | None = None
     low: float | None = None
+    open: float | None = None
+    volume: int = 0
 
 
 @dataclass(frozen=True)

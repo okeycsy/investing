@@ -830,6 +830,23 @@ class SQLiteMonitorRepository:
         ]
         return tuple(context for context in contexts if context is not None)
 
+    def day_price_curve(
+        self,
+        ticker: str,
+        trading_date: date,
+    ) -> tuple[tuple[datetime, float], ...]:
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                "SELECT observed_at, close_price FROM market_observations "
+                "WHERE ticker = ? AND trading_date = ? AND session = 'regular' "
+                "ORDER BY observed_at",
+                (ticker.upper(), trading_date.isoformat()),
+            ).fetchall()
+        return tuple(
+            (_required_datetime(row["observed_at"]), row["close_price"])
+            for row in rows
+        )
+
     def record_alert(self, alert: AlertRecord, *, enqueue: bool = True) -> bool:
         require_valid_message(alert.alert_type, alert.payload)
         payload_json = json.dumps(

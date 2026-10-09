@@ -319,6 +319,30 @@ class YahooMarketDataAdapter:
             )
         return levels
 
+    def fetch_daily_summary(self, trading_date: date) -> DailyBar | None:
+        """Official daily OHLC for one session, for the settled close brief.
+
+        The intraday 5-minute closes miss intra-bar extremes and the final
+        auction print, so the close brief corrects price, range and change
+        against Yahoo's daily bar.
+        """
+        chart = self.client.fetch(
+            self.profile.ticker,
+            interval="1d",
+            range_="5d",
+            include_prepost=False,
+        )
+        for bar in chart.bars:
+            if bar.observed_at.astimezone(NEW_YORK).date() == trading_date:
+                return DailyBar(
+                    trading_date=trading_date,
+                    close=bar.close,
+                    high=bar.high,
+                    low=bar.low,
+                    volume=max(0, bar.volume),
+                )
+        return None
+
     def fetch_sensitivity(self, now: datetime) -> MarketSensitivity:
         now = _utc(now)
         symbols = (

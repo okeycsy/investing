@@ -132,9 +132,9 @@ class LevelsPresentationTest(unittest.TestCase):
         text = levels_text(levels, 244.49)
 
         self.assertIn("주요 레벨", text)
-        self.assertIn("SMA20", text)
+        self.assertIn("20일", text)
         self.assertIn("52주", text)
-        self.assertIn("고점 대비", text)
+        self.assertIn("고점 -", text)
 
     def test_position_text_reports_unrealized_return(self):
         text = position_text(Position(average_price=355.0, shares=100), 244.49)

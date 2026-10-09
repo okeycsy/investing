@@ -120,8 +120,9 @@ class RelativeStrengthPolicyTest(unittest.TestCase):
         payload = build_close_message(snapshot, relative, None, assess_intraday_volume(None), (), situation)
         text = json.dumps(payload, ensure_ascii=False)
         self.assertIn("상당한 아웃퍼폼", text)
-        self.assertIn("민감도 참고", text)
-        self.assertLess(text.index("상당한 아웃퍼폼"), text.index("민감도 참고"))
+        # The close brief now carries a factual day summary instead of the
+        # sensitivity verdict, so the model grade stays out of the message.
+        self.assertNotIn("민감도 참고", text)
         self.assertNotIn("시장·피어 흐름으로 설명되는", text)
 
 

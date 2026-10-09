@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from math import prod
+
+from investing_monitor.domain.levels import DailyBar
 
 from investing_monitor.domain.models import (
     Catalyst,
@@ -67,12 +69,29 @@ class CloseBriefService:
         trading_open_at: datetime,
         created_at: datetime,
         sensitivity: MarketSensitivity | None = None,
+        official: DailyBar | None = None,
     ) -> CloseBriefReport:
         context = self.repository.load_close_market_context(ticker, trading_date)
         if context is None:
             raise RuntimeError(
                 f"close market context unavailable for {ticker.upper()} {trading_date}"
             )
+        # The official daily bar carries the settled close and the true
+        # intraday extremes, which 5-minute closes systematically understate.
+        close_price = context.close_price
+        day_low = context.day_low
+        day_high = context.day_high
+        snapshot = context.snapshot
+        if official is not None and official.trading_date == trading_date:
+            close_price = official.close
+            day_low = official.low if official.low is not None else day_low
+            day_high = official.high if official.high is not None else day_high
+            if context.reference_close:
+                snapshot = replace(
+                    snapshot,
+                    change_pct=(official.close / context.reference_close - 1) * 100,
+                )
+        context = replace(context, snapshot=snapshot)
         catalysts = self.repository.recent_catalysts(
             ticker,
             trading_open_at,
@@ -92,12 +111,13 @@ class CloseBriefService:
             catalysts,
             situation,
             created_at=created_at,
-            close_price=context.close_price,
+            close_price=close_price,
             reference_close=context.reference_close,
-            day_low=context.day_low,
-            day_high=context.day_high,
+            day_low=day_low,
+            day_high=day_high,
             levels=self.repository.load_price_levels(ticker, trading_date),
             position=self.position,
+            price_curve=self.repository.day_price_curve(ticker, trading_date),
         )
         event_key = f"{ticker.upper()}:{trading_date.isoformat()}:close"
         inserted = self.repository.record_alert(

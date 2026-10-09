@@ -573,12 +573,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             def handle_close(task):
                 close_date = date.fromisoformat(task.checkpoint_key.rsplit(":", 1)[-1])
+                try:
+                    official = adapter.fetch_daily_summary(close_date)
+                except Exception:
+                    official = None
                 report = close_service.process(
                     profile.ticker,
                     close_date,
                     trading_open_at=calendar.regular_open(close_date),
                     created_at=now if args.now else datetime.now(timezone.utc),
                     sensitivity=sensitivity,
+                    official=official,
                 )
                 close_result.update(report.as_dict())
                 return {
