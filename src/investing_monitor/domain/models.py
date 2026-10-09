@@ -255,6 +255,20 @@ class PriceBandSignal:
 
 
 @dataclass(frozen=True)
+class LevelEventSignal:
+    event_key: str
+    ticker: str
+    trading_date: date
+    kind: str  # support / resistance / sma20 / sma50 / sma200 / 52w-low / 52w-high
+    direction: Direction
+    level_price: float
+    touches: int
+    close_price: float
+    observed_at: datetime
+    session: MarketSession = MarketSession.REGULAR
+
+
+@dataclass(frozen=True)
 class RapidMoveSignal:
     event_key: str
     ticker: str

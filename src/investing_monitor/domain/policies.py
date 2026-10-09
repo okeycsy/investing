@@ -4,8 +4,10 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from math import floor
 
+from .levels import PriceLevels
 from .models import (
     Direction,
+    LevelEventSignal,
     MarketFrame,
     MarketSensitivity,
     MarketSnapshot,
@@ -48,6 +50,100 @@ class VolumeAssessment:
     ratio: float | None
     is_ready: bool
     is_exploded: bool
+
+
+def level_break_buffer(levels: "PriceLevels", close_price: float) -> float:
+    """Confirmation margin so a close barely past a level does not alert."""
+    return max((levels.atr14 or 0.0) * 0.1, close_price * 0.0015)
+
+
+def detect_level_events(
+    levels: "PriceLevels",
+    frame: MarketFrame,
+    *,
+    break_already,
+) -> tuple[LevelEventSignal, ...]:
+    """Closes through the level map, confirmed on the 5-minute close.
+
+    Supports emit a downward break and, only after a confirmed break, an
+    upward reclaim; resistances emit an upward break; moving averages emit
+    a cross only when the previous session closed on the other side; the
+    52-week extremes emit new-low/new-high events. Daily dedup happens via
+    the event key, so a candidate may be produced more than once safely.
+    """
+    close = frame.close_price
+    snapshot = frame.snapshot
+    buffer = level_break_buffer(levels, close)
+    prefix = f"{snapshot.ticker.upper()}:{snapshot.trading_date.isoformat()}:level"
+
+    def signal(kind: str, direction: Direction, price: float, touches: int, key: str):
+        return LevelEventSignal(
+            event_key=key,
+            ticker=snapshot.ticker.upper(),
+            trading_date=snapshot.trading_date,
+            kind=kind,
+            direction=direction,
+            level_price=price,
+            touches=touches,
+            close_price=close,
+            observed_at=snapshot.observed_at,
+            session=snapshot.session,
+        )
+
+    events: list[LevelEventSignal] = []
+    for support in levels.supports:
+        down_key = f"{prefix}:support:{support.price:.2f}:down"
+        if close < support.price - buffer:
+            events.append(
+                signal("support", Direction.DOWN, support.price, support.touches, down_key)
+            )
+        elif close > support.price + buffer and break_already(down_key):
+            events.append(
+                signal(
+                    "support",
+                    Direction.UP,
+                    support.price,
+                    support.touches,
+                    f"{prefix}:support:{support.price:.2f}:up",
+                )
+            )
+    for resistance in levels.resistances:
+        if close > resistance.price + buffer:
+            events.append(
+                signal(
+                    "resistance",
+                    Direction.UP,
+                    resistance.price,
+                    resistance.touches,
+                    f"{prefix}:resistance:{resistance.price:.2f}:up",
+                )
+            )
+    previous_close = levels.last_close
+    if previous_close is not None:
+        for kind, value in (
+            ("sma20", levels.sma20),
+            ("sma50", levels.sma50),
+            ("sma200", levels.sma200),
+        ):
+            if value is None:
+                continue
+            if previous_close < value and close > value + buffer:
+                events.append(
+                    signal(kind, Direction.UP, value, 0, f"{prefix}:{kind}:up")
+                )
+            elif previous_close > value and close < value - buffer:
+                events.append(
+                    signal(kind, Direction.DOWN, value, 0, f"{prefix}:{kind}:down")
+                )
+    if levels.low_52w is not None and close < levels.low_52w:
+        events.append(
+            signal("52w-low", Direction.DOWN, levels.low_52w, 0, f"{prefix}:52w-low:down")
+        )
+    if levels.high_52w is not None and close > levels.high_52w:
+        events.append(
+            signal("52w-high", Direction.UP, levels.high_52w, 0, f"{prefix}:52w-high:up")
+        )
+    return tuple(events)
 
 
 class RapidMovePolicy:

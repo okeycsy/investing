@@ -20,6 +20,7 @@ from investing_monitor.domain.models import (
 )
 from investing_monitor.domain.policies import (
     RapidMovePolicy,
+    detect_level_events,
     PriceBandPolicy,
     RelativeAssessment,
     VolumeAssessment,
@@ -35,6 +36,7 @@ from investing_monitor.ports.providers import (
 )
 from investing_monitor.ports.repository import AlertRecord, MonitorRepository
 from investing_monitor.presentation.slack_messages import (
+    build_level_event_message,
     build_price_band_message,
     build_rapid_move_message,
     build_volume_message,
@@ -330,8 +332,44 @@ class MarketCycleService:
             payloads[signal.event_key] = payload
             detection_delays[signal.event_key] = detection_delay
 
-        # Velocity alarms only make sense on fresh data: stale replays of a
-        # long scheduler gap are already covered by band alerts and briefs.
+        # Level breaks and velocity alarms only make sense on fresh data:
+        # stale replays of a long scheduler gap are already covered by band
+        # alerts and the close brief's level review.
+        if levels is not None and detected_at is not None:
+            for frame in cycle.frames:
+                if detected_at - frame.snapshot.observed_at > timedelta(minutes=15):
+                    continue
+                for level_signal in detect_level_events(
+                    levels,
+                    frame,
+                    break_already=self.repository.alert_exists,
+                ):
+                    if level_signal.event_key in payloads:
+                        continue
+                    payload = build_level_event_message(
+                        level_signal,
+                        frame.snapshot,
+                        _contextual_catalysts(catalysts, level_signal.observed_at),
+                        detected_at=detected_at,
+                        reference_close=frame.reference_close,
+                        levels=levels,
+                        position=self.position,
+                    )
+                    alerts.append(
+                        AlertRecord(
+                            event_key=level_signal.event_key,
+                            ticker=level_signal.ticker,
+                            alert_type="level_event",
+                            created_at=level_signal.observed_at,
+                            payload=payload,
+                        )
+                    )
+                    payloads[level_signal.event_key] = payload
+                    detection_delays[level_signal.event_key] = self._detection_delay(
+                        level_signal.observed_at,
+                        detected_at,
+                    )
+
         if not signals and detected_at is not None:
             for frame in cycle.frames:
                 if detected_at - frame.snapshot.observed_at > timedelta(minutes=15):

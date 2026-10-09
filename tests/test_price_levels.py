@@ -13,7 +13,7 @@ from investing_monitor.domain.levels import (
     compute_price_levels,
 )
 from investing_monitor.domain.models import Position
-from investing_monitor.domain.policies import RapidMovePolicy
+from investing_monitor.domain.policies import RapidMovePolicy, detect_level_events
 from investing_monitor.domain.models import (
     Direction,
     MarketFrame,
@@ -202,6 +202,112 @@ def frame(change_15m, ratio_15m, *, minute=0):
         change_15m_pct=change_15m,
         volume_15m_ratio=ratio_15m,
     )
+
+
+class LevelEventTest(unittest.TestCase):
+    def levels(self):
+        from investing_monitor.domain.levels import ClusteredLevel
+
+        return PriceLevels(
+            ticker="VRT",
+            trading_date=TODAY,
+            computed_at=AT,
+            sma20=247.0,
+            sma50=259.3,
+            atr14=10.0,
+            supports=(ClusteredLevel(240.8, 7),),
+            resistances=(ClusteredLevel(250.8, 7),),
+            low_52w=147.8,
+            high_52w=379.9,
+            last_close=243.7,
+        )
+
+    def market_frame(self, close):
+        snapshot = MarketSnapshot(
+            ticker="VRT",
+            trading_date=TODAY,
+            observed_at=AT,
+            session=MarketSession.REGULAR,
+            change_pct=(close / 252.18 - 1) * 100,
+        )
+        return MarketFrame(snapshot=snapshot, close_price=close, reference_close=252.18)
+
+    def test_support_break_fires_and_reclaim_needs_prior_break(self):
+        levels = self.levels()
+
+        broken = detect_level_events(
+            levels, self.market_frame(239.2), break_already=lambda key: False
+        )
+        hovering = detect_level_events(
+            levels, self.market_frame(240.5), break_already=lambda key: False
+        )
+        reclaim_without_break = detect_level_events(
+            levels, self.market_frame(243.0), break_already=lambda key: False
+        )
+        reclaim_after_break = detect_level_events(
+            levels, self.market_frame(243.0), break_already=lambda key: True
+        )
+
+        self.assertEqual([e.kind for e in broken], ["support"])
+        self.assertEqual(broken[0].direction, Direction.DOWN)
+        self.assertIn(":level:support:240.80:down", broken[0].event_key)
+        self.assertEqual(hovering, ())
+        self.assertEqual(reclaim_without_break, ())
+        self.assertEqual(
+            [(e.kind, e.direction) for e in reclaim_after_break],
+            [("support", Direction.UP)],
+        )
+
+    def test_sma_cross_needs_previous_session_on_other_side(self):
+        levels = self.levels()
+
+        crossed_up = detect_level_events(
+            levels, self.market_frame(248.5), break_already=lambda key: True
+        )
+        still_below = detect_level_events(
+            levels, self.market_frame(245.0), break_already=lambda key: False
+        )
+
+        self.assertIn(("sma20", Direction.UP), [(e.kind, e.direction) for e in crossed_up])
+        self.assertNotIn("sma20", [e.kind for e in still_below])
+        # SMA50 stays untriggered: yesterday closed below and so did today.
+        self.assertNotIn("sma50", [e.kind for e in crossed_up])
+
+    def test_52_week_low_emits_alarm(self):
+        levels = self.levels()
+
+        events = detect_level_events(
+            levels, self.market_frame(147.0), break_already=lambda key: False
+        )
+
+        self.assertIn("52w-low", [e.kind for e in events])
+
+    def test_level_event_message_passes_audit(self):
+        from investing_monitor.presentation.quality import audit_message
+        from investing_monitor.presentation.slack_messages import (
+            build_level_event_message,
+        )
+
+        levels = self.levels()
+        sample = self.market_frame(239.2)
+        signal = detect_level_events(
+            levels, sample, break_already=lambda key: False
+        )[0]
+
+        payload = build_level_event_message(
+            signal,
+            sample.snapshot,
+            (),
+            detected_at=AT + timedelta(minutes=3),
+            reference_close=252.18,
+            levels=levels,
+        )
+
+        self.assertTrue(audit_message("level_event", payload).passed)
+        self.assertIn("지지 $240.80 하향 이탈", payload["text"])
+        rendered = str(payload)
+        self.assertIn("다음 레벨", rendered)
+        self.assertIn("52주 저점", rendered)
 
 
 class RapidMoveMessageTest(unittest.TestCase):

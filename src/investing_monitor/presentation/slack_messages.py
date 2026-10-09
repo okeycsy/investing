@@ -8,6 +8,7 @@ from investing_monitor.domain.levels import PriceLevels
 from investing_monitor.domain.models import (
     Catalyst,
     Direction,
+    LevelEventSignal,
     MarketSnapshot,
     Position,
     PriceBandSignal,
@@ -295,6 +296,128 @@ def build_volume_message(
         "text": fallback,
         "blocks": blocks,
     }
+
+
+_LEVEL_LABELS = {
+    "support": "지지",
+    "resistance": "저항",
+    "sma20": "SMA20",
+    "sma50": "SMA50",
+    "sma200": "SMA200",
+    "52w-low": "52주 저점",
+    "52w-high": "52주 고점",
+}
+
+
+def build_level_event_message(
+    signal: LevelEventSignal,
+    snapshot: MarketSnapshot,
+    catalysts: Sequence[Catalyst],
+    *,
+    detected_at: datetime | None = None,
+    reference_close: float | None = None,
+    levels: PriceLevels | None = None,
+    position: Position | None = None,
+) -> dict:
+    label = _LEVEL_LABELS.get(signal.kind, signal.kind)
+    if signal.kind == "52w-low":
+        headline = "52주 신저가"
+        icon = "🚨"
+    elif signal.kind == "52w-high":
+        headline = "52주 신고가"
+        icon = "🎉"
+    else:
+        action = {
+            ("support", Direction.DOWN): "하향 이탈",
+            ("support", Direction.UP): "회복",
+            ("resistance", Direction.UP): "상향 돌파",
+        }.get(
+            (signal.kind, signal.direction),
+            "상향 돌파" if signal.direction is Direction.UP else "하향 이탈",
+        )
+        headline = f"{label} {price_label(signal.level_price)} {action}"
+        icon = "🧱" if signal.kind in {"support", "resistance"} else (
+            "📈" if signal.direction is Direction.UP else "📉"
+        )
+    title = f"${signal.ticker} {headline}"
+    detection_delay = (
+        delay_seconds(signal.observed_at, detected_at) if detected_at else 0
+    )
+    touches = f" · 최근 저가/고가 {signal.touches}회 테스트 레벨" if signal.touches else ""
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"{icon} {title}"}},
+        _context(
+            observation_context(
+                signal.observed_at,
+                session_label(signal.session),
+                detected_at,
+                detection_delay,
+            )
+        ),
+        _section(
+            f"💵 *{price_label(signal.close_price)} ({pct_label(snapshot.change_pct)})*"
+            + (
+                f" · 전일 종가 {price_label(reference_close)}"
+                if reference_close is not None else ""
+            )
+            + f"\n기준 레벨 {price_label(signal.level_price)}{touches}"
+        ),
+    ]
+    next_line = _next_level_line(signal, levels)
+    if next_line:
+        blocks.append(_section(next_line))
+    if levels is not None:
+        rendered_levels = levels_text(levels, signal.close_price)
+        if rendered_levels:
+            blocks.append(_section(rendered_levels))
+    if position is not None:
+        rendered_position = position_text(position, signal.close_price)
+        if rendered_position:
+            blocks.append(_section(rendered_position))
+    selected = list(catalysts[:2])
+    if selected:
+        blocks.append(_section("📰 *최근 확인된 관련 사건*"))
+        blocks.extend(_section(_catalyst_text(catalyst)) for catalyst in selected)
+    blocks.append(
+        _context("5분봉 종가 기준 자동 판정 · 당일 되돌림 가능성 있음")
+    )
+    fallback = f"{title} | {price_label(signal.close_price)} ({pct_label(snapshot.change_pct)})"
+    fallback += f" | 관측 {timestamp(signal.observed_at)}"
+    if detected_at is not None:
+        fallback += f" | 확인 {timestamp(detected_at)}"
+    return {"text": fallback, "blocks": blocks}
+
+
+def _next_level_line(
+    signal: LevelEventSignal,
+    levels: PriceLevels | None,
+) -> str:
+    if levels is None:
+        return ""
+    close = signal.close_price
+    if signal.direction is Direction.DOWN:
+        candidates = [
+            (f"지지 {price_label(item.price)}({item.touches}회)", item.price)
+            for item in levels.supports
+            if item.price < close
+        ]
+        if levels.low_52w is not None and levels.low_52w < close:
+            candidates.append((f"52주 저점 {price_label(levels.low_52w)}", levels.low_52w))
+        if not candidates:
+            return "⬇️ 아래쪽에 추적 중인 다음 레벨 없음"
+        name, price = max(candidates, key=lambda item: item[1])
+        return f"⬇️ 다음 레벨: {name} · 현재가에서 {pct_label((price / close - 1) * 100)}"
+    candidates = [
+        (f"저항 {price_label(item.price)}({item.touches}회)", item.price)
+        for item in levels.resistances
+        if item.price > close
+    ]
+    if levels.high_52w is not None and levels.high_52w > close:
+        candidates.append((f"52주 고점 {price_label(levels.high_52w)}", levels.high_52w))
+    if not candidates:
+        return "⬆️ 위쪽에 추적 중인 다음 레벨 없음"
+    name, price = min(candidates, key=lambda item: item[1])
+    return f"⬆️ 다음 레벨: {name} · 현재가에서 {pct_label((price / close - 1) * 100)}"
 
 
 def build_rapid_move_message(
