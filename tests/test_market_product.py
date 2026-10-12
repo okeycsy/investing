@@ -323,11 +323,9 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
                 SQLiteMonitorRepository(Path(directory) / "monitor.db"),
                 enqueue_alerts=False,
             ).process(after_previous_day, detected_at=now)
-        self.assertEqual(
-            report.inserted_event_keys,
-            ("VRT:2026-09-02:price-band:up:6",),
-        )
-        self.assertEqual(report.delayed_event_keys, report.inserted_event_keys)
+        self.assertIn("VRT:2026-09-02:price-band:up:6", report.inserted_event_keys)
+        self.assertIn("VRT:2026-09-02:green-cross", report.inserted_event_keys)
+        self.assertIn("VRT:2026-09-02:price-band:up:6", report.delayed_event_keys)
         rendered = json.dumps(report.messages[0], ensure_ascii=False)
         self.assertIn("+6.0% 상승 도달 기록", rendered)
         self.assertIn("관측 후 2시간 26분", rendered)

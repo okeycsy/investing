@@ -21,6 +21,7 @@ from investing_monitor.domain.models import (
 from investing_monitor.domain.policies import (
     RapidMovePolicy,
     detect_level_events,
+    is_green_cross,
     PriceBandPolicy,
     RelativeAssessment,
     VolumeAssessment,
@@ -36,6 +37,7 @@ from investing_monitor.ports.providers import (
 )
 from investing_monitor.ports.repository import AlertRecord, MonitorRepository
 from investing_monitor.presentation.slack_messages import (
+    build_green_cross_message,
     build_level_event_message,
     build_price_band_message,
     build_rapid_move_message,
@@ -332,9 +334,42 @@ class MarketCycleService:
             payloads[signal.event_key] = payload
             detection_delays[signal.event_key] = detection_delay
 
-        # Level breaks and velocity alarms only make sense on fresh data:
-        # stale replays of a long scheduler gap are already covered by band
-        # alerts and the close brief's level review.
+        # Green-cross, level breaks and velocity alarms only make sense on
+        # fresh data: stale replays of a long scheduler gap are already
+        # covered by band alerts and the close brief.
+        if detected_at is not None:
+            for frame in cycle.frames:
+                if detected_at - frame.snapshot.observed_at > timedelta(minutes=15):
+                    continue
+                if not is_green_cross(frame):
+                    continue
+                green_key = (
+                    f"{cycle.ticker.upper()}:{cycle.trading_date.isoformat()}:green-cross"
+                )
+                if green_key in payloads:
+                    continue
+                payload = build_green_cross_message(
+                    frame.snapshot,
+                    price=frame.close_price,
+                    reference_close=frame.reference_close,
+                    detected_at=detected_at,
+                )
+                alerts.append(
+                    AlertRecord(
+                        event_key=green_key,
+                        ticker=cycle.ticker.upper(),
+                        alert_type="green_cross",
+                        created_at=frame.snapshot.observed_at,
+                        payload=payload,
+                    )
+                )
+                payloads[green_key] = payload
+                detection_delays[green_key] = self._detection_delay(
+                    frame.snapshot.observed_at,
+                    detected_at,
+                )
+                break
+
         if levels is not None and detected_at is not None:
             for frame in cycle.frames:
                 if detected_at - frame.snapshot.observed_at > timedelta(minutes=15):

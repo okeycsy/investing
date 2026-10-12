@@ -9,6 +9,7 @@ from .models import (
     Direction,
     LevelEventSignal,
     MarketFrame,
+    MarketSession,
     MarketSensitivity,
     MarketSnapshot,
     PriceBandSignal,
@@ -50,6 +51,18 @@ class VolumeAssessment:
     ratio: float | None
     is_ready: bool
     is_exploded: bool
+
+
+# First confirmed green day: change vs previous regular close, with a small
+# margin so hovering around 0% does not ping on noise. Once per day.
+GREEN_CROSS_CONFIRM_PCT = 0.2
+
+
+def is_green_cross(frame: MarketFrame) -> bool:
+    return (
+        frame.snapshot.session is MarketSession.REGULAR
+        and frame.snapshot.change_pct >= GREEN_CROSS_CONFIRM_PCT
+    )
 
 
 def level_break_buffer(levels: "PriceLevels", close_price: float) -> float:

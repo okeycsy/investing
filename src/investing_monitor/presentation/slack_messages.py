@@ -298,6 +298,45 @@ def build_volume_message(
     }
 
 
+def build_green_cross_message(
+    snapshot: MarketSnapshot,
+    *,
+    price: float | None = None,
+    reference_close: float | None = None,
+    detected_at: datetime | None = None,
+) -> dict:
+    title = f"${snapshot.ticker} 양전 전환 {pct_label(snapshot.change_pct)}"
+    detection_delay = (
+        delay_seconds(snapshot.observed_at, detected_at) if detected_at else 0
+    )
+    price_line = ""
+    if price is not None:
+        price_line = f"💵 *{price_label(price)} ({pct_label(snapshot.change_pct)})*"
+        if reference_close is not None:
+            price_line += f" · 전일 종가 {price_label(reference_close)}"
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"💚 {title}"}},
+        _context(
+            observation_context(
+                snapshot.observed_at,
+                session_label(snapshot.session),
+                detected_at,
+                detection_delay,
+            )
+        ),
+    ]
+    if price_line:
+        blocks.append(_section(price_line))
+    blocks.append(
+        _context("당일 첫 양전 확인(5분봉 종가 기준) · 이후 흐름은 마감 브리프에서 정리")
+    )
+    fallback = f"{title}"
+    if price is not None:
+        fallback += f" | {price_label(price)}"
+    fallback += f" | 관측 {timestamp(snapshot.observed_at)}"
+    return {"text": fallback, "blocks": blocks}
+
+
 _LEVEL_LABELS = {
     "support": "지지",
     "resistance": "저항",

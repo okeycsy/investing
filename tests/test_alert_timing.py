@@ -115,7 +115,9 @@ class AlertTimingTest(unittest.TestCase):
                 report = service.process(cycle(
                     frame(EVENT_AT, event), frame(LATEST_AT, latest),
                 ), detected_at=DETECTED_AT)
-                self.assertEqual(len(report.messages), 1)
+                # A fresh green latest frame adds the once-a-day green-cross ping.
+                expected_total = 2 if latest >= 0.2 else 1
+                self.assertEqual(len(report.messages), expected_total)
                 self.assertIn(expected, rendered(report.messages[0]))
 
     def test_last_observation_is_not_described_as_current_when_stale(self):

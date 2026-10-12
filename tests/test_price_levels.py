@@ -310,6 +310,46 @@ class LevelEventTest(unittest.TestCase):
         self.assertIn("52주 저점", rendered)
 
 
+class GreenCrossTest(unittest.TestCase):
+    def make_frame(self, change_pct, session=MarketSession.REGULAR):
+        snapshot = MarketSnapshot(
+            ticker="VRT",
+            trading_date=TODAY,
+            observed_at=AT,
+            session=session,
+            change_pct=change_pct,
+        )
+        return MarketFrame(snapshot=snapshot, close_price=244.4, reference_close=243.7)
+
+    def test_confirms_only_regular_session_green_above_margin(self):
+        from investing_monitor.domain.policies import is_green_cross
+
+        self.assertTrue(is_green_cross(self.make_frame(0.3)))
+        self.assertFalse(is_green_cross(self.make_frame(0.1)))
+        self.assertFalse(is_green_cross(self.make_frame(-0.3)))
+        self.assertFalse(
+            is_green_cross(self.make_frame(0.5, session=MarketSession.PRE))
+        )
+
+    def test_message_passes_audit(self):
+        from investing_monitor.presentation.quality import audit_message
+        from investing_monitor.presentation.slack_messages import (
+            build_green_cross_message,
+        )
+
+        sample = self.make_frame(0.29)
+        payload = build_green_cross_message(
+            sample.snapshot,
+            price=sample.close_price,
+            reference_close=sample.reference_close,
+            detected_at=AT + timedelta(minutes=2),
+        )
+
+        self.assertTrue(audit_message("green_cross", payload).passed)
+        self.assertIn("양전 전환 +0.29%", payload["text"])
+        self.assertIn("$244.40", payload["text"])
+
+
 class RapidMoveMessageTest(unittest.TestCase):
     def test_rapid_move_message_passes_audit(self):
         from investing_monitor.domain.models import RapidMoveSignal
