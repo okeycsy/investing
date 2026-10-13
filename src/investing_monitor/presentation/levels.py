@@ -57,6 +57,11 @@ def day_level_review(
     if close_price is None or day_low is None or day_high is None:
         return ""
     tolerance = max((levels.atr14 or 0.0) * 0.15, close_price * 0.003)
+    # Whether a level counts as broken at the close is a verdict, not a touch
+    # test: use a tight margin so closing $1+ through a level is never called
+    # defended (2026-10-12 closed 239.36 under the 240.72 support yet the wide
+    # touch band labeled it "사수").
+    verdict_margin = max((levels.atr14 or 0.0) * 0.02, close_price * 0.001)
     day_range = day_high - day_low
     close_position = (
         (close_price - day_low) / day_range if day_range > 0 else 0.5
@@ -65,10 +70,15 @@ def day_level_review(
     for support in levels.supports:
         if day_low > support.price + tolerance:
             continue
-        if close_price < support.price - tolerance:
+        if close_price < support.price - verdict_margin:
             lines.append(
                 f"⚠️ 지지 {price_label(support.price)}({support.touches}회) 이탈 마감"
-                f" — 저가 {price_label(day_low)}"
+                f" — 종가 {price_label(close_price)} · 저가 {price_label(day_low)}"
+            )
+        elif close_price <= support.price + verdict_margin:
+            lines.append(
+                f"🟡 지지 {price_label(support.price)}({support.touches}회)에 걸친 경계 마감"
+                f" — 종가 {price_label(close_price)}"
             )
         else:
             qualifier = ""
@@ -83,9 +93,15 @@ def day_level_review(
     for resistance in levels.resistances:
         if day_high < resistance.price - tolerance:
             continue
-        if close_price > resistance.price + tolerance:
+        if close_price > resistance.price + verdict_margin:
             lines.append(
                 f"🚀 저항 {price_label(resistance.price)}({resistance.touches}회) 돌파 마감"
+                f" — 종가 {price_label(close_price)}"
+            )
+        elif close_price >= resistance.price - verdict_margin:
+            lines.append(
+                f"🟡 저항 {price_label(resistance.price)}({resistance.touches}회)에 걸친 경계 마감"
+                f" — 종가 {price_label(close_price)}"
             )
         else:
             lines.append(

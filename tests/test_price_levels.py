@@ -170,6 +170,41 @@ class LevelsPresentationTest(unittest.TestCase):
         self.assertIn("테스트 후 사수", held)
         self.assertIn("이탈 마감", broken)
 
+    def test_closing_through_support_is_a_break_even_within_touch_band(self):
+        from investing_monitor.domain.levels import ClusteredLevel
+
+        # Real case 2026-10-12: closed 239.36 under the 240.72 support but the
+        # wide touch tolerance (0.15 x ATR 11.34) mislabeled it "사수".
+        levels = PriceLevels(
+            ticker="VRT",
+            trading_date=TODAY,
+            computed_at=AT,
+            atr14=11.34,
+            supports=(ClusteredLevel(240.72, 8),),
+            last_close=242.78,
+        )
+
+        review = day_level_review(levels, 239.36, 237.41, 241.80)
+
+        self.assertIn("이탈 마감", review)
+        self.assertNotIn("사수", review)
+
+    def test_close_sitting_on_the_level_is_flagged_as_borderline(self):
+        from investing_monitor.domain.levels import ClusteredLevel
+
+        levels = PriceLevels(
+            ticker="VRT",
+            trading_date=TODAY,
+            computed_at=AT,
+            atr14=11.34,
+            supports=(ClusteredLevel(240.72, 8),),
+            last_close=242.78,
+        )
+
+        review = day_level_review(levels, 240.70, 238.0, 243.0)
+
+        self.assertIn("경계 마감", review)
+
     def test_day_level_review_silent_when_no_level_was_touched(self):
         from investing_monitor.domain.levels import ClusteredLevel
 

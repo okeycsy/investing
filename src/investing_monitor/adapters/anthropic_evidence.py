@@ -117,8 +117,15 @@ def parse_analysis_response(
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I)
     try:
         rows = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise EvidenceValidationError(f"analysis is not valid JSON: {exc}") from exc
+    except json.JSONDecodeError:
+        # Haiku occasionally appends prose after the JSON document; accept
+        # the first valid document instead of failing the whole batch.
+        try:
+            rows, _ = json.JSONDecoder().raw_decode(cleaned)
+        except json.JSONDecodeError as exc:
+            raise EvidenceValidationError(
+                f"analysis is not valid JSON: {exc}"
+            ) from exc
     if not isinstance(rows, list):
         raise EvidenceValidationError("analysis response must be a JSON array")
 

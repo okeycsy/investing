@@ -2074,6 +2074,21 @@ class SecFilingsTest(unittest.TestCase):
         self.assertIn("/1674101/000167410126000123/", candidates[0].source_url)
         self.assertEqual(candidates[0].metadata["items"], "1.01,2.01,9.01")
 
+    def test_analysis_json_with_trailing_prose_still_parses(self):
+        from investing_monitor.adapters.anthropic_evidence import parse_analysis_response
+
+        candidate = screen_candidate(
+            raw("Vertiv wins major contract"), PROFILE
+        ).candidate
+        value = (
+            '[{"candidate_id": "%s", "relevant": false}]\n\n'
+            "Note: no other candidates were material." % candidate.candidate_id
+        )
+
+        batch = parse_analysis_response(value, (candidate,))
+
+        self.assertIn(candidate.candidate_id, batch.analyses)
+
     def test_sec_request_identifies_contact_and_403_uses_mirror(self):
         class Response:
             status_code = 403
