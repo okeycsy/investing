@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -167,7 +168,7 @@ class GitStateBranchStore:
             ).stdout.strip()
 
         lease = f"--force-with-lease=refs/heads/{self.branch}:{previous_sha}"
-        self._git(
+        self._push_with_retry(
             [
                 "push",
                 "--quiet",
@@ -182,6 +183,20 @@ class GitStateBranchStore:
             previous_commit_sha=previous_sha,
             database_sha256=database_sha256,
         )
+
+    def _push_with_retry(self, push_args: list[str], attempts: int = 3) -> None:
+        """GitHub intermittently rejects pushes with server-side errors such
+        as "fatal error in commit_refs" (failed a scheduler run on
+        2026-10-14); a genuine lease conflict keeps failing, so retrying the
+        identical leased push is safe and absorbs the transient case."""
+        for attempt in range(attempts):
+            try:
+                self._git(push_args)
+                return
+            except GitStateBranchError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(2 * (attempt + 1))
 
     def _remote_sha(self) -> str:
         result = self._git(

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -531,6 +532,46 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=True,
     )
+
+
+
+
+class PushRetryTest(unittest.TestCase):
+    def test_transient_push_rejection_is_retried_then_succeeds(self):
+        from investing_monitor.adapters.git_state_branch import (
+            GitStateBranchError,
+            GitStateBranchStore,
+        )
+
+        store = GitStateBranchStore.__new__(GitStateBranchStore)
+        calls = []
+
+        def flaky_git(args, **_kwargs):
+            calls.append(tuple(args))
+            if len(calls) < 3:
+                raise GitStateBranchError("remote: fatal error in commit_refs")
+
+        store._git = flaky_git
+        with unittest.mock.patch("time.sleep"):
+            store._push_with_retry(["push", "--quiet"])
+
+        self.assertEqual(len(calls), 3)
+
+    def test_persistent_rejection_still_raises(self):
+        from investing_monitor.adapters.git_state_branch import (
+            GitStateBranchError,
+            GitStateBranchStore,
+        )
+
+        store = GitStateBranchStore.__new__(GitStateBranchStore)
+
+        def always_fail(_args, **_kwargs):
+            raise GitStateBranchError("stale info: lease conflict")
+
+        store._git = always_fail
+        with unittest.mock.patch("time.sleep"):
+            with self.assertRaisesRegex(GitStateBranchError, "lease conflict"):
+                store._push_with_retry(["push", "--quiet"])
 
 
 if __name__ == "__main__":
