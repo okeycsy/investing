@@ -597,13 +597,17 @@ class YahooMarketDataAdapter:
         trading_date: date,
         now: datetime,
     ) -> list[YahooBar]:
-        return [
+        bars = [
             bar
             for bar in chart.bars
             if bar.observed_at.astimezone(NEW_YORK).date() == trading_date
             and bar.observed_at <= now
             and self.calendar.session_at(bar.observed_at) is not MarketSession.CLOSED
         ]
+        return drop_unconfirmed_extended_prints(
+            bars,
+            self.calendar.window(trading_date),
+        )
 
     def _regular_bars(self, chart: YahooChart, trading_date: date) -> list[YahooBar]:
         window = self.calendar.window(trading_date)
@@ -750,6 +754,40 @@ class YahooMarketDataAdapter:
             lookback_sessions=20,
             observed_at=included_bars[-1].observed_at,
         )
+
+
+def drop_unconfirmed_extended_prints(
+    bars: Sequence[YahooBar],
+    window,
+    *,
+    max_step: float = 0.02,
+) -> list[YahooBar]:
+    """Discard isolated extended-hours prints far off the tape.
+
+    Thin pre/post-market sessions occasionally report a single bogus 5-minute
+    bar (2026-10-14 16:55 ET printed 210.06 between 222-dollar neighbors and
+    fired a false -11% alert). An extended-hours bar that jumps more than
+    max_step from the last kept close is held back until the NEXT bar lands
+    within max_step of it, so a genuine earnings gap passes one bar later
+    while a lone misprint never does.
+    """
+    kept: list[YahooBar] = []
+    for index, bar in enumerate(bars):
+        in_regular = window.open_at <= bar.observed_at < window.close_at
+        if not in_regular and kept:
+            previous = kept[-1].close
+            if previous > 0 and abs(bar.close / previous - 1) > max_step:
+                confirmed = False
+                if index + 1 < len(bars):
+                    following = bars[index + 1].close
+                    confirmed = (
+                        bar.close > 0
+                        and abs(following / bar.close - 1) <= max_step
+                    )
+                if not confirmed:
+                    continue
+        kept.append(bar)
+    return kept
 
 
 def _sanitized_bar_volume(volume: int, running_total: int, bar_index: int) -> int:

@@ -897,6 +897,77 @@ class YahooChartClientTest(unittest.TestCase):
         self.assertEqual(quote.change_pct, 0.0)
 
 
+class ExtendedPrintFilterTest(unittest.TestCase):
+    def window(self, day):
+        from investing_monitor.adapters.exchange_calendar import SessionWindow
+
+        return SessionWindow(day, et(day, 9, 30), et(day, 16, 0))
+
+    def test_isolated_after_hours_misprint_is_dropped(self):
+        from investing_monitor.adapters.yahoo_market_data import (
+            drop_unconfirmed_extended_prints,
+        )
+
+        day = date(2026, 10, 14)
+        bars = [
+            bar(day, 15, 55, 222.3, 50_000),
+            bar(day, 16, 50, 222.07),
+            bar(day, 16, 55, 210.06),  # real misprint from 2026-10-14
+            bar(day, 17, 0, 221.50),
+        ]
+
+        kept = drop_unconfirmed_extended_prints(bars, self.window(day))
+
+        self.assertEqual([b.close for b in kept], [222.3, 222.07, 221.50])
+
+    def test_unconfirmed_last_extended_bar_waits_for_the_next_cycle(self):
+        from investing_monitor.adapters.yahoo_market_data import (
+            drop_unconfirmed_extended_prints,
+        )
+
+        day = date(2026, 10, 14)
+        bars = [
+            bar(day, 15, 55, 222.3, 50_000),
+            bar(day, 16, 55, 210.06),
+        ]
+
+        kept = drop_unconfirmed_extended_prints(bars, self.window(day))
+
+        self.assertEqual([b.close for b in kept], [222.3])
+
+    def test_genuine_earnings_gap_passes_once_the_next_bar_confirms(self):
+        from investing_monitor.adapters.yahoo_market_data import (
+            drop_unconfirmed_extended_prints,
+        )
+
+        day = date(2026, 10, 14)
+        bars = [
+            bar(day, 15, 55, 222.3, 50_000),
+            bar(day, 16, 5, 205.0),   # -7.8% on the release
+            bar(day, 16, 10, 204.2),  # confirmed by the following bar
+            bar(day, 16, 15, 206.1),
+        ]
+
+        kept = drop_unconfirmed_extended_prints(bars, self.window(day))
+
+        self.assertEqual([b.close for b in kept], [222.3, 205.0, 204.2, 206.1])
+
+    def test_regular_session_bars_are_never_filtered(self):
+        from investing_monitor.adapters.yahoo_market_data import (
+            drop_unconfirmed_extended_prints,
+        )
+
+        day = date(2026, 10, 14)
+        bars = [
+            bar(day, 9, 30, 240.0, 500_000),
+            bar(day, 9, 35, 230.0, 900_000),  # violent but regular-session
+        ]
+
+        kept = drop_unconfirmed_extended_prints(bars, self.window(day))
+
+        self.assertEqual(len(kept), 2)
+
+
 class SanitizedVolumeTest(unittest.TestCase):
     def test_cumulative_echo_bar_is_dropped_from_volume_sums(self):
         from investing_monitor.adapters.yahoo_market_data import (
