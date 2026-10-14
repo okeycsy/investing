@@ -14,8 +14,7 @@ from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessme
 from investing_monitor.presentation.market_context import (
     pct_label,
     price_label,
-    relative_detail_line,
-    relative_outcome_line,
+    relative_compact_line,
 )
 
 
@@ -65,21 +64,7 @@ def build_weekly_message(
                 " (5분봉 종가 기준)"
             )
         blocks.append(_section(price_text))
-    blocks.append(
-        _section(
-            relative_outcome_line(
-                f"반도체 지수({relative.benchmark_symbol})",
-                relative.benchmark,
-                relative.benchmark_strength,
-            )
-            + f"\n{relative_detail_line(snapshot, relative)}"
-        )
-    )
-    if relative.peers.value != "unavailable":
-        peers = "·".join(relative.peer_symbols)
-        blocks.append(
-            _section(relative_outcome_line(f"피어 평균({peers})", relative.peers, relative.peer_strength))
-        )
+    blocks.append(_section(relative_compact_line(snapshot, relative)))
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0

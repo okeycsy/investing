@@ -25,9 +25,9 @@ from investing_monitor.presentation.levels import (
 from investing_monitor.presentation.market_context import (
     pct_label,
     price_label,
-    relative_outcome_line,
+    relative_compact_line,
 )
-from investing_monitor.presentation.timing import session_label, timestamp, volume_basis
+from investing_monitor.presentation.timing import timestamp
 
 
 def volume_mood(ratio: float | None) -> str:
@@ -153,12 +153,9 @@ def build_close_message(
         Direction.DOWN: ("📉", "음전"),
         Direction.FLAT: ("➖", "보합"),
     }[snapshot.direction]
-    timing = (
-        f"미국 거래일 {snapshot.trading_date:%m/%d} · {session_label(snapshot.session)}\n"
-        f"시장 자료 {timestamp(snapshot.observed_at)}"
-    )
+    timing = f"미국 거래일 {snapshot.trading_date:%m/%d} · 자료 {timestamp(snapshot.observed_at)}"
     if created_at is not None:
-        timing += f" · 브리프 작성 {timestamp(created_at)}"
+        timing += f" · 작성 {timestamp(created_at)}"
     blocks = [
         {
             "type": "header",
@@ -193,40 +190,16 @@ def build_close_message(
     if shape:
         blocks.append(_section(shape))
 
-    relative_lines = [
-        relative_outcome_line(
-            f"반도체 지수({relative.benchmark_symbol})",
-            relative.benchmark,
-            relative.benchmark_strength,
-        )
-    ]
-    benchmark_numbers = [f"{snapshot.ticker} {pct_label(snapshot.change_pct)}"]
-    if snapshot.benchmark_change_pct is not None:
-        benchmark_numbers.append(
-            f"{relative.benchmark_symbol} {pct_label(snapshot.benchmark_change_pct)}"
-        )
-    relative_lines.append(" · ".join(benchmark_numbers))
-    if relative.peers.value != "unavailable":
-        peer_symbols = "·".join(relative.peer_symbols)
-        relative_lines.append(
-            relative_outcome_line(
-                f"피어 평균({peer_symbols})", relative.peers, relative.peer_strength,
-            )
-        )
-        if relative.peer_average_change_pct is not None:
-            relative_lines.append(
-                f"피어 평균 {pct_label(relative.peer_average_change_pct)}"
-            )
-    blocks.append(_section("\n".join(relative_lines)))
+    blocks.append(_section(relative_compact_line(snapshot, relative)))
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0
         blocks.append(
             _section(
-                f"*{volume_mood(volume_assessment.ratio)}*\n{volume_basis(volume)}\n"
-                f"당일 {volume.observed_volume:,}주 | "
+                f"*{volume_mood(volume_assessment.ratio)}*\n"
+                f"당일 {volume.observed_volume:,}주 · "
                 f"최근 {volume.baseline_sessions}거래일 평균 "
-                f"{volume.expected_volume:,}주 | {ratio:.1f}배"
+                f"{volume.expected_volume:,}주 · {ratio:.1f}배"
             )
         )
 

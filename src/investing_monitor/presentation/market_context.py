@@ -119,6 +119,36 @@ def pct_label(value: float) -> str:
     return f"{value:+.2f}%"
 
 
+def relative_compact_line(snapshot, relative) -> str:
+    """One decision-ready line: own return vs index and peers with a verdict.
+
+    e.g. 'vs SOXX -3.10% (1.9%p 더 약함) · 피어 -5.15% (동행)'
+    """
+    parts = []
+    own = snapshot.change_pct
+    if snapshot.benchmark_change_pct is not None:
+        gap = own - snapshot.benchmark_change_pct
+        parts.append(
+            f"vs {relative.benchmark_symbol} {pct_label(snapshot.benchmark_change_pct)}"
+            f" ({_gap_tag(gap)})"
+        )
+    if relative.peer_average_change_pct is not None:
+        gap = own - relative.peer_average_change_pct
+        parts.append(
+            f"피어 {pct_label(relative.peer_average_change_pct)} ({_gap_tag(gap)})"
+        )
+    if not parts:
+        return f"vs {relative.benchmark_symbol} · 비교 자료 없음"
+    return " · ".join(parts)
+
+
+def _gap_tag(gap: float) -> str:
+    if abs(gap) <= 0.3:
+        return "동행"
+    direction = "강함" if gap > 0 else "약함"
+    return f"{abs(gap):.1f}%p 더 {direction}"
+
+
 def relative_detail_line(snapshot, relative) -> str:
     """Actual return comparison, e.g. 'VRT -3.12% · SOXX -4.05% · 피어 평균 -2.90%'."""
     parts = [f"{snapshot.ticker} {pct_label(snapshot.change_pct)}"]

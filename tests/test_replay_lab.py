@@ -95,7 +95,7 @@ class MarketReplayLabTest(unittest.TestCase):
             self.assertTrue(report.quality_passed)
             self.assertEqual(report.quality_violations, ())
             self.assertIn(
-                "동시간대 19거래일 평균",
+                "거래량 동시간대 평시 1.0배",
                 str(report.messages[0]),
             )
             self.assertEqual(len(provider.calls), 1)
@@ -113,10 +113,12 @@ class MarketReplayLabTest(unittest.TestCase):
                 MarketCycleService(repository, enqueue_alerts=False),
             ).replay_day(TRADING_DATE)
 
+            # 6.4% normalizes to the 5 band on the widened ladder, so each
+            # direction's extreme lands once on the same rung.
             self.assertEqual(
                 report.event_keys,
                 (
-                    "VRT:2026-09-02:price-band:up:6",
+                    "VRT:2026-09-02:price-band:up:5",
                     "VRT:2026-09-02:price-band:down:5",
                 ),
             )

@@ -72,6 +72,22 @@ class PriceBandPolicyTest(unittest.TestCase):
         self.assertIsNone(retracement)
         self.assertEqual(state.upward_high_watermark, 5)
 
+    def test_ladder_widens_to_two_point_steps_past_five_percent(self):
+        policy = PriceBandPolicy()
+        state = None
+
+        five, state = policy.evaluate(snapshot(-5.2), state)
+        six_silent, state = policy.evaluate(snapshot(-6.4), state)
+        seven, state = policy.evaluate(snapshot(-7.1), state)
+        eight_silent, state = policy.evaluate(snapshot(-8.9), state)
+        nine, state = policy.evaluate(snapshot(-9.0), state)
+
+        self.assertEqual(five.level, 5)
+        self.assertIsNone(six_silent)
+        self.assertEqual(seven.level, 7)
+        self.assertIsNone(eight_silent)
+        self.assertEqual(nine.level, 9)
+
     def test_default_policy_alerts_from_three_percent_band(self):
         policy = PriceBandPolicy()
 
@@ -220,12 +236,13 @@ class MessageContractTest(unittest.TestCase):
             volume,
             assess_intraday_volume(volume),
             [catalyst],
+            event_snapshot=market,
         )
         rendered = json.dumps(payload, ensure_ascii=False)
 
         self.assertIn("+4.0% 상승 구간 진입", rendered)
-        self.assertIn("반도체 지수", rendered)
-        self.assertIn("피어(ETN·GEV·NVT)", rendered)
+        self.assertIn("vs SOXX +1.20%", rendered)
+        self.assertIn("피어 +1.03%", rendered)
         self.assertIn("1.7배", rendered)
         self.assertIn("https://investors.vertiv.com/example", rendered)
         self.assertNotIn("4.73", rendered)

@@ -26,13 +26,13 @@ FORBIDDEN_TEXT = (
 )
 
 REQUIRED_TEXT = {
-    "price_band": ("반도체 지수(",),
-    "volume_spike": ("거래량", "종목 방향", "반도체 지수("),
-    "rapid_move": ("15분", "거래량", "반도체 지수(", "자동 감지"),
+    "price_band": ("vs ",),
+    "volume_spike": ("거래량", "vs "),
+    "rapid_move": ("15분", "거래량", "자동 감지"),
     "level_event": ("기준 레벨", "5분봉 종가 기준"),
     "green_cross": ("양전", "5분봉 종가 기준"),
-    "daily_close": ("장 마감", "종목 방향", "반도체 지수("),
-    "weekly_review": ("주간 논지 리뷰", "주간 방향", "반도체 지수("),
+    "daily_close": ("장 마감", "종목 방향", "vs "),
+    "weekly_review": ("주간 논지 리뷰", "주간 방향"),
     "catalyst": ("확인된 사실",),
     "filing": ("확인된 사실",),
     "insider": ("거래 규모",),

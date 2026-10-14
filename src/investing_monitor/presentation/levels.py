@@ -47,6 +47,43 @@ def position_text(position: Position, current_price: float | None) -> str:
     return line
 
 
+def nearest_levels_line(levels: PriceLevels, price: float | None) -> str:
+    """The two levels that matter from the current price, one line.
+
+    e.g. '🧱 아래 지지 $234.01 (-1.2%) · 위 저항 $248.79 (+10.4%)'
+    All tracked levels (supports, resistances, 52-week extremes) are
+    partitioned against the live price, so a support the price has already
+    fallen through is never shown as support again.
+    """
+    reference = price if price is not None else levels.last_close
+    if reference is None:
+        return ""
+    candidates: list[tuple[str, float]] = []
+    for level in levels.supports:
+        # A support the price has fallen through is overhead supply now.
+        name = "지지" if level.price < reference else "이탈 지지"
+        candidates.append((f"{name} {price_label(level.price)}({level.touches}회)", level.price))
+    for level in levels.resistances:
+        name = "저항" if level.price > reference else "돌파 저항"
+        candidates.append((f"{name} {price_label(level.price)}({level.touches}회)", level.price))
+    if levels.low_52w is not None:
+        candidates.append((f"52주 저점 {price_label(levels.low_52w)}", levels.low_52w))
+    if levels.high_52w is not None:
+        candidates.append((f"52주 고점 {price_label(levels.high_52w)}", levels.high_52w))
+    below = [item for item in candidates if item[1] < reference]
+    above = [item for item in candidates if item[1] > reference]
+    parts = []
+    if below:
+        name, value = max(below, key=lambda item: item[1])
+        parts.append(f"아래 {name} ({pct_label((value / reference - 1) * 100)})")
+    else:
+        parts.append("아래 추적 레벨 없음")
+    if above:
+        name, value = min(above, key=lambda item: item[1])
+        parts.append(f"위 {name} ({pct_label((value / reference - 1) * 100)})")
+    return "🧱 " + " · ".join(parts)
+
+
 def day_level_review(
     levels: PriceLevels,
     close_price: float | None,

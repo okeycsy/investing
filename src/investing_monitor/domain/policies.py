@@ -223,11 +223,31 @@ class RapidMovePolicy:
 
 
 class PriceBandPolicy:
-    def __init__(self, start_level: int = 3, step: int = 1) -> None:
-        if start_level < 1 or step < 1:
+    def __init__(
+        self,
+        start_level: int = 3,
+        step: int = 1,
+        *,
+        wide_step_from: int = 5,
+        wide_step: int = 2,
+    ) -> None:
+        if start_level < 1 or step < 1 or wide_step < 1:
             raise ValueError("start_level and step must be positive")
         self.start_level = start_level
         self.step = step
+        # Past wide_step_from the ladder widens (3,4,5,7,9,...) so a crash
+        # day pings on new information, not on every additional 1%p.
+        self.wide_step_from = wide_step_from
+        self.wide_step = wide_step
+
+    def _normalized_level(self, level: int) -> int:
+        if level > self.wide_step_from >= self.start_level:
+            return self.wide_step_from + (
+                (level - self.wide_step_from) // self.wide_step
+            ) * self.wide_step
+        return self.start_level + (
+            (level - self.start_level) // self.step
+        ) * self.step
 
     def evaluate(
         self,
@@ -247,9 +267,7 @@ class PriceBandPolicy:
             previous = state.downward_high_watermark
             opposite_seen = state.upward_high_watermark >= self.start_level
 
-        normalized_level = self.start_level + (
-            (level - self.start_level) // self.step
-        ) * self.step
+        normalized_level = self._normalized_level(level)
         if normalized_level <= previous:
             return None, state
 

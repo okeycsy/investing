@@ -323,13 +323,14 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
                 SQLiteMonitorRepository(Path(directory) / "monitor.db"),
                 enqueue_alerts=False,
             ).process(after_previous_day, detected_at=now)
-        self.assertIn("VRT:2026-09-02:price-band:up:6", report.inserted_event_keys)
+        # 6.2% normalizes to the 5 band on the widened ladder (3,4,5,7,9,...).
+        self.assertIn("VRT:2026-09-02:price-band:up:5", report.inserted_event_keys)
         self.assertIn("VRT:2026-09-02:green-cross", report.inserted_event_keys)
-        self.assertIn("VRT:2026-09-02:price-band:up:6", report.delayed_event_keys)
+        self.assertIn("VRT:2026-09-02:price-band:up:5", report.delayed_event_keys)
         rendered = json.dumps(report.messages[0], ensure_ascii=False)
-        self.assertIn("+6.0% 상승 도달 기록", rendered)
-        self.assertIn("관측 후 2시간 26분", rendered)
-        self.assertIn("+6.0% 구간 아래로 되돌림", rendered)
+        self.assertIn("+5.0% 상승 도달 기록", rendered)
+        self.assertIn("(지연 2시간 26분)", rendered)
+        self.assertIn("+5.0% 구간 아래로 되돌림", rendered)
 
     def test_abnormal_move_requires_independent_quote_confirmation(self):
         primary = make_chart(
@@ -507,14 +508,15 @@ class MarketCycleServiceTest(unittest.TestCase):
 
             report = MarketCycleService(repository).process(cycle)
 
-            self.assertEqual(report.inserted_event_keys, ("VRT:2026-09-02:price-band:up:6",))
+            # The 6.2% extreme collapses into the 5 band on the widened ladder.
+            self.assertEqual(report.inserted_event_keys, ("VRT:2026-09-02:price-band:up:5",))
             self.assertEqual(repository.latest_market_observation_at("VRT"), frames[-1].snapshot.observed_at)
             pending = repository.pending_deliveries(
                 datetime(2026, 9, 3, tzinfo=timezone.utc)
             )
             rendered = json.dumps(pending[0].payload, ensure_ascii=False)
-            self.assertIn("+6.0% 상승 도달 기록", rendered)
-            self.assertIn("정규장 · 관측 09/02 23:10 KST", rendered)
+            self.assertIn("+5.0% 상승 도달 기록", rendered)
+            self.assertIn("정규장 · 09/02 23:10 KST", rendered)
             self.assertIn("$106.20 (+6.20%)", rendered)
             self.assertIn("마지막 관측 $104.70 (+4.70%)", rendered)
             self.assertNotIn("change_pct", json.dumps(report.as_dict()))
@@ -566,13 +568,12 @@ class MarketCycleServiceTest(unittest.TestCase):
                 ("VRT:2026-09-02:price-band:up:4",),
             )
             self.assertEqual(report.max_detection_delay_seconds, 2 * 60 * 60 + 20 * 60)
-            self.assertIn("⏱️ 지연 확인", rendered)
-            self.assertIn("정규장 · 관측 09/02 23:00 KST", rendered)
-            self.assertIn("봇 확인 09/03 01:20 KST", rendered)
-            self.assertIn("관측 후 2시간 20분", rendered)
-            self.assertIn("마지막 관측 · 정규장 09/02 23:05 KST", rendered)
+            self.assertIn("도달 기록 · 지연 확인", rendered)
+            self.assertIn("정규장 · 09/02 23:00 KST", rendered)
+            self.assertIn("확인 09/03 01:20 KST (지연 2시간 20분)", rendered)
+            self.assertIn("마지막 관측 09/02 23:05 KST: +4.0% 구간 아래로 되돌림", rendered)
+            self.assertIn("마지막 관측 $102.00 (+2.00%)", rendered)
             self.assertIn("+4.0% 구간 아래로 되돌림", rendered)
-            self.assertIn("이후 상태는 확인되지 않음", rendered)
             self.assertIn("지연 확인", report.messages[0]["text"])
 
     def test_volume_alert_is_once_per_day_and_combines_with_move(self):
@@ -594,7 +595,10 @@ class MarketCycleServiceTest(unittest.TestCase):
                 datetime(2026, 9, 3, tzinfo=timezone.utc)
             )
             self.assertEqual(len(pending), 1)
-            self.assertIn("거래량 확대", json.dumps(pending[0].payload, ensure_ascii=False))
+            self.assertIn(
+                "🔥 거래량 동시간대 평시 1.5배",
+                json.dumps(pending[0].payload, ensure_ascii=False),
+            )
             self.assertTrue(repository.load_price_band_state("VRT").volume_alerted)
 
     def test_next_price_band_leads_with_context_changes_since_prior_alert(self):
@@ -611,10 +615,16 @@ class MarketCycleServiceTest(unittest.TestCase):
 
             first_text = json.dumps(first.messages[0], ensure_ascii=False)
             second_text = json.dumps(second.messages[0], ensure_ascii=False)
-            self.assertIn("직접 촉매 아직 확인되지 않음", first_text)
-            self.assertIn("종목 고유 강세 가능성 있음", first_text)
-            self.assertIn("직전 가격 알림 이후", second_text)
-            self.assertIn("거래량: 평시 범위 → 평시 범위 초과", second_text)
+            # The second alert reflects the context that changed since the
+            # first one: the band escalated to 5 and volume turned exploded.
+            self.assertIn("+4.0% 상승 구간 진입", first_text)
+            self.assertIn("거래량 동시간대 평시 0.5배", first_text)
+            self.assertNotIn("🔥", first_text)
+            self.assertIn("+5.0% 상승 구간 진입", second_text)
+            self.assertIn("🔥 거래량 동시간대 평시 2.0배", second_text)
+            # The old delta/situation prose is gone from the compact format.
+            self.assertNotIn("직전 가격 알림 이후", second_text)
+            self.assertNotIn("민감도 참고", second_text)
             previous = repository.latest_price_alert_context(
                 "VRT",
                 TRADING_DATE,
@@ -686,9 +696,8 @@ class MarketCycleServiceTest(unittest.TestCase):
             self.assertEqual(first.delayed_event_keys, first.inserted_event_keys)
             self.assertEqual(second.inserted_event_keys, ())
             rendered = json.dumps(first.messages[0], ensure_ascii=False)
-            self.assertIn("거래량 1.5배 확대", rendered)
-            self.assertIn("⏱️ 지연 확인", rendered)
-            self.assertIn("관측 후 2시간", rendered)
+            self.assertIn("거래량 1.5배 확대 · 지연 확인", rendered)
+            self.assertIn("(지연 2시간)", rendered)
 
     def test_shadow_records_alert_without_creating_delivery_intent(self):
         with tempfile.TemporaryDirectory() as directory:

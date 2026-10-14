@@ -64,13 +64,16 @@ class AlertTimingTest(unittest.TestCase):
         payload = report.messages[0]
         text = rendered(payload)
         self.assertIn("+4.0% 상승 도달 기록 · 지연 확인", text)
-        self.assertIn("프리마켓 · 관측 09/17 21:30 KST", text)
-        self.assertIn("봇 확인 09/17 23:57 KST", text)
-        self.assertIn("마지막 관측 · 정규장 09/17 23:55 KST", text)
-        self.assertIn("음전 · +4.0% 구간 아래로 되돌림", text)
-        self.assertIn("반도체 지수(SOXX) 대비 강한 언더퍼폼", text)
+        self.assertIn("프리마켓 · 09/17 21:30 KST", text)
+        self.assertIn("확인 09/17 23:57 KST (지연 2시간 27분)", text)
+        self.assertIn("마지막 관측 09/17 23:55 KST: +4.0% 구간 아래로 되돌림", text)
+        self.assertIn("+4.0% 구간 아래로 되돌림", text)
+        # The latest frame (-1.25% vs SOXX +1.00%) drives the compact relative line.
+        self.assertIn("vs SOXX +1.00% (2.2%p 더 약함)", text)
+        self.assertNotIn("더 강함", text)
         self.assertNotIn("아웃퍼폼", text)
-        self.assertIn("정규장 누적 · 09/17 23:55 KST 봉까지", text)
+        self.assertIn("거래량 동시간대 평시 1.1배 (누적 1,798,281주)", text)
+        self.assertNotIn("봉까지", text)
         self.assertNotIn("거래량 동반", text)
         self.assertIn("$104.25 (+4.25%)", text)
         self.assertIn("마지막 관측 $98.75 (-1.25%)", text)
@@ -104,11 +107,11 @@ class AlertTimingTest(unittest.TestCase):
     def test_recovered_up_and_down_status_is_symmetric_and_inclusive(self):
         for event, latest, expected in (
             (4.25, 4.0, "+4.0% 구간 유지"),
-            (4.25, 1.25, "+4.0% 구간 아래로 되돌림"),
+            (4.25, 1.25, "$101.25 (+1.25%) · +4.0% 구간 아래로 되돌림"),
             (-4.25, -4.0, "-4.0% 구간 유지"),
-            (-4.25, -1.25, "-4.0% 구간에서 반등"),
-            (-4.25, 1.25, "양전 · -4.0% 구간에서 반등"),
-            (4.25, -1.25, "음전 · +4.0% 구간 아래로 되돌림"),
+            (-4.25, -1.25, "$98.75 (-1.25%) · -4.0% 구간에서 반등"),
+            (-4.25, 1.25, "$101.25 (+1.25%) · -4.0% 구간에서 반등"),
+            (4.25, -1.25, "$98.75 (-1.25%) · +4.0% 구간 아래로 되돌림"),
         ):
             with self.subTest(event=event, latest=latest), tempfile.TemporaryDirectory() as directory:
                 service = MarketCycleService(SQLiteMonitorRepository(Path(directory) / "test.db"))
@@ -124,8 +127,10 @@ class AlertTimingTest(unittest.TestCase):
         payload = self.service.process(cycle(
             frame(EVENT_AT, 4.25), frame(EVENT_AT + timedelta(minutes=5), 1.25),
         ), detected_at=DETECTED_AT).messages[0]
-        self.assertIn("마지막 자료도 봇 확인보다 2시간 22분 이전", rendered(payload))
-        self.assertIn("이후 상태는 확인되지 않음", rendered(payload))
+        # The stale frame is labeled as the last observation, never as "now".
+        self.assertIn("마지막 관측 $101.25 (+1.25%)", rendered(payload))
+        self.assertIn("마지막 관측 09/17 21:35 KST: +4.0% 구간 아래로 되돌림", payload["text"])
+        self.assertIn("(지연 2시간 27분)", rendered(payload))
         self.assertNotIn("현재", rendered(payload))
 
     def test_late_volume_uses_regular_data_time_not_postmarket_time(self):
@@ -138,7 +143,8 @@ class AlertTimingTest(unittest.TestCase):
         payload = report.messages[0]
         self.assertIn("자료 09/18 04:55 KST", payload["text"])
         self.assertIn("확인 09/18 07:01 KST", payload["text"])
-        self.assertIn("시장 관측 · 애프터마켓 09/18 07:00 KST", rendered(payload))
+        self.assertIn("거래량 기준 · 09/18 04:55 KST", rendered(payload))
+        self.assertNotIn("09/18 07:00 KST", rendered(payload))
         self.assertEqual(report.max_detection_delay_seconds, 126 * 60)
         self.assertTrue(audit_message("volume_spike", payload).passed)
 
@@ -155,11 +161,10 @@ class AlertTimingTest(unittest.TestCase):
             "VRT", DAY, trading_open_at=EVENT_AT, created_at=post_at + timedelta(minutes=1),
         )
         text = rendered(report.payload)
-        self.assertIn("미국 거래일 09/17 · 정규장", text)
-        self.assertIn("시장 자료 09/18 04:55 KST", text)
-        self.assertIn("브리프 작성 09/18 07:01 KST", text)
-        self.assertIn("정규장 누적 · 09/18 04:55 KST 봉까지", text)
+        self.assertIn("미국 거래일 09/17 · 자료 09/18 04:55 KST · 작성 09/18 07:01 KST", text)
+        self.assertIn("당일 2,000주", text)
         self.assertNotIn("애프터마켓", text)
+        self.assertNotIn("봉까지", text)
         self.assertTrue(audit_message("daily_close", report.payload).passed)
 
     def test_timezone_aware_volume_required_and_dst_conversion(self):

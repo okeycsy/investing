@@ -119,7 +119,8 @@ class RelativeStrengthPolicyTest(unittest.TestCase):
         self.assertEqual(situation.verdict, SituationVerdict.BROADLY_EXPLAINED)
         payload = build_close_message(snapshot, relative, None, assess_intraday_volume(None), (), situation)
         text = json.dumps(payload, ensure_ascii=False)
-        self.assertIn("상당한 아웃퍼폼", text)
+        # The message renders the actual return gap, not the beta-model verdict.
+        self.assertIn("vs SOXX +3.00% (1.4%p 더 강함)", text)
         # The close brief now carries a factual day summary instead of the
         # sensitivity verdict, so the model grade stays out of the message.
         self.assertNotIn("민감도 참고", text)
@@ -130,15 +131,18 @@ class RelativeMessageTest(unittest.TestCase):
     def test_every_market_message_renders_identical_symmetric_grades(self):
         volume = VolumeSnapshot(200, 100, baseline_sessions=20)
         volume_assessment = assess_intraday_volume(volume)
-        cases = ((0.3, "비슷한 흐름"), (0.8, "약간"), (2.0, "상당한"), (2.01, "강한"))
+        cases = ((0.3, None), (0.8, "0.8%p"), (2.0, "2.0%p"), (2.01, "2.0%p"))
         for sign in (-1, 1):
-            for gap, label in cases:
+            for gap, magnitude in cases:
                 with self.subTest(sign=sign, gap=gap):
                     snapshot = market(sign * 4.73, sign * (4.73 - gap))
                     relative = assess_relative_performance(snapshot)
                     signal, _ = PriceBandPolicy().evaluate(snapshot, None)
                     payloads = {
-                        "price_band": build_price_band_message(signal, relative, volume, volume_assessment, ()),
+                        "price_band": build_price_band_message(
+                            signal, relative, volume, volume_assessment, (),
+                            event_snapshot=snapshot,
+                        ),
                         "volume_spike": build_volume_message(
                             VolumeSignal("volume", "VRT", DAY, AT), snapshot, relative, volume, volume_assessment,
                         ),
@@ -148,24 +152,36 @@ class RelativeMessageTest(unittest.TestCase):
                             period_start=date(2026, 9, 14), period_end=date(2026, 9, 18), session_count=5,
                         ),
                     }
-                    outcome_label = (
-                        label if gap == 0.3
-                        else f"{label} {'아웃퍼폼' if sign > 0 else '언더퍼폼'}"
+                    # The compact line must grade +gap and -gap symmetrically:
+                    # the same %p magnitude, only the direction word flipping,
+                    # and "동행" inside the 0.3%p corridor.
+                    gap_tag = (
+                        "(동행)" if magnitude is None
+                        else f"({magnitude} 더 {'강함' if sign > 0 else '약함'})"
                     )
                     for kind, payload in payloads.items():
                         text = json.dumps(payload, ensure_ascii=False)
-                        self.assertIn(f"반도체 지수(SOXX) 대비 {outcome_label}", text)
-                        self.assertIn(f"대비 {outcome_label}", text)
-                        self.assertEqual(text.count(outcome_label), 2)
-                        if kind != "price_band":
+                        self.assertIn("vs SOXX ", text)
+                        self.assertIn(f"피어 ", text)
+                        # Benchmark and peer average share the same gap here, so
+                        # the identical verdict tag renders exactly twice.
+                        self.assertEqual(text.count(gap_tag), 2)
+                        opposite = "더 약함" if sign > 0 else "더 강함"
+                        self.assertNotIn(opposite, text)
+                        self.assertNotIn("아웃퍼폼", text)
+                        self.assertNotIn("언더퍼폼", text)
+                        if kind == "weekly_review":
                             self.assertIn("4.73%", text)
-                        self.assertNotIn("%p", text)
                         self.assertTrue(audit_message(kind, payload).passed)
 
     def test_degree_changes_survive_restart_and_do_not_add_alert_triggers(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "monitor.db"
-            for index, change in enumerate((4.4, 5.2, 6.2)):
+            # 6.x normalizes back to the 5 band on the widened ladder, so 7.2
+            # is the next change that still yields three escalating alerts.
+            for index, (change, strength) in enumerate(
+                ((4.4, "slight"), (5.2, "significant"), (7.2, "strong"))
+            ):
                 repository = SQLiteMonitorRepository(path)
                 snapshot = market(change, 4.0, observed_at=AT + timedelta(minutes=5 * index))
                 cycle = MarketCycle(
@@ -175,16 +191,14 @@ class RelativeMessageTest(unittest.TestCase):
                 )
                 report = MarketCycleService(repository, enqueue_alerts=False).process(cycle)
                 self.assertEqual(len(report.inserted_event_keys), 1)
-                if index:
-                    text = json.dumps(report.messages[0], ensure_ascii=False)
-                    transition = (
-                        "약간 아웃퍼폼 → 상당한 아웃퍼폼" if index == 1
-                        else "상당한 아웃퍼폼 → 강한 아웃퍼폼"
-                    )
-                    self.assertIn(transition, text)
+                text = json.dumps(report.messages[0], ensure_ascii=False)
+                gap_line = f"vs SOXX +4.00% ({change - 4.0:.1f}%p 더 강함)"
+                self.assertIn(gap_line, text)
+                self.assertNotIn("직전 가격 알림 이후", text)
                 latest = repository.latest_price_alert_context("VRT", DAY, "up")
                 self.assertEqual(latest.context["version"], 2)
                 self.assertEqual(latest.context["relative_basis"], "raw_return_gap_v1")
+                self.assertEqual(latest.context["benchmark_strength"], strength)
             self.assertEqual(latest.context["benchmark_strength"], "strong")
             duplicate = MarketCycleService(repository, enqueue_alerts=False).process(cycle)
             self.assertEqual(duplicate.inserted_event_keys, ())

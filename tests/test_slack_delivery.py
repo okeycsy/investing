@@ -47,7 +47,7 @@ def valid_close_payload() -> dict:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "↗️ *반도체 지수(SOXX) 대비 아웃퍼폼*",
+                    "text": "vs SOXX +1.00% (1.5%p 더 강함) · 피어 +1.27% (1.2%p 더 강함)",
                 },
             },
         ],
