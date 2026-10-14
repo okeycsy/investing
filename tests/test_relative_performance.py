@@ -120,7 +120,7 @@ class RelativeStrengthPolicyTest(unittest.TestCase):
         payload = build_close_message(snapshot, relative, None, assess_intraday_volume(None), (), situation)
         text = json.dumps(payload, ensure_ascii=False)
         # The message renders the actual return gap, not the beta-model verdict.
-        self.assertIn("vs SOXX +3.00% (1.4%p 더 강함)", text)
+        self.assertIn("SOXX +3.00%  →  *1.4%p 더 강함*", text)
         # The close brief now carries a factual day summary instead of the
         # sensitivity verdict, so the model grade stays out of the message.
         self.assertNotIn("민감도 참고", text)
@@ -156,12 +156,12 @@ class RelativeMessageTest(unittest.TestCase):
                     # the same %p magnitude, only the direction word flipping,
                     # and "동행" inside the 0.3%p corridor.
                     gap_tag = (
-                        "(동행)" if magnitude is None
-                        else f"({magnitude} 더 {'강함' if sign > 0 else '약함'})"
+                        "→  동행" if magnitude is None
+                        else f"→  *{magnitude} 더 {'강함' if sign > 0 else '약함'}*"
                     )
                     for kind, payload in payloads.items():
                         text = json.dumps(payload, ensure_ascii=False)
-                        self.assertIn("vs SOXX ", text)
+                        self.assertIn("상대 흐름", text)
                         self.assertIn(f"피어 ", text)
                         # Benchmark and peer average share the same gap here, so
                         # the identical verdict tag renders exactly twice.
@@ -192,7 +192,7 @@ class RelativeMessageTest(unittest.TestCase):
                 report = MarketCycleService(repository, enqueue_alerts=False).process(cycle)
                 self.assertEqual(len(report.inserted_event_keys), 1)
                 text = json.dumps(report.messages[0], ensure_ascii=False)
-                gap_line = f"vs SOXX +4.00% ({change - 4.0:.1f}%p 더 강함)"
+                gap_line = f"SOXX +4.00%  →  *{change - 4.0:.1f}%p 더 강함*"
                 self.assertIn(gap_line, text)
                 self.assertNotIn("직전 가격 알림 이후", text)
                 latest = repository.latest_price_alert_context("VRT", DAY, "up")

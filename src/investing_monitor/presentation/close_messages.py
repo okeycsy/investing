@@ -24,8 +24,10 @@ from investing_monitor.presentation.levels import (
 )
 from investing_monitor.presentation.market_context import (
     pct_label,
+    price_banner,
     price_label,
-    relative_compact_line,
+    relative_block,
+    shares_label,
 )
 from investing_monitor.presentation.timing import timestamp
 
@@ -90,8 +92,9 @@ def day_shape_text(
             phrases.append(f"{low_zone}까지 저점을 낮추며 약세 마감")
         else:
             phrases.append("뚜렷한 방향 없이 당일 범위 안에서 횡보")
-    phrases.append(f"종가는 당일 범위 하단에서 {close_position * 100:.0f}% 지점")
-    first_line = " → ".join(phrases[:2]) + " · " + phrases[-1]
+    position_phrase = f"종가는 당일 범위 하단에서 {close_position * 100:.0f}% 지점"
+    first_line = " → ".join(phrases)
+    first_line = f"{first_line} · {position_phrase}" if first_line else position_phrase
 
     verdict = _day_verdict(close_position, volume_ratio)
     volume_phrase = ""
@@ -172,9 +175,7 @@ def build_close_message(
         ),
     ]
     if close_price is not None:
-        price_text = f"💵 *종가 {price_label(close_price)}*"
-        if reference_close is not None:
-            price_text += f" · 전일 {price_label(reference_close)}"
+        price_text = price_banner(close_price, snapshot.change_pct, reference_close)
         if day_low is not None and day_high is not None:
             price_text += f"\n당일 범위 {price_label(day_low)} ~ {price_label(day_high)}"
         blocks.append(_section(price_text))
@@ -190,16 +191,16 @@ def build_close_message(
     if shape:
         blocks.append(_section(shape))
 
-    blocks.append(_section(relative_compact_line(snapshot, relative)))
+    blocks.append(_section(relative_block(snapshot, relative)))
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0
         blocks.append(
             _section(
                 f"*{volume_mood(volume_assessment.ratio)}*\n"
-                f"당일 {volume.observed_volume:,}주 · "
-                f"최근 {volume.baseline_sessions}거래일 평균 "
-                f"{volume.expected_volume:,}주 · {ratio:.1f}배"
+                f"당일 {shares_label(volume.observed_volume)} 주  ·  "
+                f"{volume.baseline_sessions}거래일 평균 "
+                f"{shares_label(volume.expected_volume)} 주  ·  *{ratio:.1f}배*"
             )
         )
 

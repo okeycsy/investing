@@ -72,16 +72,16 @@ def nearest_levels_line(levels: PriceLevels, price: float | None) -> str:
         candidates.append((f"52주 고점 {price_label(levels.high_52w)}", levels.high_52w))
     below = [item for item in candidates if item[1] < reference]
     above = [item for item in candidates if item[1] > reference]
-    parts = []
+    lines = ["🧱 *레벨*"]
     if below:
         name, value = max(below, key=lambda item: item[1])
-        parts.append(f"아래 {name} ({pct_label((value / reference - 1) * 100)})")
+        lines.append(f"▼ {name} ({pct_label((value / reference - 1) * 100)})")
     else:
-        parts.append("아래 추적 레벨 없음")
+        lines.append("▼ 아래 추적 레벨 없음")
     if above:
         name, value = min(above, key=lambda item: item[1])
-        parts.append(f"위 {name} ({pct_label((value / reference - 1) * 100)})")
-    return "🧱 " + " · ".join(parts)
+        lines.append(f"▲ {name} ({pct_label((value / reference - 1) * 100)})")
+    return "\n".join(lines)
 
 
 def day_level_review(

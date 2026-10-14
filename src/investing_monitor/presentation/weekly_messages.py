@@ -14,7 +14,7 @@ from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessme
 from investing_monitor.presentation.market_context import (
     pct_label,
     price_label,
-    relative_compact_line,
+    relative_block,
 )
 
 
@@ -64,7 +64,7 @@ def build_weekly_message(
                 " (5분봉 종가 기준)"
             )
         blocks.append(_section(price_text))
-    blocks.append(_section(relative_compact_line(snapshot, relative)))
+    blocks.append(_section(relative_block(snapshot, relative)))
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0

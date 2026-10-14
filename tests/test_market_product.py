@@ -596,7 +596,7 @@ class MarketCycleServiceTest(unittest.TestCase):
             )
             self.assertEqual(len(pending), 1)
             self.assertIn(
-                "🔥 거래량 동시간대 평시 1.5배",
+                "🔥 *거래량*  동시간대 평시 *1.5배*",
                 json.dumps(pending[0].payload, ensure_ascii=False),
             )
             self.assertTrue(repository.load_price_band_state("VRT").volume_alerted)
@@ -618,10 +618,10 @@ class MarketCycleServiceTest(unittest.TestCase):
             # The second alert reflects the context that changed since the
             # first one: the band escalated to 5 and volume turned exploded.
             self.assertIn("+4.0% 상승 구간 진입", first_text)
-            self.assertIn("거래량 동시간대 평시 0.5배", first_text)
+            self.assertIn("동시간대 평시 *0.5배*", first_text)
             self.assertNotIn("🔥", first_text)
             self.assertIn("+5.0% 상승 구간 진입", second_text)
-            self.assertIn("🔥 거래량 동시간대 평시 2.0배", second_text)
+            self.assertIn("🔥 *거래량*  동시간대 평시 *2.0배*", second_text)
             # The old delta/situation prose is gone from the compact format.
             self.assertNotIn("직전 가격 알림 이후", second_text)
             self.assertNotIn("민감도 참고", second_text)

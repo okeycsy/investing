@@ -26,12 +26,12 @@ FORBIDDEN_TEXT = (
 )
 
 REQUIRED_TEXT = {
-    "price_band": ("vs ",),
-    "volume_spike": ("거래량", "vs "),
+    "price_band": ("상대 흐름",),
+    "volume_spike": ("거래량", "상대 흐름"),
     "rapid_move": ("15분", "거래량", "자동 감지"),
     "level_event": ("기준 레벨", "5분봉 종가 기준"),
     "green_cross": ("양전", "5분봉 종가 기준"),
-    "daily_close": ("장 마감", "종목 방향", "vs "),
+    "daily_close": ("장 마감", "종목 방향", "상대 흐름"),
     "weekly_review": ("주간 논지 리뷰", "주간 방향"),
     "catalyst": ("확인된 사실",),
     "filing": ("확인된 사실",),

@@ -119,6 +119,65 @@ def pct_label(value: float) -> str:
     return f"{value:+.2f}%"
 
 
+def shares_label(count: int) -> str:
+    """Korean-friendly share counts: 2,178,782 -> '217.9만'."""
+    if count >= 100_000_000:
+        return f"{count / 100_000_000:.1f}억"
+    if count >= 10_000:
+        return f"{count / 10_000:.1f}만"
+    return f"{count:,}"
+
+
+def price_banner(
+    price: float | None,
+    change_pct: float | None,
+    reference_close: float | None,
+) -> str:
+    """'💵 *$225.29* `-5.04%` · 전일 $237.26' — the number does the talking."""
+    if price is None:
+        return ""
+    line = f"💵 *{price_label(price)}*"
+    if change_pct is not None:
+        line += f"  `{pct_label(change_pct)}`"
+    if reference_close is not None:
+        line += f"  ·  전일 {price_label(reference_close)}"
+    return line
+
+
+def relative_block(snapshot, relative) -> str:
+    """Labeled two-line relative block.
+
+    📊 *상대 흐름*
+    SOXX -3.10%  →  *1.9%p 더 약함*
+    피어 -5.15%  →  동행
+    """
+    if snapshot is None:
+        return f"📊 *상대 흐름*\n{relative.benchmark_symbol} 비교 자료 없음"
+    own = snapshot.change_pct
+    lines = ["📊 *상대 흐름*"]
+    if snapshot.benchmark_change_pct is not None:
+        lines.append(
+            _relative_row(
+                relative.benchmark_symbol,
+                snapshot.benchmark_change_pct,
+                own - snapshot.benchmark_change_pct,
+            )
+        )
+    if relative.peer_average_change_pct is not None:
+        lines.append(
+            _relative_row("피어", relative.peer_average_change_pct, own - relative.peer_average_change_pct)
+        )
+    if len(lines) == 1:
+        lines.append("비교 자료 없음")
+    return "\n".join(lines)
+
+
+def _relative_row(label: str, value: float, gap: float) -> str:
+    tag = _gap_tag(gap)
+    rendered = tag if tag == "동행" else f"*{tag}*"
+    return f"{label} {pct_label(value)}  →  {rendered}"
+
+
 def relative_compact_line(snapshot, relative) -> str:
     """One decision-ready line: own return vs index and peers with a verdict.
 

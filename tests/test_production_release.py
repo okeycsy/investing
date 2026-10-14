@@ -42,7 +42,7 @@ def product_payload() -> dict:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "vs SOXX +1.00% (3.2%p 더 강함) · 피어 +1.10% (3.1%p 더 강함)",
+                    "text": "상대 흐름  SOXX +1.00% (3.2%p 더 강함) · 피어 +1.10% (3.1%p 더 강함)",
                 },
             },
         ],

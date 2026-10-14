@@ -241,7 +241,7 @@ class MessageContractTest(unittest.TestCase):
         rendered = json.dumps(payload, ensure_ascii=False)
 
         self.assertIn("+4.0% 상승 구간 진입", rendered)
-        self.assertIn("vs SOXX +1.20%", rendered)
+        self.assertIn("SOXX +1.20%", rendered)
         self.assertIn("피어 +1.03%", rendered)
         self.assertIn("1.7배", rendered)
         self.assertIn("https://investors.vertiv.com/example", rendered)

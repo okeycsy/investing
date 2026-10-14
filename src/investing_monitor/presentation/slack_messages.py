@@ -28,8 +28,10 @@ from investing_monitor.domain.policies import (
 from investing_monitor.domain.situation import MarketContextDelta
 from investing_monitor.presentation.market_context import (
     pct_label,
+    price_banner,
     price_label,
-    relative_compact_line,
+    relative_block,
+    shares_label,
 )
 from investing_monitor.presentation.timing import (
     DELAYED_DETECTION_SECONDS,
@@ -110,13 +112,13 @@ def build_price_band_message(
     latest_status = ""
     price_lines = []
     if event_price is not None:
-        line = f"💵 *{price_label(event_price)}"
-        if event_snapshot is not None:
-            line += f" ({pct_label(event_snapshot.change_pct)})"
-        line += "*"
-        if reference_close is not None:
-            line += f" · 전일 {price_label(reference_close)}"
-        price_lines.append(line)
+        price_lines.append(
+            price_banner(
+                event_price,
+                event_snapshot.change_pct if event_snapshot is not None else None,
+                reference_close,
+            )
+        )
     if historical and latest_snapshot is not None:
         latest_status = _band_status(signal, latest_snapshot)
         latest_line = f"마지막 관측 · {latest_status}"
@@ -135,15 +137,15 @@ def build_price_band_message(
     display_relative = (
         latest_relative if historical and latest_relative is not None else relative
     )
-    blocks.append(_section(_compact_relative(display_relative, display_snapshot)))
+    blocks.append(_section(relative_block(display_snapshot, display_relative)))
 
     if volume is not None and volume_assessment.is_ready:
         ratio = volume_assessment.ratio or 0.0
-        prefix = "🔥 " if volume_assessment.is_exploded else ""
+        prefix = "🔥" if volume_assessment.is_exploded else "🔊"
         blocks.append(
             _section(
-                f"{prefix}거래량 동시간대 평시 {ratio:.1f}배"
-                f" (누적 {volume.observed_volume:,}주)"
+                f"{prefix} *거래량*  동시간대 평시 *{ratio:.1f}배*"
+                f"  ·  누적 {shares_label(volume.observed_volume)} 주"
             )
         )
 
@@ -213,20 +215,18 @@ def build_volume_message(
             )
         ),
     ]
-    price_line = ""
     if price is not None:
-        price_line = f"💵 *{price_label(price)} ({pct_label(snapshot.change_pct)})*"
-        if reference_close is not None:
-            price_line += f" · 전일 {price_label(reference_close)}"
-        blocks.append(_section(price_line))
+        blocks.append(
+            _section(price_banner(price, snapshot.change_pct, reference_close))
+        )
     blocks.append(
         _section(
-            f"거래량 누적 {volume.observed_volume:,}주 · "
-            f"동시간대 {volume.baseline_sessions}거래일 평균 "
-            f"{volume.expected_volume:,}주 · *{ratio:.1f}배*"
+            f"🔥 *거래량*  동시간대 평시 *{ratio:.1f}배*\n"
+            f"누적 {shares_label(volume.observed_volume)} 주  ·  "
+            f"{volume.baseline_sessions}거래일 평균 {shares_label(volume.expected_volume)} 주"
         )
     )
-    blocks.append(_section(_compact_relative(relative, snapshot)))
+    blocks.append(_section(relative_block(snapshot, relative)))
     if levels is not None:
         nearest = nearest_levels_line(levels, price)
         if nearest:
@@ -255,11 +255,7 @@ def build_green_cross_message(
     detection_delay = (
         delay_seconds(snapshot.observed_at, detected_at) if detected_at else 0
     )
-    price_line = ""
-    if price is not None:
-        price_line = f"💵 *{price_label(price)} ({pct_label(snapshot.change_pct)})*"
-        if reference_close is not None:
-            price_line += f" · 전일 종가 {price_label(reference_close)}"
+    price_line = price_banner(price, snapshot.change_pct, reference_close)
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": f"💚 {title}"}},
         _context(
@@ -340,11 +336,7 @@ def build_level_event_message(
             )
         ),
         _section(
-            f"💵 *{price_label(signal.close_price)} ({pct_label(snapshot.change_pct)})*"
-            + (
-                f" · 전일 종가 {price_label(reference_close)}"
-                if reference_close is not None else ""
-            )
+            price_banner(signal.close_price, snapshot.change_pct, reference_close)
             + f"\n기준 레벨 {price_label(signal.level_price)}{touches}"
         ),
     ]
@@ -436,18 +428,14 @@ def build_rapid_move_message(
         ),
         _section(
             f"{direction_icon} *15분간 {pct_label(signal.change_15m_pct)}*"
-            + (
-                f" · 현재 {price_label(price)} ({pct_label(snapshot.change_pct)})"
-                if price is not None else ""
-            )
-            + (
-                f" · 전일 종가 {price_label(reference_close)}"
-                if reference_close is not None else ""
-            )
-            + f"\n같은 15분 거래량이 당일 평시 봉의 *{signal.volume_15m_ratio:.1f}배*"
+            f"  ·  같은 15분 거래량 평시 봉의 *{signal.volume_15m_ratio:.1f}배*"
         ),
-        _section(_compact_relative(relative, snapshot)),
+        _section(price_banner(price, snapshot.change_pct, reference_close))
+        if price is not None
+        else _section(relative_block(snapshot, relative)),
     ]
+    if price is not None:
+        blocks.append(_section(relative_block(snapshot, relative)))
     if levels is not None:
         nearest = nearest_levels_line(levels, price)
         if nearest:
@@ -482,40 +470,6 @@ def _compact_timing(
             f" · 확인 {timestamp(detected_at)}"
             f" (지연 {duration_label(detection_delay_seconds)})"
         )
-    return line
-
-
-def _compact_relative(
-    relative: RelativeAssessment,
-    snapshot: MarketSnapshot | None,
-) -> str:
-    if snapshot is None:
-        return f"vs {relative.benchmark_symbol} · 비교 자료 없음"
-    return relative_compact_line(snapshot, relative)
-
-
-def _price_line(
-    event_price: float | None,
-    event_change_pct: float | None,
-    reference_close: float | None,
-    *,
-    latest_price: float | None = None,
-    latest_change_pct: float | None = None,
-) -> str:
-    if event_price is None:
-        return ""
-    parts = [f"💵 *{price_label(event_price)}"]
-    if event_change_pct is not None:
-        parts[0] += f" ({pct_label(event_change_pct)})"
-    parts[0] += "*"
-    if reference_close is not None:
-        parts.append(f"전일 종가 {price_label(reference_close)}")
-    line = " · ".join(parts)
-    if latest_price is not None:
-        latest = f"마지막 관측 {price_label(latest_price)}"
-        if latest_change_pct is not None:
-            latest += f" ({pct_label(latest_change_pct)})"
-        line += f"\n{latest}"
     return line
 
 

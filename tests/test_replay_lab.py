@@ -95,7 +95,7 @@ class MarketReplayLabTest(unittest.TestCase):
             self.assertTrue(report.quality_passed)
             self.assertEqual(report.quality_violations, ())
             self.assertIn(
-                "거래량 동시간대 평시 1.0배",
+                "동시간대 평시 *1.0배*",
                 str(report.messages[0]),
             )
             self.assertEqual(len(provider.calls), 1)
