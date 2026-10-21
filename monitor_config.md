@@ -9,7 +9,6 @@ benchmark: $SOXX
 peer_tickers: $ETN, $NVT, $GEV
 app_store_id:
 state_dir: .
-market_scan_focus: $VRT
 sec_contact: maybe2213@naver.com
 
 # Investment thesis profile

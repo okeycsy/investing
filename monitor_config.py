@@ -19,7 +19,6 @@ class MonitorConfig:
     peer_tickers: tuple[str, ...] = ("ETN", "NVT", "GEV")
     app_store_id: str = ""
     state_dir: str = "."
-    market_scan_focus: str = ""
     sec_contact: str = "maybe2213@naver.com"
     company_aliases: tuple[str, ...] = ("Vertiv", "Vertiv Holdings")
     news_terms: tuple[str, ...] = (
@@ -60,10 +59,6 @@ class MonitorConfig:
     @property
     def display_ticker(self) -> str:
         return f"${self.ticker}"
-
-    @property
-    def effective_market_scan_focus(self) -> str:
-        return normalize_ticker(self.market_scan_focus or self.ticker)
 
     @property
     def issuer_keywords(self) -> tuple[str, ...]:
@@ -174,7 +169,6 @@ def load_monitor_config(path: str | Path | None = None) -> MonitorConfig:
         peer_tickers=_parse_list(peer_source),
         app_store_id=_env_or_default("MONITOR_APP_STORE_ID", raw.get("app_store_id", "")).strip(),
         state_dir=_env_or_default("MONITOR_STATE_DIR", raw.get("state_dir", ".")).strip() or ".",
-        market_scan_focus=normalize_ticker(_env_or_default("MARKET_SCAN_FOCUS_TICKER", raw.get("market_scan_focus", ""))),
         sec_contact=_env_or_default("SEC_CONTACT", raw.get("sec_contact", "maybe2213@naver.com")).strip(),
         company_aliases=text_list(
             "MONITOR_COMPANY_ALIASES", "company_aliases", "Vertiv, Vertiv Holdings"

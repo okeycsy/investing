@@ -6,7 +6,7 @@ This intentionally performs real external calls:
 - Yahoo Finance chart API
 - SEC data through the runtime's configured direct or Yahoo route
 - Anthropic news-analysis API
-- Slack Incoming Webhook, when SLACK_WEBHOOK_URL or MARKET_SCAN_WEBHOOK is set
+- Slack Incoming Webhook, when SLACK_WEBHOOK_URL is set
 """
 
 from __future__ import annotations
@@ -275,9 +275,9 @@ def _check_yahoo_insider_fallback(config, sec_detail: str) -> tuple[bool, str]:
 
 
 def check_slack(config, *, require: bool) -> tuple[bool, str]:
-    webhook = os.environ.get("SLACK_WEBHOOK_URL") or os.environ.get("MARKET_SCAN_WEBHOOK")
+    webhook = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook:
-        msg = "Slack webhook missing; set SLACK_WEBHOOK_URL or MARKET_SCAN_WEBHOOK"
+        msg = "Slack webhook missing; set SLACK_WEBHOOK_URL"
         return (False, msg) if require else (True, f"SKIP - {msg}")
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")

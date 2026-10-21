@@ -5,11 +5,9 @@ on:
     branches: ['main']
     paths:
       - '.github/workflows/live_smoke.yml'
-      - 'backtest.py'
       - 'hood_monitor.py'
       - 'HOOD_MONITOR_PRODUCT.md'
       - 'live_smoke.py'
-      - 'market_scan.py'
       - 'monitor_config.md'
       - 'monitor_config.py'
       - 'requirements.txt'
@@ -62,7 +60,6 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          MARKET_SCAN_WEBHOOK: ${{ secrets.MARKET_SCAN_WEBHOOK }}
           SEC_CONTACT: ${{ secrets.SEC_CONTACT }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           SEC_LEGACY_USER_AGENT: ${{ secrets.SEC_LEGACY_USER_AGENT }}
