@@ -144,6 +144,24 @@ class DayShapeVerdictTest(unittest.TestCase):
         self.assertIn("하락 마감이지만", text)
         self.assertNotIn("강세", text)
 
+    def test_gap_uses_official_open_and_extremes_carry_percent(self):
+        from datetime import timedelta
+        from investing_monitor.presentation.close_messages import day_shape_text
+
+        # Real case 2026-10-23: official open 191.60 (-2.04%), but the first
+        # 5-minute bar closed at 189.16 (-3.28%) and was shown as the gap.
+        start = datetime(2026, 10, 23, 13, 30, tzinfo=timezone.utc)
+        curve = [(start, 189.16), (start + timedelta(minutes=5), 187.46)] + [
+            (start + timedelta(minutes=5 * index), 192.0 + index * 0.05)
+            for index in range(2, 78)
+        ]
+
+        text = day_shape_text(194.32, 187.25, 196.73, 195.59, curve, 1.6, open_price=191.60)
+
+        self.assertIn("갭다운 출발(-2.04%)", text)
+        self.assertNotIn("-3.28%", text)
+        self.assertIn("저점 $187.25(-4.26%)", text)
+
     def test_up_day_closing_near_low_flags_giveback(self):
         from investing_monitor.presentation.close_messages import day_shape_text
 

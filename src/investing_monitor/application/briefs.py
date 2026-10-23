@@ -82,11 +82,13 @@ class CloseBriefService:
         close_price = context.close_price
         day_low = context.day_low
         day_high = context.day_high
+        open_price = None
         snapshot = context.snapshot
         if official is not None and official.trading_date == trading_date:
             close_price = official.close
             day_low = official.low if official.low is not None else day_low
             day_high = official.high if official.high is not None else day_high
+            open_price = official.open
             if context.reference_close:
                 snapshot = replace(
                     snapshot,
@@ -119,6 +121,7 @@ class CloseBriefService:
             levels=self.repository.load_price_levels(ticker, trading_date),
             position=self.position,
             price_curve=self.repository.day_price_curve(ticker, trading_date),
+            open_price=open_price,
         )
         event_key = f"{ticker.upper()}:{trading_date.isoformat()}:close"
         inserted = self.repository.record_alert(

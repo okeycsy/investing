@@ -64,6 +64,7 @@ class YahooBar:
     volume: int
     high: float | None = None
     low: float | None = None
+    open: float | None = None
 
 
 @dataclass(frozen=True)
@@ -337,6 +338,7 @@ class YahooMarketDataAdapter:
                         close=bar.close,
                         high=bar.high,
                         low=bar.low,
+                        open=bar.open,
                         volume=max(0, bar.volume),
                     )
                 )
@@ -362,6 +364,7 @@ class YahooMarketDataAdapter:
                     close=bar.close,
                     high=bar.high,
                     low=bar.low,
+                    open=bar.open,
                     volume=max(0, bar.volume),
                 )
         return None
@@ -859,6 +862,7 @@ def parse_chart_payload(payload: Mapping[str, Any], symbol: str, interval: str) 
     volumes = quotes.get("volume") or []
     highs = quotes.get("high") or []
     lows = quotes.get("low") or []
+    opens = quotes.get("open") or []
     bars: dict[datetime, YahooBar] = {}
     for index, raw_timestamp in enumerate(timestamps):
         close = closes[index] if index < len(closes) else None
@@ -868,12 +872,14 @@ def parse_chart_payload(payload: Mapping[str, Any], symbol: str, interval: str) 
         raw_volume = volumes[index] if index < len(volumes) else 0
         raw_high = highs[index] if index < len(highs) else None
         raw_low = lows[index] if index < len(lows) else None
+        raw_open = opens[index] if index < len(opens) else None
         bars[observed_at] = YahooBar(
             observed_at=observed_at,
             close=float(close),
             volume=max(0, int(raw_volume or 0)),
             high=float(raw_high) if raw_high is not None else None,
             low=float(raw_low) if raw_low is not None else None,
+            open=float(raw_open) if raw_open is not None else None,
         )
     if not bars:
         raise ValueError("chart contains no valid bars")

@@ -54,6 +54,7 @@ def day_shape_text(
     reference_close: float | None,
     price_curve: Sequence[tuple[datetime, float]],
     volume_ratio: float | None,
+    open_price: float | None = None,
 ) -> str:
     """One honest paragraph about how the session actually traded."""
     if close_price is None or day_low is None or day_high is None:
@@ -63,8 +64,18 @@ def day_shape_text(
         (close_price - day_low) / day_range if day_range > 0 else 0.5
     )
     phrases: list[str] = []
-    if reference_close is not None and price_curve:
-        open_gap = (price_curve[0][1] / reference_close - 1) * 100
+
+    def at(price: float) -> str:
+        if not reference_close:
+            return price_label(price)
+        return f"{price_label(price)}({pct_label((price / reference_close - 1) * 100)})"
+
+    # The gap is measured at the official open; the first 5-minute bar's
+    # close is already five minutes of trading (10/23: -3.28% shown, the
+    # real open gap was -2.04%).
+    first_print = open_price if open_price else (price_curve[0][1] if price_curve else None)
+    if reference_close is not None and first_print:
+        open_gap = (first_print / reference_close - 1) * 100
         if open_gap >= 0.5:
             phrases.append(f"갭업 출발({pct_label(open_gap)})")
         elif open_gap <= -0.5:
@@ -80,16 +91,16 @@ def day_shape_text(
         low_zone = _session_zone(low_index, len(closes))
         if high_zone in {"개장 초", "오전"} and close_position <= 0.35:
             phrases.append(
-                f"{high_zone} 고점 {price_label(day_high)} 이후 흘러내림"
+                f"{high_zone} 고점 {at(day_high)} 이후 흘러내림"
             )
         elif low_zone in {"개장 초", "오전"} and close_position >= 0.65:
             phrases.append(
-                f"{low_zone} 저점 {price_label(day_low)} 찍고 꾸준히 회복"
+                f"{low_zone} 저점 {at(day_low)} 찍고 꾸준히 회복"
             )
         elif close_position >= 0.65 and high_zone in {"오후", "마감 전"}:
-            phrases.append(f"{high_zone} 고점 {price_label(day_high)} · 강하게 마감")
+            phrases.append(f"{high_zone} 고점 {at(day_high)} · 강하게 마감")
         elif close_position <= 0.35 and low_zone in {"오후", "마감 전"}:
-            phrases.append(f"{low_zone}까지 저점을 낮추며 약세 마감")
+            phrases.append(f"{low_zone}까지 저점 {at(day_low)}로 낮추며 약세 마감")
         else:
             phrases.append("뚜렷한 방향 없이 당일 범위 안에서 횡보")
     position_phrase = f"종가는 당일 범위 하단에서 {close_position * 100:.0f}% 지점"
@@ -167,6 +178,7 @@ def build_close_message(
     levels: PriceLevels | None = None,
     position: Position | None = None,
     price_curve: Sequence[tuple[datetime, float]] = (),
+    open_price: float | None = None,
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "양전"),
@@ -194,7 +206,7 @@ def build_close_message(
     if close_price is not None:
         price_text = price_banner(close_price, snapshot.change_pct, reference_close)
         if day_low is not None and day_high is not None:
-            price_text += f"\n당일 범위 {price_label(day_low)} ~ {price_label(day_high)}"
+            price_text += f"\n당일 범위 {_range_end(day_low, reference_close)} ~ {_range_end(day_high, reference_close)}"
         blocks.append(_section(price_text))
 
     shape = day_shape_text(
@@ -204,6 +216,7 @@ def build_close_message(
         reference_close,
         price_curve,
         volume_assessment.ratio,
+        open_price=open_price,
     )
     if shape:
         blocks.append(_section(shape))
@@ -250,6 +263,12 @@ def build_close_message(
         ),
         "blocks": blocks,
     }
+
+
+def _range_end(price: float, reference_close: float | None) -> str:
+    if not reference_close:
+        return price_label(price)
+    return f"{price_label(price)} `{pct_label((price / reference_close - 1) * 100)}`"
 
 
 def _catalyst_text(catalyst: Catalyst) -> str:
