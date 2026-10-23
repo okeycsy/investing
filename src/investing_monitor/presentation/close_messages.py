@@ -96,7 +96,10 @@ def day_shape_text(
     first_line = " → ".join(phrases)
     first_line = f"{first_line} · {position_phrase}" if first_line else position_phrase
 
-    verdict = _day_verdict(close_position, volume_ratio)
+    day_change = (
+        (close_price / reference_close - 1) * 100 if reference_close else None
+    )
+    verdict = _day_verdict(close_position, volume_ratio, day_change)
     volume_phrase = ""
     if volume_ratio is not None:
         volume_phrase = f"거래량 평시 {volume_ratio:.1f}배 — "
@@ -114,9 +117,23 @@ def _session_zone(index: int, total: int) -> str:
     return "마감 전"
 
 
-def _day_verdict(close_position: float, volume_ratio: float | None) -> str:
+def _day_verdict(
+    close_position: float,
+    volume_ratio: float | None,
+    day_change: float | None = None,
+) -> str:
     quiet = volume_ratio is not None and volume_ratio < 0.85
     busy = volume_ratio is not None and volume_ratio >= 1.5
+    # Where the close sits in the day's range says nothing about the day's
+    # direction: 10/15 closed -3.6% near its high and was called "강세".
+    if day_change is not None and day_change < -0.3 and close_position >= 0.65:
+        if busy:
+            return "하락 마감이지만 저점에서 거래량 실린 반등 — 매수 유입 확인 필요"
+        return "하락 마감이지만 장중 저점에서 상당 부분 회복"
+    if day_change is not None and day_change > 0.3 and close_position <= 0.35:
+        if busy:
+            return "상승 마감이지만 장중 상승분 대부분 반납 — 매도 압력 확인 필요"
+        return "상승 마감이지만 장중 상승분 대부분 반납"
     if close_position <= 0.35:
         if quiet:
             return "매수세가 붙지 않은 무기력한 하루"

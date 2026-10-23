@@ -195,6 +195,31 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
         self.assertAlmostEqual(regular.snapshot.change_pct, 4.0)
         self.assertAlmostEqual(post.snapshot.change_pct, 5.0)
 
+    def test_official_previous_close_overrides_last_five_minute_bar(self):
+        charts = {
+            "VRT": make_chart(
+                "VRT",
+                history_bars(self.calendar) + [bar(TRADING_DATE, 10, 0, 104.0, 100)],
+            )
+        }
+        adapter = YahooMarketDataAdapter(FakeChartClient(charts), self.calendar, PROFILE)
+
+        official = adapter.fetch_cycle(
+            et(TRADING_DATE, 10, 1),
+            last_observed_at=None,
+            official_reference_close=100.5,
+        ).frames[-1]
+        implausible = adapter.fetch_cycle(
+            et(TRADING_DATE, 10, 1),
+            last_observed_at=None,
+            official_reference_close=150.0,
+        ).frames[-1]
+
+        self.assertEqual(official.reference_close, 100.5)
+        self.assertAlmostEqual(official.snapshot.change_pct, (104.0 / 100.5 - 1) * 100)
+        # A daily bar wildly off the intraday reference is ignored, not trusted.
+        self.assertEqual(implausible.reference_close, 100.0)
+
     def test_regular_quote_older_than_completed_bar_budget_is_rejected(self):
         charts = {
             "VRT": make_chart(

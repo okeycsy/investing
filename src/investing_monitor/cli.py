@@ -360,10 +360,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         def handle_market(_task):
             nonlocal sensitivity
             provider_started = monotonic()
+            market_date = now.astimezone(NEW_YORK).date()
+            levels = repository.load_price_levels(profile.ticker, market_date)
+            levels_status = "cached" if levels is not None else "unavailable"
+            levels_error = ""
+            if levels is None:
+                try:
+                    levels = adapter.fetch_price_levels(now)
+                except Exception as exc:
+                    levels_error = str(exc)
+                else:
+                    repository.save_price_levels(levels)
+                    levels_status = "refreshed"
             try:
                 cycle = adapter.fetch_cycle(
                     now,
                     last_observed_at=repository.latest_market_observation_at(profile.ticker),
+                    official_reference_close=(
+                        levels.last_close
+                        if levels is not None and levels.trading_date == market_date
+                        else None
+                    ),
                 )
             except Exception as exc:
                 raise TaskExecutionError(
@@ -403,17 +420,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     repository.save_market_sensitivity(refreshed)
                     sensitivity = refreshed
                     sensitivity_status = "refreshed"
-            levels = repository.load_price_levels(profile.ticker, cycle.trading_date)
-            levels_status = "cached" if levels is not None else "unavailable"
-            levels_error = ""
-            if levels is None:
-                try:
-                    levels = adapter.fetch_price_levels(now)
-                except Exception as exc:
-                    levels_error = str(exc)
-                else:
-                    repository.save_price_levels(levels)
-                    levels_status = "refreshed"
             report = service.process(
                 cycle,
                 repository.recent_catalysts(
@@ -602,12 +608,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     NEW_YORK,
                 ).astimezone(timezone.utc)
                 try:
+                    official_bars = adapter.fetch_daily_bars(
+                        period_start - timedelta(days=7),
+                        period_end,
+                    )
+                except Exception:
+                    official_bars = []
+                try:
                     report = weekly_service.process(
                         profile.ticker,
                         period_start,
                         period_end,
                         evidence_since=evidence_since,
                         created_at=now,
+                        official_bars=official_bars,
                     )
                 except WeeklyBriefUnavailable as exc:
                     weekly_result.update(

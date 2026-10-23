@@ -134,6 +134,24 @@ class CloseBriefServiceTest(unittest.TestCase):
                 )
 
 
+class DayShapeVerdictTest(unittest.TestCase):
+    def test_down_day_closing_near_high_is_not_called_strength(self):
+        from investing_monitor.presentation.close_messages import day_shape_text
+
+        # Real case 2026-10-15: -3.62% day, close in the top 6% of the range.
+        text = day_shape_text(214.75, 204.38, 215.36, 222.82, (), 3.2)
+
+        self.assertIn("하락 마감이지만", text)
+        self.assertNotIn("강세", text)
+
+    def test_up_day_closing_near_low_flags_giveback(self):
+        from investing_monitor.presentation.close_messages import day_shape_text
+
+        text = day_shape_text(212.15, 210.94, 220.00, 203.56, (), 1.3)
+
+        self.assertIn("상승 마감이지만 장중 상승분 대부분 반납", text)
+
+
 class CloseMessageTest(unittest.TestCase):
     def test_thesis_label_requires_high_confidence(self):
         cycle = market_cycle()

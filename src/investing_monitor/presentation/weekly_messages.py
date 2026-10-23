@@ -33,6 +33,7 @@ def build_weekly_message(
     last_close_price: float | None = None,
     week_low: float | None = None,
     week_high: float | None = None,
+    official_range: bool = False,
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "상승"),
@@ -60,8 +61,8 @@ def build_weekly_message(
         price_text = f"💵 *주간 마지막 종가 {price_label(last_close_price)}*"
         if week_low is not None and week_high is not None:
             price_text += (
-                f" · 주간 범위 {price_label(week_low)} ~ {price_label(week_high)}"
-                " (5분봉 종가 기준)"
+                f"\n주간 범위 {price_label(week_low)} ~ {price_label(week_high)}"
+                + ("" if official_range else " (5분봉 종가 기준)")
             )
         blocks.append(_section(price_text))
     blocks.append(_section(relative_block(snapshot, relative)))

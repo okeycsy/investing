@@ -319,6 +319,29 @@ class YahooMarketDataAdapter:
             )
         return levels
 
+    def fetch_daily_bars(self, start: date, end: date) -> list[DailyBar]:
+        """Official regular-session daily bars between start and end inclusive."""
+        chart = self.client.fetch(
+            self.profile.ticker,
+            interval="1d",
+            range_="1mo",
+            include_prepost=False,
+        )
+        bars = []
+        for bar in chart.bars:
+            bar_date = bar.observed_at.astimezone(NEW_YORK).date()
+            if start <= bar_date <= end:
+                bars.append(
+                    DailyBar(
+                        trading_date=bar_date,
+                        close=bar.close,
+                        high=bar.high,
+                        low=bar.low,
+                        volume=max(0, bar.volume),
+                    )
+                )
+        return bars
+
     def fetch_daily_summary(self, trading_date: date) -> DailyBar | None:
         """Official daily OHLC for one session, for the settled close brief.
 
@@ -380,6 +403,7 @@ class YahooMarketDataAdapter:
         now: datetime,
         *,
         last_observed_at: datetime | None,
+        official_reference_close: float | None = None,
     ) -> MarketCycle:
         now = _utc(now)
         trading_date = now.astimezone(NEW_YORK).date()
@@ -421,6 +445,15 @@ class YahooMarketDataAdapter:
         latest = current_bars[-1]
         source_age = self._validate_freshness(latest, now)
         reference_close = self._reference_close(primary, trading_date)
+        # The last 5-minute bar misses the closing auction print (10/21 read
+        # 212.22 vs the official 212.15), so prefer the official daily close
+        # when supplied and sane.
+        if (
+            official_reference_close is not None
+            and official_reference_close > 0
+            and abs(official_reference_close / reference_close - 1) <= 0.02
+        ):
+            reference_close = official_reference_close
         self._validate_large_move(latest, reference_close, comparison_quotes)
         comparison_references = {
             symbol: self._optional_reference_close(chart, trading_date)

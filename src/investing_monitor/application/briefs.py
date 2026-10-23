@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from math import prod
@@ -188,6 +189,7 @@ class WeeklyBriefService:
         *,
         evidence_since: datetime,
         created_at: datetime,
+        official_bars: Sequence[DailyBar] = (),
     ) -> WeeklyBriefReport:
         contexts = self.repository.load_close_market_contexts(
             ticker,
@@ -229,6 +231,32 @@ class WeeklyBriefService:
         week_highs = tuple(
             context.day_high for context in contexts if context.day_high is not None
         )
+        last_close = contexts[-1].close_price
+        official_range = False
+        # Official daily bars carry the real session extremes and the closing
+        # auction print; frame-based values understated the W42 range
+        # (205.10-242.03 vs the official 204.38-242.82) and used a live quote
+        # four minutes before the close as the week's last close.
+        week_bars = sorted(
+            (bar for bar in official_bars if period_start <= bar.trading_date <= period_end),
+            key=lambda bar: bar.trading_date,
+        )
+        prior_bars = sorted(
+            (bar for bar in official_bars if bar.trading_date < period_start),
+            key=lambda bar: bar.trading_date,
+        )
+        if week_bars:
+            lows = tuple(bar.low for bar in week_bars if bar.low is not None)
+            highs = tuple(bar.high for bar in week_bars if bar.high is not None)
+            if lows and highs:
+                week_lows, week_highs = lows, highs
+                official_range = True
+            last_close = week_bars[-1].close
+            if prior_bars and prior_bars[-1].close > 0:
+                snapshot = replace(
+                    snapshot,
+                    change_pct=(last_close / prior_bars[-1].close - 1) * 100,
+                )
         payload = build_weekly_message(
             snapshot,
             assess_relative_performance(snapshot),
@@ -240,9 +268,10 @@ class WeeklyBriefService:
             period_start=period_start,
             period_end=period_end,
             session_count=len(contexts),
-            last_close_price=contexts[-1].close_price,
+            last_close_price=last_close,
             week_low=min(week_lows) if week_lows else None,
             week_high=max(week_highs) if week_highs else None,
+            official_range=official_range,
         )
         iso_year, iso_week, _ = period_end.isocalendar()
         event_key = f"{ticker.upper()}:{iso_year}-W{iso_week:02d}:weekly"

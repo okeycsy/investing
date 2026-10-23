@@ -114,6 +114,38 @@ class WeeklyBriefIntegrationTest(unittest.TestCase):
             self.assertEqual(first.event_key, "VRT:2026-W36:weekly")
             self.assertEqual(repository.pending_deliveries(CREATED_AT), [])
 
+    def test_weekly_prefers_official_daily_bars_for_range_close_and_return(self):
+        from investing_monitor.domain.levels import DailyBar
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            market = MarketCycleService(repository, enqueue_alerts=False)
+            days = [date(2026, 8, 31)] + [date(2026, 9, day) for day in range(1, 5)]
+            for value in days:
+                market.process(cycle_for(value))
+            # Official regular-session bars: wider than 5-minute closes, and a
+            # closing print that differs from the last intraday frame.
+            official = [DailyBar(date(2026, 8, 28), close=100.0, high=101.0, low=99.0)]
+            official += [
+                DailyBar(value, close=100.0 + index, high=104.5 + index, low=98.2 + index)
+                for index, value in enumerate(days)
+            ]
+
+            report = WeeklyBriefService(repository, enqueue_alerts=False).process(
+                "VRT",
+                PERIOD_START,
+                PERIOD_END,
+                evidence_since=EVIDENCE_SINCE,
+                created_at=CREATED_AT,
+                official_bars=official,
+            )
+
+            rendered = json.dumps(report.payload, ensure_ascii=False)
+            self.assertIn("주간 마지막 종가 $104.00", rendered)
+            self.assertIn("주간 범위 $98.20 ~ $108.50", rendered)
+            self.assertNotIn("5분봉 종가 기준", rendered)
+            self.assertIn("주간 방향 · 상승 (+4.00%)", rendered)
+
     def test_weekly_refuses_incomplete_market_history(self):
         class SparseRepository:
             def load_close_market_contexts(self, *_args):
