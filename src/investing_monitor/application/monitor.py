@@ -11,6 +11,7 @@ from investing_monitor.domain.models import (
     MarketCycle,
     MarketFrame,
     MarketSensitivity,
+    MarketSession,
     MarketSnapshot,
     Position,
     PriceBandSignal,
@@ -338,21 +339,27 @@ class MarketCycleService:
         # fresh data: stale replays of a long scheduler gap are already
         # covered by band alerts and the close brief.
         if detected_at is not None:
+            session_low = self.repository.lowest_regular_change(
+                cycle.ticker,
+                cycle.trading_date,
+            )
+            green_key = (
+                f"{cycle.ticker.upper()}:{cycle.trading_date.isoformat()}:green-cross"
+            )
             for frame in cycle.frames:
-                if detected_at - frame.snapshot.observed_at > timedelta(minutes=15):
-                    continue
-                if not is_green_cross(frame):
-                    continue
-                green_key = (
-                    f"{cycle.ticker.upper()}:{cycle.trading_date.isoformat()}:green-cross"
-                )
-                if green_key in payloads:
+                fresh = detected_at - frame.snapshot.observed_at <= timedelta(minutes=15)
+                fired = fresh and is_green_cross(frame, session_low)
+                if frame.snapshot.session is MarketSession.REGULAR:
+                    change = frame.snapshot.change_pct
+                    session_low = change if session_low is None else min(session_low, change)
+                if not fired or green_key in payloads:
                     continue
                 payload = build_green_cross_message(
                     frame.snapshot,
                     price=frame.close_price,
                     reference_close=frame.reference_close,
                     detected_at=detected_at,
+                    session_low_change=session_low,
                 )
                 alerts.append(
                     AlertRecord(

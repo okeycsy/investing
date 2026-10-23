@@ -487,6 +487,15 @@ class SQLiteMonitorRepository:
             ).fetchone()
         return _parse_datetime(row["observed_at"]) if row else None
 
+    def lowest_regular_change(self, ticker: str, trading_date: date) -> float | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                "SELECT MIN(change_pct) AS low FROM market_observations "
+                "WHERE ticker = ? AND trading_date = ? AND session = 'regular'",
+                (ticker.upper(), trading_date.isoformat()),
+            ).fetchone()
+        return row["low"] if row is not None else None
+
     def save_price_levels(self, levels: PriceLevels) -> None:
         with closing(self._connect()) as connection, connection:
             connection.execute(

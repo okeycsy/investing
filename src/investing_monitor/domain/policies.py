@@ -53,14 +53,20 @@ class VolumeAssessment:
     is_exploded: bool
 
 
-# First confirmed green day: change vs previous regular close, with a small
-# margin so hovering around 0% does not ping on noise. Once per day.
+# Red-to-green flip during the regular session: the day must have traded
+# at or below -0.2% earlier in the session, then close a 5-minute bar at or
+# above +0.2%. The symmetric margin keeps hovering around 0% from counting
+# as a flip, and a gap-up open that never went red stays silent (10/19 and
+# 10/21 pinged "양전 전환" two minutes after a green open). Once per day.
 GREEN_CROSS_CONFIRM_PCT = 0.2
+RED_CONFIRM_PCT = -0.2
 
 
-def is_green_cross(frame: MarketFrame) -> bool:
+def is_green_cross(frame: MarketFrame, session_low_change: float | None) -> bool:
     return (
         frame.snapshot.session is MarketSession.REGULAR
+        and session_low_change is not None
+        and session_low_change <= RED_CONFIRM_PCT
         and frame.snapshot.change_pct >= GREEN_CROSS_CONFIRM_PCT
     )
 

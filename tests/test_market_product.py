@@ -350,7 +350,8 @@ class YahooMarketDataAdapterTest(unittest.TestCase):
             ).process(after_previous_day, detected_at=now)
         # 6.2% normalizes to the 5 band on the widened ladder (3,4,5,7,9,...).
         self.assertIn("VRT:2026-09-02:price-band:up:5", report.inserted_event_keys)
-        self.assertIn("VRT:2026-09-02:green-cross", report.inserted_event_keys)
+        # The day never traded red, so there is no red-to-green flip to report.
+        self.assertNotIn("VRT:2026-09-02:green-cross", report.inserted_event_keys)
         self.assertIn("VRT:2026-09-02:price-band:up:5", report.delayed_event_keys)
         rendered = json.dumps(report.messages[0], ensure_ascii=False)
         self.assertIn("+5.0% 상승 도달 기록", rendered)

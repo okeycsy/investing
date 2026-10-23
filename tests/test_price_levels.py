@@ -356,14 +356,20 @@ class GreenCrossTest(unittest.TestCase):
         )
         return MarketFrame(snapshot=snapshot, close_price=244.4, reference_close=243.7)
 
-    def test_confirms_only_regular_session_green_above_margin(self):
+    def test_confirms_only_a_red_to_green_flip_in_the_regular_session(self):
         from investing_monitor.domain.policies import is_green_cross
 
-        self.assertTrue(is_green_cross(self.make_frame(0.3)))
-        self.assertFalse(is_green_cross(self.make_frame(0.1)))
-        self.assertFalse(is_green_cross(self.make_frame(-0.3)))
+        # Was red (-0.8% low) and now green beyond the margin: a real flip.
+        self.assertTrue(is_green_cross(self.make_frame(0.3), -0.8))
+        # Green but never red today (gap-up open): not a flip.
+        self.assertFalse(is_green_cross(self.make_frame(0.3), 0.4))
+        self.assertFalse(is_green_cross(self.make_frame(0.3), None))
+        # Hovering around zero does not count on either side.
+        self.assertFalse(is_green_cross(self.make_frame(0.3), -0.1))
+        self.assertFalse(is_green_cross(self.make_frame(0.1), -0.8))
+        self.assertFalse(is_green_cross(self.make_frame(-0.3), -0.8))
         self.assertFalse(
-            is_green_cross(self.make_frame(0.5, session=MarketSession.PRE))
+            is_green_cross(self.make_frame(0.5, session=MarketSession.PRE), -0.8)
         )
 
     def test_message_passes_audit(self):
@@ -381,7 +387,7 @@ class GreenCrossTest(unittest.TestCase):
         )
 
         self.assertTrue(audit_message("green_cross", payload).passed)
-        self.assertIn("양전 전환 +0.29%", payload["text"])
+        self.assertIn("음전 → 양전 전환 +0.29%", payload["text"])
         self.assertIn("$244.40", payload["text"])
 
 

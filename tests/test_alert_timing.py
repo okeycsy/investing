@@ -118,10 +118,53 @@ class AlertTimingTest(unittest.TestCase):
                 report = service.process(cycle(
                     frame(EVENT_AT, event), frame(LATEST_AT, latest),
                 ), detected_at=DETECTED_AT)
-                # A fresh green latest frame adds the once-a-day green-cross ping.
-                expected_total = 2 if latest >= 0.2 else 1
+                # Only a red-to-green flip adds the once-a-day green-cross ping;
+                # a day that stayed green never pings.
+                expected_total = 2 if event <= -0.2 and latest >= 0.2 else 1
                 self.assertEqual(len(report.messages), expected_total)
                 self.assertIn(expected, rendered(report.messages[0]))
+
+    def test_green_cross_fires_once_only_after_a_red_regular_session(self):
+        def keys(report):
+            return [key for key in report.inserted_event_keys if key.endswith("green-cross")]
+
+        open_at = datetime(2026, 9, 17, 13, 35, tzinfo=timezone.utc)
+        # Cycle 1: opens red, stored as the session's low.
+        first = self.service.process(
+            cycle(frame(open_at, -0.9)),
+            detected_at=open_at + timedelta(minutes=2),
+        )
+        # Cycle 2: flips green -> one alert.
+        flip_at = open_at + timedelta(minutes=30)
+        second = self.service.process(
+            cycle(frame(flip_at, 0.4)),
+            detected_at=flip_at + timedelta(minutes=2),
+        )
+        # Cycle 3: dips red and back green again -> still once per day.
+        again_at = flip_at + timedelta(minutes=60)
+        third = self.service.process(
+            cycle(frame(again_at, -0.5), frame(again_at + timedelta(minutes=5), 0.6)),
+            detected_at=again_at + timedelta(minutes=7),
+        )
+
+        self.assertEqual(keys(first), [])
+        self.assertEqual(keys(second), ["VRT:2026-09-17:green-cross"])
+        self.assertEqual(keys(third), [])
+
+    def test_gap_up_day_or_premarket_only_red_never_pings_green_cross(self):
+        open_at = datetime(2026, 9, 17, 13, 35, tzinfo=timezone.utc)
+        premarket_at = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+
+        report = self.service.process(
+            cycle(
+                frame(premarket_at, -1.5, MarketSession.PRE),
+                frame(open_at, 2.6),
+                frame(open_at + timedelta(minutes=5), 1.1),
+            ),
+            detected_at=open_at + timedelta(minutes=7),
+        )
+
+        self.assertNotIn("VRT:2026-09-17:green-cross", report.inserted_event_keys)
 
     def test_last_observation_is_not_described_as_current_when_stale(self):
         payload = self.service.process(cycle(

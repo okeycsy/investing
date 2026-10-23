@@ -250,8 +250,9 @@ def build_green_cross_message(
     price: float | None = None,
     reference_close: float | None = None,
     detected_at: datetime | None = None,
+    session_low_change: float | None = None,
 ) -> dict:
-    title = f"${snapshot.ticker} 양전 전환 {pct_label(snapshot.change_pct)}"
+    title = f"${snapshot.ticker} 음전 → 양전 전환 {pct_label(snapshot.change_pct)}"
     detection_delay = (
         delay_seconds(snapshot.observed_at, detected_at) if detected_at else 0
     )
@@ -267,10 +268,12 @@ def build_green_cross_message(
             )
         ),
     ]
+    if session_low_change is not None:
+        price_line += f"\n장중 저점 `{pct_label(session_low_change)}`에서 반등"
     if price_line:
         blocks.append(_section(price_line))
     blocks.append(
-        _context("당일 첫 양전 확인(5분봉 종가 기준) · 이후 흐름은 마감 브리프에서 정리")
+        _context("정규장 음전 후 첫 양전 확인(5분봉 종가 기준) · 하루 1회")
     )
     fallback = f"{title}"
     if price is not None:
