@@ -16,6 +16,7 @@ from typing import Sequence
 
 from investing_monitor.adapters.git_state_branch import GitStateBranchStore
 from investing_monitor.adapters.anthropic_evidence import AnthropicEvidenceAnalyzer
+from investing_monitor.adapters.rule_evidence import RuleBasedEvidenceAnalyzer
 from investing_monitor.adapters.config import (
     load_evidence_profile,
     load_instrument_profile,
@@ -472,7 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ingestion = EvidenceIngestionService(
                 repository,
                 evidence_profile,
-                AnthropicEvidenceAnalyzer(os.environ.get("ANTHROPIC_API_KEY", "")),
+                _evidence_analyzer(),
                 article_text=YahooArticleTextClient(),
                 filing_text=SecFilingTextClient(evidence_profile.sec_contact),
                 alert_builder=build_evidence_message,
@@ -899,6 +900,15 @@ def _deliver_test_message(
         ).deliver_pending(event_key=event_key)
     )
     return report, len(checkpoints)
+
+
+def _evidence_analyzer():
+    """EVIDENCE_AI=off (or a missing key) swaps in the free rule-based path."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    switch = os.environ.get("EVIDENCE_AI", "on").strip().casefold()
+    if api_key and switch not in {"off", "false", "0", "disabled"}:
+        return AnthropicEvidenceAnalyzer(api_key)
+    return RuleBasedEvidenceAnalyzer()
 
 
 def _position_from_env() -> Position | None:

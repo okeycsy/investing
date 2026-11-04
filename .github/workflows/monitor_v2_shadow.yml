@@ -91,6 +91,7 @@ jobs:
         if: github.event_name == 'push' || inputs.mode == 'shadow'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVIDENCE_AI: 'off'
           SEC_CONTACT: maybe2213@naver.com
         run: investing-monitor --db .runtime/monitor.db shadow-tick --scheduled-at "${{ steps.run-metadata.outputs.created_at }}" --trigger "${{ github.event_name }}" --run-id "${{ github.run_id }}-${{ github.run_attempt }}"
 
@@ -112,6 +113,7 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVIDENCE_AI: 'off'
         run: investing-monitor --db .runtime/monitor.db doctor --require-secrets
 
       - name: Checkpoint isolated shadow state

@@ -54,6 +54,7 @@ jobs:
           SEC_DATA_MODE: yahoo
           SEC_ARCHIVE_MODE: yahoo
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVIDENCE_AI: 'off'
         run: python live_smoke.py --no-slack
 
       - name: Run manual live checks
@@ -67,4 +68,5 @@ jobs:
           SEC_DATA_MODE: yahoo
           SEC_ARCHIVE_MODE: yahoo
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVIDENCE_AI: 'off'
         run: python live_smoke.py --${{ inputs.require_slack == 'true' && 'require-slack' || 'no-slack' }}

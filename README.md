@@ -136,6 +136,13 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 
 내부자 거래는 SEC 제출 목록과 Form 4 원문을 우선 조회합니다. SEC Archives가 자동화 요청을 `403`으로 제한하면 Yahoo 내부자 거래 데이터로 자동 전환합니다.
 
+## 뉴스·공시 분석 모드
+
+`EVIDENCE_AI` 환경변수로 전환합니다(운영 워크플로 기본값 `off`).
+
+- `off`: Claude API를 호출하지 않는 규칙 기반 경로. SEC 주요 공시(사전 필터 통과분)와 사업 이벤트(실적·계약·인수·경영진·생산능력·파트너십) IR 보도자료는 원문 문장 인용으로 즉시 알림, 신제품 발표는 마감 브리프, 실적 발표일 공지는 주간 브리프 일정으로 들어갑니다. 제3자 뉴스 기사는 관련성 판단이 불가해 기록만 하고 알리지 않습니다. 메시지에는 "판단 보류"로 표시해 방향 해석이 없음을 밝힙니다.
+- `on`: Claude Haiku로 요약·번역·논지 영향까지 분석(API 크레딧 필요). `.github/workflows/monitor_v2_production.yml`, `monitor_v2_shadow.yml`, `live_smoke.yml`의 `EVIDENCE_AI` 값을 `'on'`으로 바꾸면 됩니다.
+
 ## 알림 원칙
 
 - v2 production workflow가 정각을 피한 5분 tick으로 가격·뉴스·공시를 통합하고, 지연된 close/news/SEC와 누락된 가격 구간은 다음 성공 tick에서 복원합니다.

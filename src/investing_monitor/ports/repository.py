@@ -168,6 +168,7 @@ class MonitorRepository(Protocol):
         self,
         now: datetime,
         limit: int = 20,
+        ticker: str | None = None,
     ) -> list[EvidenceCandidate]: ...
 
     def update_evidence_source_text(

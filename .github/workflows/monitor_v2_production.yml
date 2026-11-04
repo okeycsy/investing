@@ -99,6 +99,7 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVIDENCE_AI: 'off'
           SEC_CONTACT: maybe2213@naver.com
           V2_PRODUCTION_ENABLED: 'true'
           MONITOR_POSITION_AVG_PRICE: ${{ secrets.MONITOR_POSITION_AVG_PRICE }}
@@ -110,6 +111,7 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVIDENCE_AI: 'off'
         run: investing-monitor --db .runtime/monitor.db doctor --require-secrets
 
       - name: Show runtime status

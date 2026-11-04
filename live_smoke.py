@@ -310,8 +310,11 @@ def main() -> int:
         ("Yahoo", lambda: check_yahoo(config)),
         ("SEC submissions", lambda: check_sec(config)),
         ("SEC Form 4 XML", lambda: check_sec_form4(config)),
-        ("Anthropic", lambda: check_anthropic(config)),
     ]
+    if os.environ.get("EVIDENCE_AI", "on").strip().casefold() not in {"off", "false", "0", "disabled"}:
+        checks.append(("Anthropic", lambda: check_anthropic(config)))
+    else:
+        print("[SKIP] Anthropic: EVIDENCE_AI is off (rule-based evidence path)")
     if not args.no_slack:
         checks.append(("Slack", lambda: check_slack(config, require=args.require_slack)))
 

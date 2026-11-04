@@ -193,8 +193,14 @@ def screen_candidate(
         metadata=dict(raw.metadata),
     )
     title = f" {candidate.headline.lower()} "
-    calendar_only = candidate.kind is EvidenceKind.IR and any(
-        pattern in title for pattern in CALENDAR_ONLY_PATTERNS
+    calendar_only = candidate.kind is EvidenceKind.IR and (
+        any(pattern in title for pattern in CALENDAR_ONLY_PATTERNS)
+        # "Bloom Energy to Announce Third Quarter 2026 Financial Results on
+        # October 22, 2026" is a date notice, not the results themselves.
+        or (
+            any(verb in title for verb in (" to announce ", " to report ", " will report "))
+            and "results" in title
+        )
     )
     if calendar_only:
         candidate = replace(
@@ -592,6 +598,7 @@ class EvidenceIngestionService:
         analysis_candidates = self.repository.pending_evidence_candidates(
             now,
             limit=self.batch_limit,
+            ticker=self.profile.ticker,
         )
         (
             analysis_candidates,

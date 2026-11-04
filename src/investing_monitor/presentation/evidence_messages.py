@@ -36,6 +36,8 @@ def build_evidence_message(
         "risk": ("🟠", "주의 근거"),
         "damage": ("🔴", "논지 훼손 근거"),
     }[analysis.thesis_impact]
+    if not analysis.ai_assisted:
+        impact_icon, impact_label = ("⚪", "판단 보류")
     facts = "\n".join(f"• {_clip(fact.fact_ko, 240)}" for fact in analysis.facts[:3])
     blocks = [
         {

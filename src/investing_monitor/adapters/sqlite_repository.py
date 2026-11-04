@@ -1027,7 +1027,14 @@ class SQLiteMonitorRepository:
         self,
         now: datetime,
         limit: int = 20,
+        ticker: str | None = None,
     ) -> list[EvidenceCandidate]:
+        # After a ticker switch the previous ticker's unfinished candidates
+        # must not be analyzed against (or alert under) the new profile.
+        ticker_clause = "AND ticker = ? " if ticker else ""
+        params = (
+            (_utc_iso(now), ticker.upper(), limit) if ticker else (_utc_iso(now), limit)
+        )
         with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT candidate_id, ticker, source_kind, headline, source_name, "
@@ -1035,8 +1042,9 @@ class SQLiteMonitorRepository:
                 "FROM evidence_candidates "
                 "WHERE status IN ('pending', 'failed') "
                 "AND next_attempt_at <= ? "
-                "ORDER BY published_at, first_seen_at LIMIT ?",
-                (_utc_iso(now), limit),
+                + ticker_clause
+                + "ORDER BY published_at, first_seen_at LIMIT ?",
+                params,
             ).fetchall()
         return [
             EvidenceCandidate(
@@ -1725,6 +1733,7 @@ def _analysis_payload(analysis: EvidenceAnalysis) -> dict[str, object]:
         "materiality": analysis.materiality,
         "source_tier": analysis.source_tier,
         "alert_worthy": analysis.alert_worthy,
+        "ai_assisted": analysis.ai_assisted,
         "official_events": [
             {
                 "title_ko": event.title_ko,
@@ -1784,6 +1793,7 @@ def _analysis_from_payload(payload: Mapping[str, object]) -> EvidenceAnalysis:
             for event in payload.get("official_events") or []
             if isinstance(event, dict)
         ),
+        ai_assisted=bool(payload.get("ai_assisted", True)),
     )
 
 

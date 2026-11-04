@@ -171,6 +171,7 @@ class EvidenceAnalysis:
     materiality: str = EvidenceMateriality.LOW.value
     source_tier: str = EvidenceSourceTier.SECONDARY.value
     alert_worthy: bool = False
+    ai_assisted: bool = True
 
 
 @dataclass(frozen=True)
