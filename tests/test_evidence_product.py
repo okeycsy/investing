@@ -260,6 +260,28 @@ class EvidenceDispositionTest(unittest.TestCase):
             EvidenceDisposition.LEDGER,
         )
 
+    def test_short_ticker_that_is_a_word_needs_ticker_form(self):
+        from investing_monitor.application.evidence import (
+            _headline_names_company,
+            company_stop_words,
+        )
+
+        bloom = EvidenceProfile(
+            ticker="BE",
+            company_name="Bloom Energy Corp",
+            cik="1664703",
+            aliases=("Bloom Energy",),
+        )
+
+        self.assertFalse(_headline_names_company("Will Nvidia Be the Next Trillion-Dollar Stock?", bloom))
+        self.assertFalse(_headline_names_company("STOCKS TO BE WATCHED TODAY", bloom))
+        self.assertTrue(_headline_names_company("Can BE's Oracle Deal Drive Growth?", bloom))
+        self.assertTrue(_headline_names_company("Why Bloom Energy (BE) Stock Is Soaring", bloom))
+        self.assertTrue(_headline_names_company("Bloom Energy beats estimates", bloom))
+        self.assertFalse(_headline_names_company("Bloomberg: grid stocks rally", bloom))
+        self.assertIn("bloom", company_stop_words(bloom))
+        self.assertIn("energy", company_stop_words(bloom))
+
     def test_news_without_company_in_headline_is_not_an_independent_catalyst(self):
         decision = screen_candidate(
             raw(

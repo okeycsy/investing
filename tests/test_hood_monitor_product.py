@@ -26,8 +26,8 @@ def visible_text(blocks):
 
 
 class ProductContractTest(unittest.TestCase):
-    def test_vrt_profile_contains_business_kpis(self):
-        self.assertIn("liquid cooling", hm.NEWS_TERMS)
+    def test_profile_contains_business_kpis(self):
+        self.assertTrue(hm.NEWS_TERMS)
         self.assertIn("backlog", hm.CORE_KPIS)
         self.assertIn("guidance cut", hm.RISK_KEYWORDS)
 
@@ -231,11 +231,11 @@ class ProductContractTest(unittest.TestCase):
     def test_price_move_headline_has_direction_emoji_and_threshold(self):
         self.assertEqual(
             hm.format_price_move_headline(4.2, level=4),
-            "📈 $VRT +4% 상승 구간 진입",
+            f"📈 {hm.DISPLAY_TICKER} +4% 상승 구간 진입",
         )
         self.assertEqual(
             hm.format_price_move_headline(-5.1, level=5),
-            "📉 $VRT -5% 하락 구간 진입",
+            f"📉 {hm.DISPLAY_TICKER} -5% 하락 구간 진입",
         )
 
     def test_periodic_sec_filing_is_summarized_and_related_8k_is_deduped(self):
@@ -583,7 +583,7 @@ class ProductContractTest(unittest.TestCase):
         blocks = send_slack.call_args.args[0]
         text = visible_text(blocks)
         self.assertIn("📈 +4.0% 상승", text)
-        self.assertIn("📈 $VRT +4.0% 상승 가정", text)
+        self.assertIn(f"📈 {hm.DISPLAY_TICKER} +4.0% 상승 가정", text)
         self.assertIn("반도체 지수(SOXX) 대비 *아웃퍼폼*", text)
         self.assertIn("피어 평균", text)
         self.assertIn("평균 대비 급증", text)
@@ -633,7 +633,7 @@ class ProductContractTest(unittest.TestCase):
         }])
         text = visible_text(blocks)
 
-        self.assertIn("📉 $VRT", text)
+        self.assertIn(f"📉 {hm.DISPLAY_TICKER}", text)
         self.assertIn("↘️ 반도체 지수", text)
         self.assertIn("↘️ 피어 평균", text)
         self.assertIn("📰 주요 뉴스", text)

@@ -127,9 +127,19 @@ STOP_WORDS = {
     "announce",
     "center",
     "data",
-    "vertiv",
-    "vrt",
 }
+
+
+def company_stop_words(profile: EvidenceProfile) -> frozenset[str]:
+    """Issuer-name tokens appear in nearly every headline about the issuer,
+    so they carry no event signal for clustering (was hardcoded for VRT)."""
+    words = [profile.ticker, profile.company_name, *profile.aliases]
+    return frozenset(
+        token
+        for word in words
+        for token in re.findall(r"[a-z0-9가-힣]+", word.casefold())
+        if len(token) > 1
+    )
 
 EVENT_ACTION_TOKENS = {
     "acquire",
@@ -238,16 +248,17 @@ def cluster_candidates(
     minimum_similarity: float = 0.4,
     extended_window: timedelta = timedelta(hours=72),
     extended_similarity: float = 0.5,
+    company: frozenset[str] = frozenset(),
 ) -> tuple[EvidenceCluster, ...]:
     groups: list[list[EvidenceCandidate]] = []
     for candidate in sorted(candidates, key=lambda item: item.published_at):
-        tokens = _event_tokens(candidate.headline)
+        tokens = _event_tokens(candidate.headline, company)
         match: list[EvidenceCandidate] | None = None
         for group in groups:
             comparisons = [
                 (
                     abs(candidate.published_at - member.published_at),
-                    _overlap(tokens, _event_tokens(member.headline)),
+                    _overlap(tokens, _event_tokens(member.headline, company)),
                 )
                 for member in group
             ]
@@ -300,7 +311,7 @@ def _representative(candidates: list[EvidenceCandidate]) -> EvidenceCandidate:
     )
 
 
-def _event_tokens(value: str) -> set[str]:
+def _event_tokens(value: str, company: frozenset[str] = frozenset()) -> set[str]:
     camel_split = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value)
     tokens = re.findall(r"[a-z0-9가-힣]+", camel_split.lower())
     return {
@@ -308,6 +319,7 @@ def _event_tokens(value: str) -> set[str]:
         for token in tokens
         if len(token) > 1
         if (normalized := TOKEN_ALIASES.get(token, token)) not in STOP_WORDS
+        if normalized not in company
     }
 
 
@@ -324,21 +336,22 @@ def same_evidence_event(
     right_analysis: EvidenceAnalysis,
     *,
     window: timedelta = timedelta(days=7),
+    company: frozenset[str] = frozenset(),
 ) -> bool:
     if abs(left_candidate.published_at - right_candidate.published_at) > window:
         return False
     left_texts = _event_text_values(left_candidate, left_analysis)
     right_texts = _event_text_values(right_candidate, right_analysis)
-    left_tokens = set().union(*(_event_tokens(value) for value in left_texts))
-    right_tokens = set().union(*(_event_tokens(value) for value in right_texts))
+    left_tokens = set().union(*(_event_tokens(value, company) for value in left_texts))
+    right_tokens = set().union(*(_event_tokens(value, company) for value in right_texts))
     if (
         left_tokens & right_tokens & EVENT_ACTION_TOKENS
         and _event_amounts(left_texts) & _event_amounts(right_texts)
     ):
         return True
     similarities = []
-    for left in _event_signatures(left_candidate, left_analysis):
-        for right in _event_signatures(right_candidate, right_analysis):
+    for left in _event_signatures(left_candidate, left_analysis, company):
+        for right in _event_signatures(right_candidate, right_analysis, company):
             shared = left & right
             if len(shared) >= 2:
                 similarities.append(_overlap(left, right))
@@ -348,11 +361,12 @@ def same_evidence_event(
 def _event_signatures(
     candidate: EvidenceCandidate,
     analysis: EvidenceAnalysis,
+    company: frozenset[str] = frozenset(),
 ) -> tuple[set[str], ...]:
     return tuple(
         tokens
         for tokens in (
-            _event_tokens(value)
+            _event_tokens(value, company)
             for value in _event_text_values(candidate, analysis)
         )
         if tokens
@@ -395,12 +409,33 @@ def _event_amounts(values: tuple[str, ...]) -> set[int]:
 
 def _headline_names_company(value: str, profile: EvidenceProfile) -> bool:
     normalized = " ".join(value.casefold().split())
-    names = (profile.ticker, *profile.aliases)
-    return any(
+    if any(
         re.search(rf"(?<!\w){re.escape(name.casefold())}(?!\w)", normalized)
-        for name in names
+        for name in profile.aliases
         if name.strip()
-    )
+    ):
+        return True
+    return _headline_names_ticker(value, profile.ticker)
+
+
+def _headline_names_ticker(value: str, ticker: str) -> bool:
+    """Tickers match case-sensitively. A short ticker that is also an
+    ordinary word ("BE") counts in upper case inside a mixed-case headline
+    ("Can BE's Oracle Deal...", "Bloom (BE) Jumps") but not as "Be"/"be",
+    and an all-caps headline needs a ticker-shaped form ("(BE)", "$BE")."""
+    symbol = re.escape(ticker.upper())
+    if re.search(
+        rf"\({symbol}\)|\${symbol}(?![A-Za-z0-9])|(?:NYSE|NASDAQ|Nasdaq)\s*:\s*{symbol}(?![A-Za-z0-9])",
+        value,
+    ):
+        return True
+    if not re.search(rf"(?<![A-Za-z0-9$]){symbol}(?![A-Za-z0-9])", value):
+        return False
+    if len(ticker) > 3:
+        return True
+    letters = [character for character in value if character.isalpha()]
+    upper_share = sum(character.isupper() for character in letters) / max(1, len(letters))
+    return upper_share < 0.6
 
 
 def _news_title_rejection_reason(
@@ -526,7 +561,7 @@ class EvidenceIngestionService:
             for decision in decisions
             if decision.status is EvidenceStatus.PENDING and decision.candidate is not None
         ]
-        clusters = cluster_candidates(pending)
+        clusters = cluster_candidates(pending, company=company_stop_words(self.profile))
         cluster_keys = {
             candidate.candidate_id: cluster.cluster_key
             for cluster in clusters
@@ -693,6 +728,7 @@ class EvidenceIngestionService:
                         item.analysis,
                         prior.candidate,
                         prior.analysis,
+                        company=company_stop_words(self.profile),
                     )
                 ),
                 None,
@@ -833,6 +869,7 @@ class EvidenceIngestionService:
                 analysis,
                 existing.candidate,
                 existing.analysis,
+                company=company_stop_words(self.profile),
             ):
                 self.repository.link_evidence_cluster(
                     candidate.candidate_id,

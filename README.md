@@ -8,7 +8,7 @@
 > `src/investing_monitor`가 production Slack과 예약 실행을 담당합니다. 기존
 > `hood_monitor.py` workflow는 수동 fallback과 preview 용도로만 남겨 둡니다.
 
-단일 종목 투자 논지 모니터입니다. 현재 기본 종목은 `$VRT`입니다. 새 버전도 GitHub Actions hosted runner에서 실행하며 Yahoo REST를 장중 5분 schedule로 조회합니다. 예약 지연이나 누락은 다음 성공 실행의 intraday replay로 보완하고, 중요 뉴스, 발행사 SEC 공시, 내부자 거래, 장마감 상대 성과와 주간 논지 변화를 Slack으로 전달합니다.
+단일 종목 투자 논지 모니터입니다. 현재 기본 종목은 `$BE`(Bloom Energy)입니다. 2026-11-04 `$VRT`에서 교체했습니다. 새 버전도 GitHub Actions hosted runner에서 실행하며 Yahoo REST를 장중 5분 schedule로 조회합니다. 예약 지연이나 누락은 다음 성공 실행의 intraday replay로 보완하고, 중요 뉴스, 발행사 SEC 공시, 내부자 거래, 장마감 상대 성과와 주간 논지 변화를 Slack으로 전달합니다.
 
 제품 동작과 표시 금지사항은 `HOOD_MONITOR_PRODUCT.md`에 고정되어 있습니다.
 
@@ -76,11 +76,11 @@ investing-monitor slack-preview --kind move-up
 `monitor_config.md`를 수정합니다.
 
 ```text
-ticker: $VRT
-company_name: Vertiv Holdings Co
-cik: 0001674101
+ticker: $BE
+company_name: Bloom Energy Corp
+cik: 0001664703
 benchmark: $SOXX
-peer_tickers: $ETN, $NVT, $GEV
+peer_tickers: $FCEL, $GEV, $VRT, $NBIS
 app_store_id:
 ```
 
@@ -153,7 +153,7 @@ GitHub에서는 Actions 탭의 `Live Smoke Test`를 수동 실행하면 됩니�
 - 장 마감 브리프에 '오늘의 레벨 리뷰'(지지 테스트/이탈, 저항 터치/돌파, 이동평균 돌파·이탈)가 함께 표시됩니다.
 - 리포 시크릿 `MONITOR_POSITION_AVG_PRICE`(필수)와 `MONITOR_POSITION_SHARES`(선택)를 설정하면 평단 대비 수익률과 평가손익이 알림에 함께 표시됩니다. 포지션 정보는 공개 리포에 저장되지 않습니다. 당일 반대 방향 전환과 이미 통과한 구간은 다시 알리지 않습니다.
 - 장중에는 새 뉴스, 분석 완료된 발행사 중요 SEC 공시, 내부자 거래, 큰 폭의 이상 움직임, 20거래일 평균 대비 1.5배 이상 거래량만 전송합니다. 거래량 알림은 하루 한 번만 보냅니다.
-- 상대 흐름은 반도체 지수 `SOXX`와 동일가중 피어 평균 `ETN/NVT/GEV`를 함께 사용합니다.
+- 상대 흐름은 반도체 지수 `SOXX`와 동일가중 피어 평균 `FCEL/GEV/VRT/NBIS`를 함께 사용합니다. 피어는 BE의 세 가지 거래 축(연료전지, 현장 발전, AI 인프라)을 대표하고, SOXX를 제외한 잔차 상관이 후보 40여 개 중 가장 높았습니다. ICLN·QCLN·HYDR은 BE를 최대 비중으로 보유해 자기상관이 생기므로 피어에서 제외했습니다.
 - 방향은 `📈/📉`, 지수·피어 상대 흐름은 `↗️/↘️/↔️`만 사용해 핵심 신호를 빠르게 구분합니다.
 - 장마감에는 `양전/음전/보합`, 지수·피어 상대 성과, 투자 논지를 먼저 표시하고 당일 거래량과 20일 평균을 비교합니다.
 - 투자 논지의 훼손·위험·강화 판단은 제목과 확인된 근거를 함께 표시할 수 있을 때만 사용합니다. 목표주가·고평가/저평가 의견, 종목 비교, 로펌의 주주 모집성 조사 홍보는 논지 변화에서 제외합니다.
