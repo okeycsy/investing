@@ -1,0 +1,8 @@
+# OpenBB-based research & monitor (research.py, be_monitor.py)
+# slim install: core + the providers we use. `openbb` meta package installed without deps
+# so `from openbb import obb` works (static assets are built on first import).
+openbb-core>=2.0.1
+openbb-yfinance>=2.1.0
+openbb-sec>=2.0.0
+openbb-finra>=2.0.0
+requests>=2.31.0

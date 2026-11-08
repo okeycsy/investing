@@ -1,0 +1,73 @@
+name: BE Insight Monitor
+
+on:
+  schedule:
+    # filings: 장중+장후 매시 (UTC 13~23 = KST 22~08) 월~금. 새 공시/Form 4 있을 때만 Slack 전송
+    - cron: '20 13-23 * * 1-5'
+    # close: NYSE 마감(UTC 21:00 EDT / 22:00 EST) 후 — KST 07:30
+    - cron: '30 22 * * 1-5'
+    # weekly: 월요일 KST 08:30 = 일요일 UTC 23:30
+    - cron: '30 23 * * 0'
+
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'RUN_MODE (close / filings / weekly / quarterly)'
+        required: true
+        default: 'close'
+      tag:
+        description: '헤더 접두어 (예: 테스트). 비우면 없음'
+        required: false
+        default: ''
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-openbb.txt
+
+      - name: Install OpenBB (slim)
+        run: |
+          pip install -r requirements-openbb.txt
+          pip install --no-deps openbb
+
+      - name: Determine RUN_MODE
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT; exit 0
+          fi
+          HOUR=$(date -u +%H); MIN=$(date -u +%M); DOW=$(date -u +%u)
+          if [ "$DOW" = "7" ]; then echo "mode=weekly" >> $GITHUB_OUTPUT
+          elif [ "$HOUR" = "22" ] && [ "$MIN" -ge 25 ] && [ "$MIN" -le 45 ]; then echo "mode=close" >> $GITHUB_OUTPUT
+          else echo "mode=filings" >> $GITHUB_OUTPUT; fi
+
+      - name: Run monitor
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          POSITION_SHARES:   ${{ secrets.POSITION_SHARES }}
+          POSITION_COST:     ${{ secrets.POSITION_COST }}
+          RUN_MODE:          ${{ steps.mode.outputs.mode }}
+          RUN_TAG:           ${{ github.event.inputs.tag }}
+        run: python be_monitor.py
+
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f be_state.json 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: update BE monitor state [skip ci]"
+          git pull --rebase || true
+          git push || true

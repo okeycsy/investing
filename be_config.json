@@ -1,0 +1,35 @@
+{
+  "symbol": "BE",
+  "name": "Bloom Energy",
+  "peers": ["VRT", "GEV", "CEG", "VST", "OKLO", "ETN"],
+  "benchmark": "QQQ",
+  "customer_proxies": {
+    "ORCL": "최대 고객(Oracle) 프록시 — Oracle의 AI capex/신용 뉴스가 BE 수요의 선행 지표",
+    "BN": "Brookfield — 프로젝트 금융 파트너"
+  },
+  "fuel_proxy": "NG=F",
+  "key_levels": {
+    "convertible_0pct_2030": {"conv_price": 194.97, "redemption_trigger_mult": 1.30, "principal_musd": 2500, "max_shares_m": 19.55,
+      "note": "0% 전환사채 $2.5B. 전환가 $194.97. 2028-11-20 이후 주가가 전환가의 130%($253.46)를 넘으면 회사가 상환 가능"}
+  },
+  "watch_dates": [
+    {"date": "2027-02-04", "label": "Q4'26 실적 발표 (예정) — 가이던스 중간값 매출 $1.45B, Non-GAAP EPS $1.09"},
+    {"date": "2026-11-16", "label": "3Q 13F 공시 마감 (45일) — 기관 비중 변화 확인"}
+  ],
+  "quality_baseline": {
+    "as_of": "2026-09-30",
+    "contract_assets_musd": 793,
+    "receivables_musd": 635,
+    "customer_deposits_musd": 661,
+    "inventory_musd": 928,
+    "ocf_q_musd": -27,
+    "note": "Q3'26 10-Q 기준. 다음 10-Q에서 이 수치들이 어떻게 변하는지가 핵심"
+  },
+  "news_keywords": ["Bloom", "fuel cell", "Oracle", "OpenAI", "Stargate", "data center moratorium", "Brookfield", "Hunterbrook", "SK ecoplant", "NTT"],
+  "alerts": {
+    "price_move_pct": 5.0,
+    "residual_z": 1.5,
+    "iv30_jump_pts": 10,
+    "short_interest_chg_pct": 10
+  }
+}
