@@ -61,7 +61,7 @@ def build_earnings_quality_message(
             "elements": [{
                 "type": "mrkdwn",
                 "text": (
-                    f"출처 SEC XBRL ({quality.source_form}) · 분기 수치, $M · "
+                    f"출처 {quality.source_form} · 분기 수치, $M · "
                     f"작성 {timestamp(created_at)}"
                 ),
             }],

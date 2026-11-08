@@ -25,6 +25,7 @@ from investing_monitor.domain.insights import (
     InsightBundle,
     InsightProfile,
     OptionQuote,
+    QualityQuarter,
     convertible_watch,
     earnings_quality,
     options_insight,
@@ -258,12 +259,25 @@ class FakeMarket:
     def fetch_next_earnings(self, ticker, *, today):
         return self.earnings
 
+    def fetch_quarterly_fundamentals(self, ticker, *, quarters=6):
+        return tuple(
+            QualityQuarter(period_end=end, values=values)
+            for end, values in (
+                (date(2026, 3, 31), {"revenue": 751.0, "net_income": 71.0, "operating_cash_flow": 74.0, "capex": -26.0, "receivables": 359.0, "inventory": 733.0, "payables": 242.0}),
+                (date(2026, 6, 30), {"revenue": 1065.0, "net_income": 196.0, "operating_cash_flow": 226.0, "capex": -52.0, "receivables": 458.0, "inventory": 758.0, "payables": 310.0}),
+                (date(2026, 9, 30), {"revenue": 1236.0, "net_income": 250.0, "operating_cash_flow": -27.0, "capex": -153.0, "receivables": 635.0, "inventory": 928.0, "payables": 493.0}),
+            )
+        )
+
 
 class FakeFacts:
-    def __init__(self, facts):
+    def __init__(self, facts, error: Exception | None = None):
         self.facts = facts
+        self.error = error
 
     def fetch(self, cik, *, contact):
+        if self.error is not None:
+            raise self.error
         return self.facts
 
 
@@ -354,6 +368,27 @@ class InsightServiceTest(unittest.TestCase):
             self.assertIn("이익의 질 체크포인트", text)
             self.assertIn("계약자산(미청구 매출) $793M", text)
             self.assertIn("SEC 원문 보기", text)
+
+    def test_sec_block_falls_back_to_yahoo_statements_with_a_disclaimer(self):
+        now = datetime(2026, 11, 8, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteMonitorRepository(Path(directory) / "monitor.db")
+            service = InsightService(
+                repository, _market(), FakeFacts({}, error=RuntimeError("companyfacts rejected with HTTP 403")),
+                profile=PROFILE, evidence_profile=EVIDENCE, insight_profile=INSIGHT_PROFILE,
+            )
+            report = service.quarterly_checkpoint(now)
+            self.assertTrue(report.inserted)
+            with closing(sqlite3.connect(repository.path)) as connection:
+                payload = json.loads(connection.execute("SELECT payload_json FROM alerts").fetchone()[0])
+            text = visible_text(payload)
+            self.assertTrue(audit_message(QUALITY_ALERT_TYPE, payload).passed)
+            self.assertIn("Yahoo Finance 분기 재무제표", text)
+            self.assertIn("계약자산(미청구 매출) 항목은 이 소스에 없어", text)
+            self.assertIn("영업현금흐름 $-27M", text)
+            self.assertNotIn("403", text)  # provider errors never reach the channel
+            self.assertIn("fallback:", report.skipped)
+            self.assertIn("browse-edgar", text)
 
     def test_stale_quarter_is_not_alerted(self):
         with tempfile.TemporaryDirectory() as directory:

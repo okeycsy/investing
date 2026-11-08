@@ -512,12 +512,28 @@ def earnings_quality(
     url = ""
     if accession and cik:
         url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/"
+    return earnings_quality_from_quarters(
+        out_quarters, source_form=f"SEC XBRL ({form})", source_accession=accession, source_url=url
+    )
+
+
+def earnings_quality_from_quarters(
+    quarters: Sequence[QualityQuarter],
+    *,
+    source_form: str,
+    source_url: str,
+    source_accession: str = "",
+) -> EarningsQuality | None:
+    """Same table and verdict from any quarterly source (XBRL or a fallback)."""
+    ordered = sorted(quarters, key=lambda q: q.period_end)
+    if len(ordered) < 2 or not ordered[-1].values.get("revenue"):
+        return None
     return EarningsQuality(
-        quarters=tuple(out_quarters),
-        verdict=tuple(quality_verdict(out_quarters)),
-        source_form=form,
-        source_accession=accession,
-        source_url=url,
+        quarters=tuple(ordered),
+        verdict=tuple(quality_verdict(ordered)),
+        source_form=source_form,
+        source_accession=source_accession,
+        source_url=source_url,
     )
 
 

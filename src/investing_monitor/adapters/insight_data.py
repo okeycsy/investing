@@ -20,7 +20,24 @@ from typing import Any
 import requests
 
 from investing_monitor.adapters.yahoo_market_data import YahooChartClient, _daily_closes
-from investing_monitor.domain.insights import OptionQuote
+from investing_monitor.domain.insights import OptionQuote, QualityQuarter
+
+# yfinance statement row → quality-table key. First match wins (ordered).
+_YAHOO_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("income", "Total Revenue", "revenue"),
+    ("income", "Gross Profit", "gross_profit"),
+    ("income", "Operating Income", "operating_income"),
+    ("income", "Net Income Common Stockholders", "net_income"),
+    ("cashflow", "Operating Cash Flow", "operating_cash_flow"),
+    ("cashflow", "Capital Expenditure", "capex"),
+    ("balance", "Cash And Cash Equivalents", "cash"),
+    ("balance", "Accounts Receivable", "receivables"),
+    ("balance", "Inventory", "inventory"),
+    ("balance", "Accounts Payable", "payables"),
+    ("balance", "Current Deferred Revenue", "deferred_revenue"),
+    ("balance", "Long Term Debt", "long_term_debt"),
+    ("balance", "Ordinary Shares Number", "shares_outstanding"),
+)
 
 
 class InsightDataError(RuntimeError):
@@ -112,6 +129,41 @@ class YahooInsightAdapter:
             except Exception:  # noqa: BLE001
                 pass
         return min(candidates) if candidates else None
+
+    def fetch_quarterly_fundamentals(self, ticker: str, *, quarters: int = 6) -> tuple[QualityQuarter, ...]:
+        """Fallback when data.sec.gov is blocked (GitHub runners get HTTP 403):
+        Yahoo's quarterly statements. No contract-asset line exists there, so the
+        caller labels the table accordingly."""
+        yf_ticker = self._yf(ticker)
+        try:
+            frames = {
+                "income": yf_ticker.quarterly_income_stmt,
+                "cashflow": yf_ticker.quarterly_cashflow,
+                "balance": yf_ticker.quarterly_balance_sheet,
+            }
+        except Exception as exc:  # noqa: BLE001
+            raise InsightDataError(f"quarterly statements unavailable: {exc}") from exc
+        values: dict[date, dict[str, float]] = {}
+        for frame_name, row_label, key in _YAHOO_ROWS:
+            frame = frames.get(frame_name)
+            if frame is None or getattr(frame, "empty", True) or row_label not in frame.index:
+                continue
+            for column, raw in frame.loc[row_label].items():
+                period = column.date() if hasattr(column, "date") else None
+                if period is None:
+                    continue
+                number = _float(raw)
+                if number == 0.0 and raw is None:
+                    continue
+                values.setdefault(period, {})
+                if key not in values[period]:
+                    values[period][key] = round(number / 1e6, 1)
+        ordered = sorted(values)[-quarters:]
+        return tuple(
+            QualityQuarter(period_end=period, values=values[period])
+            for period in ordered
+            if values[period].get("revenue")
+        )
 
     def _yf(self, ticker: str):
         if self._ticker_factory is not None:

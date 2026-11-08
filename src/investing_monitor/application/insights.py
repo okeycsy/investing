@@ -17,6 +17,7 @@ from investing_monitor.domain.insights import (
     InsightProfile,
     convertible_watch,
     earnings_quality,
+    earnings_quality_from_quarters,
     options_insight,
     proxy_moves,
     rank_insight_lines,
@@ -64,6 +65,11 @@ class QualityCheckpointReport:
             "verdict_count": self.verdict_count,
             "skipped": self.skipped,
         }
+
+
+def _short(exc: BaseException, limit: int = 60) -> str:
+    text = " ".join(str(exc).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 class InsightService:
@@ -209,13 +215,33 @@ class InsightService:
     def quarterly_checkpoint(self, now: datetime) -> QualityCheckpointReport:
         """Alert once per newly reported quarter with the XBRL quality table."""
         ticker = self.profile.ticker.upper()
-        facts = self.facts_client.fetch(
-            self.evidence_profile.cik,
-            contact=self.evidence_profile.sec_contact,
+        edgar_url = (
+            "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
+            f"&CIK={self.evidence_profile.cik}&type=10-&dateb=&owner=include&count=10"
         )
-        quality = earnings_quality(facts, cik=self.evidence_profile.cik)
+        source_note = ""
+        fallback_reason = ""
+        try:
+            facts = self.facts_client.fetch(
+                self.evidence_profile.cik,
+                contact=self.evidence_profile.sec_contact,
+            )
+            quality = earnings_quality(facts, cik=self.evidence_profile.cik)
+        except Exception as exc:  # SEC blocks cloud runners (HTTP 403); fall back to Yahoo statements
+            quality = earnings_quality_from_quarters(
+                self.market.fetch_quarterly_fundamentals(ticker),
+                source_form="Yahoo Finance 분기 재무제표",
+                source_url=edgar_url,
+            )
+            # the provider error stays in task metadata; the investor channel
+            # only learns which source was used (quality gate forbids raw HTTP text)
+            fallback_reason = _short(exc)
+            source_note = (
+                "ℹ️ SEC XBRL에 접근하지 못해 Yahoo 분기 재무제표로 계산했습니다. "
+                "계약자산(미청구 매출) 항목은 이 소스에 없어 빠져 있습니다 — 10-Q 원문에서 확인 필요."
+            )
         if quality is None:
-            return QualityCheckpointReport("", "", False, 0, skipped="xbrl table unavailable")
+            return QualityCheckpointReport("", "", False, 0, skipped="quarterly table unavailable")
         period_end = quality.latest.period_end
         if (now.date() - period_end).days > QUALITY_MAX_AGE_DAYS:
             return QualityCheckpointReport(
@@ -225,12 +251,12 @@ class InsightService:
         event_key = f"{ticker}:{period_end.isoformat()}:{QUALITY_ALERT_TYPE}"
         if self.repository.alert_exists(event_key):
             return QualityCheckpointReport(period_end.isoformat(), event_key, False, len(quality.verdict), skipped="already alerted")
-        filing_url = quality.source_url or f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={self.evidence_profile.cik}&type=10-Q"
         payload = build_earnings_quality_message(
             ticker,
             quality,
             created_at=now,
-            filing_url=filing_url,
+            filing_url=quality.source_url or edgar_url,
+            baseline_note=source_note,
         )
         inserted = self.repository.record_alert(
             AlertRecord(
@@ -242,4 +268,7 @@ class InsightService:
             ),
             enqueue=self.enqueue_alerts,
         )
-        return QualityCheckpointReport(period_end.isoformat(), event_key, inserted, len(quality.verdict))
+        return QualityCheckpointReport(
+            period_end.isoformat(), event_key, inserted, len(quality.verdict),
+            skipped=f"fallback: {fallback_reason}" if fallback_reason else "",
+        )
