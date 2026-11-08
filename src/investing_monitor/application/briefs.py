@@ -71,6 +71,7 @@ class CloseBriefService:
         created_at: datetime,
         sensitivity: MarketSensitivity | None = None,
         official: DailyBar | None = None,
+        insights: Sequence = (),
     ) -> CloseBriefReport:
         context = self.repository.load_close_market_context(ticker, trading_date)
         if context is None:
@@ -122,6 +123,7 @@ class CloseBriefService:
             position=self.position,
             price_curve=self.repository.day_price_curve(ticker, trading_date),
             open_price=open_price,
+            insights=insights,
         )
         event_key = f"{ticker.upper()}:{trading_date.isoformat()}:close"
         inserted = self.repository.record_alert(
@@ -193,6 +195,7 @@ class WeeklyBriefService:
         evidence_since: datetime,
         created_at: datetime,
         official_bars: Sequence[DailyBar] = (),
+        insights: Sequence[str] = (),
     ) -> WeeklyBriefReport:
         contexts = self.repository.load_close_market_contexts(
             ticker,
@@ -275,6 +278,7 @@ class WeeklyBriefService:
             week_low=min(week_lows) if week_lows else None,
             week_high=max(week_highs) if week_highs else None,
             official_range=official_range,
+            insights=insights,
         )
         iso_year, iso_week, _ = period_end.isocalendar()
         event_key = f"{ticker.upper()}:{iso_year}-W{iso_week:02d}:weekly"

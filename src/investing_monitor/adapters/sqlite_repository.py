@@ -48,7 +48,7 @@ from investing_monitor.ports.runtime import RunCheckpoint, TaskCheckpoint
 from investing_monitor.presentation.quality import require_valid_message
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_sessions (
@@ -99,6 +99,14 @@ CREATE INDEX IF NOT EXISTS idx_market_volume_ticker_date
 ON market_volume_observations(ticker, trading_date, observed_at DESC);
 
 CREATE TABLE IF NOT EXISTS price_levels (
+    ticker TEXT NOT NULL,
+    trading_date TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(ticker, trading_date)
+);
+
+CREATE TABLE IF NOT EXISTS insight_snapshots (
     ticker TEXT NOT NULL,
     trading_date TEXT NOT NULL,
     payload_json TEXT NOT NULL,
@@ -526,6 +534,51 @@ class SQLiteMonitorRepository:
         try:
             return PriceLevels.from_dict(json.loads(row["payload_json"]))
         except (ValueError, TypeError, KeyError):
+            return None
+
+    def save_insight_snapshot(
+        self,
+        ticker: str,
+        trading_date: date,
+        payload: Mapping[str, object],
+    ) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO insight_snapshots "
+                "(ticker, trading_date, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    ticker.upper(),
+                    trading_date.isoformat(),
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def load_insight_snapshot(
+        self,
+        ticker: str,
+        *,
+        before: date | None = None,
+    ) -> dict[str, object] | None:
+        """Latest snapshot strictly before `before` (or the latest overall)."""
+        with closing(self._connect()) as connection, connection:
+            if before is None:
+                row = connection.execute(
+                    "SELECT payload_json FROM insight_snapshots WHERE ticker = ? "
+                    "ORDER BY trading_date DESC LIMIT 1",
+                    (ticker.upper(),),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT payload_json FROM insight_snapshots "
+                    "WHERE ticker = ? AND trading_date < ? ORDER BY trading_date DESC LIMIT 1",
+                    (ticker.upper(), before.isoformat()),
+                ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["payload_json"])
+        except (ValueError, TypeError):
             return None
 
     def load_market_sensitivity(self, ticker: str) -> MarketSensitivity | None:

@@ -29,6 +29,7 @@ from investing_monitor.presentation.market_context import (
     relative_block,
     shares_label,
 )
+from investing_monitor.presentation.insight_messages import close_insight_text
 from investing_monitor.presentation.timing import timestamp
 
 
@@ -179,6 +180,7 @@ def build_close_message(
     position: Position | None = None,
     price_curve: Sequence[tuple[datetime, float]] = (),
     open_price: float | None = None,
+    insights: Sequence = (),
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "양전"),
@@ -233,6 +235,10 @@ def build_close_message(
                 f"{shares_label(volume.expected_volume)} 주  ·  *{ratio:.1f}배*"
             )
         )
+
+    rendered_insights = close_insight_text(insights)
+    if rendered_insights:
+        blocks.append(_section(rendered_insights))
 
     if levels is not None:
         rendered_review = day_level_review(levels, close_price, day_low, day_high)

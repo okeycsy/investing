@@ -17,9 +17,12 @@ from typing import Sequence
 from investing_monitor.adapters.git_state_branch import GitStateBranchStore
 from investing_monitor.adapters.anthropic_evidence import AnthropicEvidenceAnalyzer
 from investing_monitor.adapters.rule_evidence import RuleBasedEvidenceAnalyzer
+from investing_monitor.adapters.insight_data import SecCompanyFactsClient, YahooInsightAdapter
+from investing_monitor.application.insights import InsightService
 from investing_monitor.adapters.config import (
     load_evidence_profile,
     load_instrument_profile,
+    load_insight_profile,
 )
 from investing_monitor.adapters.evidence_feeds import InvestorRelationsFeedAdapter
 from investing_monitor.adapters.exchange_calendar import XNYSCalendar
@@ -569,6 +572,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         }
                     },
                 }
+                # XBRL earnings-quality checkpoint rides on the SEC task so it
+                # fires within the same poll that sees a new 10-Q/10-K.
+                try:
+                    checkpoint = insight_service.quarterly_checkpoint(now)
+                except Exception as exc:  # degrade: the filing alert itself still goes out
+                    evidence_result["sec"]["earnings_quality"] = {"error": str(exc)}
+                else:
+                    evidence_result["sec"]["earnings_quality"] = checkpoint.as_dict()
                 return evidence_result["sec"]
 
             close_service = CloseBriefService(
@@ -577,6 +588,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 position=position,
             )
             weekly_service = WeeklyBriefService(repository, enqueue_alerts=production)
+            insight_service = InsightService(
+                repository,
+                YahooInsightAdapter(YahooChartClient()),
+                SecCompanyFactsClient(),
+                profile=profile,
+                evidence_profile=evidence_profile,
+                insight_profile=load_insight_profile(args.config),
+                position=position,
+                enqueue_alerts=production,
+            )
+            insight_result: dict[str, object] = {}
 
             def handle_close(task):
                 close_date = date.fromisoformat(task.checkpoint_key.rsplit(":", 1)[-1])
@@ -584,6 +606,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     official = adapter.fetch_daily_summary(close_date)
                 except Exception:
                     official = None
+                try:
+                    insight = insight_service.close_report(close_date, sensitivity=sensitivity)
+                except Exception as exc:  # the brief must still go out without insights
+                    insight = None
+                    insight_result["close_error"] = str(exc)
                 report = close_service.process(
                     profile.ticker,
                     close_date,
@@ -591,12 +618,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     created_at=now if args.now else datetime.now(timezone.utc),
                     sensitivity=sensitivity,
                     official=official,
+                    insights=insight.lines if insight is not None else (),
                 )
                 close_result.update(report.as_dict())
+                if insight is not None:
+                    close_result.update(insight.as_dict())
                 return {
                     "event_key": report.event_key,
                     "inserted": report.inserted,
                     "catalyst_count": report.catalyst_count,
+                    **(insight.as_dict() if insight is not None else {"insight_error": insight_result.get("close_error", "")}),
                 }
 
             def handle_weekly(_task):
@@ -616,6 +647,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except Exception:
                     official_bars = []
                 try:
+                    weekly_insights = insight_service.weekly_lines(period_end, sensitivity=sensitivity)
+                except Exception as exc:
+                    weekly_insights = ()
+                    insight_result["weekly_error"] = str(exc)
+                try:
                     report = weekly_service.process(
                         profile.ticker,
                         period_start,
@@ -623,6 +659,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         evidence_since=evidence_since,
                         created_at=now,
                         official_bars=official_bars,
+                        insights=weekly_insights,
                     )
                 except WeeklyBriefUnavailable as exc:
                     weekly_result.update(

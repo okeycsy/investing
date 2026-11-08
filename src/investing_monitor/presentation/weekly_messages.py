@@ -11,6 +11,7 @@ from investing_monitor.domain.models import (
     VolumeSnapshot,
 )
 from investing_monitor.domain.policies import RelativeAssessment, VolumeAssessment
+from investing_monitor.presentation.insight_messages import weekly_insight_text
 from investing_monitor.presentation.market_context import (
     pct_label,
     price_label,
@@ -34,6 +35,7 @@ def build_weekly_message(
     week_low: float | None = None,
     week_high: float | None = None,
     official_range: bool = False,
+    insights: Sequence[str] = (),
 ) -> dict:
     direction_icon, direction_label = {
         Direction.UP: ("📈", "상승"),
@@ -82,6 +84,10 @@ def build_weekly_message(
                 f"{volume.expected_volume:,}주 | {ratio:.1f}배"
             )
         )
+
+    rendered_insights = weekly_insight_text(insights)
+    if rendered_insights:
+        blocks.append(_section(rendered_insights))
 
     shown_strengthening = strengthening[: 1 if risks else 2]
     shown_risks = risks[: 1 if strengthening else 2]

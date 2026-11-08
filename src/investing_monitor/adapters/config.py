@@ -5,6 +5,7 @@ from pathlib import Path
 
 from investing_monitor.domain.models import InstrumentProfile
 from investing_monitor.domain.evidence import EvidenceProfile
+from investing_monitor.domain.insights import ConvertibleNote, InsightProfile
 
 
 def load_instrument_profile(path: str | Path = "monitor_config.md") -> InstrumentProfile:
@@ -52,6 +53,44 @@ def load_evidence_profile(path: str | Path = "monitor_config.md") -> EvidencePro
         sec_contact=os.environ.get("SEC_CONTACT")
         or values.get("sec_contact", ""),
     )
+
+
+def load_insight_profile(path: str | Path = "monitor_config.md") -> InsightProfile:
+    """Insight keys in monitor_config.md:
+
+    customer_proxies: $ORCL = 최대 고객 Oracle 프록시; $BN = Brookfield 금융 파트너
+    convertible_notes: 0% 전환사채 2030 | 194.97 | 1.30 | 19.55
+                       (label | conversion price | trigger multiple | max shares, millions);
+                       several notes separated by ';'
+    """
+    values = _read_key_values(Path(path))
+    proxies: list[tuple[str, str]] = []
+    for item in values.get("customer_proxies", "").split(";"):
+        if "=" not in item:
+            continue
+        symbol, reason = item.split("=", 1)
+        if _ticker(symbol):
+            proxies.append((_ticker(symbol), reason.strip()))
+    notes: list[ConvertibleNote] = []
+    for item in values.get("convertible_notes", "").split(";"):
+        parts = [part.strip() for part in item.split("|")]
+        if len(parts) < 2 or not parts[1]:
+            continue
+        try:
+            conversion = float(parts[1])
+            trigger = float(parts[2]) if len(parts) > 2 and parts[2] else 1.30
+            shares = float(parts[3]) if len(parts) > 3 and parts[3] else None
+        except ValueError:
+            continue
+        notes.append(
+            ConvertibleNote(
+                label=parts[0] or "전환사채",
+                conversion_price=conversion,
+                trigger_multiple=trigger,
+                max_shares_millions=shares,
+            )
+        )
+    return InsightProfile(customer_proxies=tuple(proxies), convertibles=tuple(notes))
 
 
 def _read_key_values(path: Path) -> dict[str, str]:

@@ -24,30 +24,34 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements-openbb.txt && 
 노트 구성: 가격/기술 → 실적 → 컨센서스·리비전 → 밸류에이션·동종업체 → **이익의 질(SEC XBRL: 계약자산·매출채권·OCF·재고·매입채무)** →
 수급(FINRA 공매도, 13F, Form 4) → 옵션(IV, 스트래들 내재 변동폭, OI 벽) → **움직임 분해(섹터 β vs 고유 잔차)** → SEC 공시 핵심 문장 자동 추출 → 뉴스.
 
-## be_monitor.py — $BE Insight Monitor
+## Monitor V2 인사이트 신호 (통합됨)
 
-흔한 가격 알림이 아니라, 집중 포지션에서 **"오늘 무엇이 평소와 다른가"** 를 골라 보내는 봇입니다.
+처음에는 별도 봇(`be_monitor.py`)으로 만들었지만, 저장소에 이미 운영 중인 **Monitor V2**(`src/investing_monitor`)에
+신호를 직접 넣는 쪽으로 통합했습니다. 두 개의 봇이 같은 채널에 겹치지 않고, V2의 품질 게이트·outbox·state 브랜치를 그대로 씁니다.
 
-| 모드 | 시점 | 내용 |
-|---|---|---|
-| `close` | 매 거래일 마감 후 (KST 07:30) | 움직임 분해(섹터 vs BE 고유), IV vs 실현변동성, 전환사채 전환가·강제상환 트리거 거리, 최대 고객 프록시(ORCL), 새 공시/Form 4/Form 144, 뉴스, 일정 |
-| `filings` | 매시 (장중~장후) | 새 SEC 공시가 있을 때만 전송. 424B/S-3(희석), 8-K 항목별 분류, Form 144(매도 예정 통지), 13D/G |
-| `weekly` | 월요일 KST 08:30 | 레짐(주간 상대성과·잔차 누적·IV), 추정치 7일/30일 드리프트, 투자의견 변화, 공매도 추이, 내부자 순매매, 다음 10-Q 체크포인트 |
-| `quarterly` | 새 10-Q/10-K 감지 시 자동 | SEC XBRL로 계약자산·매출채권·OCF·재고·매입채무를 다시 뽑아 전 분기 및 `be_config.json` 기준점과 비교 → 이익의 질 판정 |
+| 위치 | 내용 |
+|---|---|
+| `domain/insights.py` | 순수 함수: 고유 잔차 분해(기존 민감도 모델 재사용), 옵션 IV·스트래들 내재 변동폭·OI 벽, 전환사채 전환가/트리거, 공매도 잔고, 고객 프록시, SEC XBRL 이익의 질 |
+| `adapters/insight_data.py` | Yahoo spark(일봉), yfinance(옵션·공매도·실적일), data.sec.gov companyfacts |
+| `application/insights.py` | `InsightService`: close/weekly 라인 생성, `insight_snapshots` 테이블에 전일 상태 저장(IV 급변·공매도 신규 보고·전환가 돌파 감지), 분기 `earnings_quality` 알림 |
+| `presentation/insight_messages.py` | 장 마감 브리프 "🔍 오늘 평소와 다른 점", 주간 "🔍 주간 인사이트", "🧪 이익의 질 체크포인트" |
 
-### 봇이 보는 "흔하지 않은" 신호
-- **움직임 분해**: BE 수익률을 AI 전력 바스켓(VRT·GEV·CEG·VST·OKLO·ETN)+QQQ에 회귀 → 오늘 변동 중 섹터로 설명되는 부분과 BE 고유 잔차를 분리. 잔차 z-score ≥ 1.5면 "BE 고유 원인을 찾아볼 것" 알림. 20일 누적 잔차로 시장이 BE 자체를 재평가 중인지 판단.
-- **이익의 질**: 미청구 매출(계약자산)·매출채권 회수 일수·OCF/순이익·매입채무 급증 — 매출 성장이 현금으로 바뀌는지.
-- **희석 선행 신호**: Form 144(Form 4보다 먼저), 424B/S-3, 8-K Item 3.02, 전환사채 전환가($194.97)·130% 트리거($253.46) 상회 일수.
-- **고객 프록시**: Oracle(ORCL) 동반 약세 = 수요 문제가 아닌 고객 자금조달·신용 우려일 가능성 플래그.
-- **옵션**: 30일 IV vs 20일 실현변동성(헤지 비용이 싼지), 실적 만기 스트래들로 본 이벤트 내재 변동폭, OI 집중 행사가(벽).
+### 실행 시점
+- **장 마감 브리프**(`close` task): 거래량 블록 뒤, 레벨 블록 앞에 최대 6줄. 우선순위: 섹터로 설명되지 않는 움직임(z≥1.5) → 20일 누적 잔차 → 고객 프록시 동반 약세 / IV 급변 / 공매도 신규 보고 → IV vs 실현변동성 → 실적 내재 변동폭 → 포지션 환산.
+- **주간 리뷰**(`weekly` task): 잔차 누적, IV 추이(주초 대비), 전환사채 거리, 공매도 잔고, 프록시 주간 성과.
+- **SEC 폴링**(`sec` task): companyfacts에 새 분기가 잡히면 `earnings_quality` 알림을 분기당 1회 (event_key `{T}:{period_end}:earnings_quality`). 10-Q 공시 알림과 같은 폴링에서 나감.
+- 5분 market tick에서는 아무것도 하지 않음 → 추가 요청은 하루 수 건.
 
-### GitHub Actions 셋업
-1. Secrets: `SLACK_WEBHOOK_URL`(필수), `ANTHROPIC_API_KEY`(선택, weekly/quarterly Claude 메모), `POSITION_SHARES`/`POSITION_COST`(선택, $ 영향 표시)
-2. `.github/workflows/be_monitor.yml`이 스케줄 실행. 상태는 `be_state.json`에 커밋됨.
-3. 수동 실행: Actions → "BE Insight Monitor" → Run workflow → mode 선택
-4. 다른 종목에 쓰려면 `be_config.json`을 복사해 `MONITOR_CONFIG=xyz_config.json`으로 지정
+### 설정 (`monitor_config.md`)
+```
+customer_proxies: $ORCL = 최대 고객 Oracle 프록시; $BN = Brookfield 금융 파트너
+convertible_notes: 0% 전환사채 2030 | 194.97 | 1.30 | 19.55
+```
 
-예상 Actions 사용량: filings 11회/일(새 공시 없으면 ~1분) + close 1회(~3분) + weekly ≈ **월 300분 내외**.
+### 표시 규칙과의 관계
+- `presentation/quality.py`의 금지어(RSI/MACD/PCR/FINRA/DCA)를 쓰지 않습니다. 공매도는 "공매도 잔고(거래소 보고)"로, 풋/콜은 "풋/콜 미결제약정"으로 표기합니다.
+- 가격·수익률 수치는 V2 현행 코드가 이미 표시하므로 같은 수준으로 보여줍니다. (`HOOD_MONITOR_PRODUCT.md`의 "가격 비노출" 문구는 코드와 이미 어긋나 있어 이 PR에서 건드리지 않았습니다.)
+- 실패한 소스는 Actions 결과(`insight_errors`)에만 남고 투자 채널에는 나오지 않습니다.
+- `insight_snapshots`는 SQLite(schema v14)에 저장되어 기존 `runtime-state` 브랜치 체크포인트에 포함됩니다. main에 상태 커밋을 만들지 않습니다.
 
 > 모든 출력은 데이터 해석이며 투자 조언이 아닙니다.

@@ -31,6 +31,7 @@
 - 실제 예약 실행 이력이 있는 `Monitor V2 Scheduler` workflow ID가 UTC 정각을 피한 단일 5분 schedule을 소유하고, 재사용 가능한 `Monitor V2 Production`을 호출합니다. v2 planner가 장중 market 5분, 장외 source 30분, close와 weekly의 due-state를 판단하므로 불필요한 provider 호출은 하지 않습니다.
 - `Monitor V2 Runtime Shadow`는 관련 코드가 `main`에 push될 때 테스트와 Slack 없는 통합 tick을 자동 검증합니다. 운영 DB를 건드리지 않도록 별도 `runtime-shadow-state` branch를 사용하며 예약 실행은 하지 않습니다.
 - 20회 연속 checkpoint에서 `main` 비침범, 새 runner 복원, stale runner 충돌 차단을 테스트합니다.
+- 인사이트 신호: 장 마감 브리프에 `오늘 평소와 다른 점`(민감도 모델 기반 종목 고유 잔차, 옵션 내재변동성 vs 실현변동성, 전환사채 전환가·상환 트리거 거리, 거래소 보고 공매도 잔고, 고객 프록시 동반 약세), 주간 리뷰에 `주간 인사이트`, 새 10-Q/10-K가 XBRL에 잡히면 분기 1회 `이익의 질 체크포인트`(계약자산·매출채권 회수 일수·영업현금흐름·재고·매입채무)를 보냅니다. 5분 market tick에는 영향이 없고, 소스 실패는 Actions 결과에만 남습니다. 설정은 `monitor_config.md`의 `customer_proxies`, `convertible_notes`. 상세: `docs/OPENBB_RESEARCH.md`.
 - production Slack은 v2만 담당합니다. legacy `hood_monitor.py`는 `Ticker Monitor (Legacy Manual)` workflow로 격리했으며 수동 fallback과 기존 preview trigger만 유지합니다.
 
 ## 운영 스케줄과 한계
