@@ -37,9 +37,10 @@ REQUIRED_TEXT = {
     "filing": ("확인된 사실",),
     "insider": ("거래 규모",),
     "move_followup": ("후속 확인", "새로 확인된 근거", "인과관계"),
+    "earnings_quality": ("이익의 질 체크포인트", "확인된 사실", "판정"),
 }
 
-SOURCE_REQUIRED_TYPES = {"catalyst", "filing", "insider", "move_followup"}
+SOURCE_REQUIRED_TYPES = {"catalyst", "filing", "insider", "move_followup", "earnings_quality"}
 
 
 class MessageQualityError(ValueError):
