@@ -33,6 +33,8 @@ from investing_monitor.adapters.sec_filings import (
 from investing_monitor.adapters.slack import SlackWebhookNotifier
 from investing_monitor.adapters.sqlite_repository import SCHEMA_VERSION, SQLiteMonitorRepository
 from investing_monitor.adapters.yahoo_market_data import (
+    NoSessionBarsError,
+    StaleQuoteError,
     YahooChartClient,
     YahooMarketDataAdapter,
     YahooQuoteClient,
@@ -59,7 +61,7 @@ from investing_monitor.presentation.operations import (
 )
 from investing_monitor.presentation.previews import PREVIEW_KINDS, build_preview_message
 from investing_monitor.presentation.quality import audit_message
-from investing_monitor.domain.models import Position
+from investing_monitor.domain.models import MarketSession, Position
 from investing_monitor.ports.repository import AlertRecord
 from investing_monitor.runtime.tick import (
     NEW_YORK,
@@ -386,6 +388,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                         else None
                     ),
                 )
+            except (NoSessionBarsError, StaleQuoteError) as exc:
+                # Pre/post-market often has no trades for long stretches (and
+                # none at all on a holiday-adjacent morning): that is "no new
+                # data", not an outage. Only the regular session treats it as
+                # a failure.
+                if calendar.session_at(now) is MarketSession.REGULAR:
+                    raise TaskExecutionError(
+                        str(exc),
+                        metadata={"providers": {"yahoo_market": {"status": "failed"}}},
+                    ) from exc
+                return {
+                    "skipped": str(exc),
+                    "providers": {
+                        "yahoo_market": {
+                            "status": "no_new_data",
+                            "latency_ms": int((monotonic() - provider_started) * 1_000),
+                        }
+                    },
+                }
             except Exception as exc:
                 raise TaskExecutionError(
                     str(exc),

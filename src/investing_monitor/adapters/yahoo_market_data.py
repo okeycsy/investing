@@ -49,6 +49,10 @@ class YahooMarketDataError(RuntimeError):
     pass
 
 
+class NoSessionBarsError(YahooMarketDataError):
+    pass
+
+
 class StaleQuoteError(YahooMarketDataError):
     pass
 
@@ -444,7 +448,7 @@ class YahooMarketDataAdapter:
 
         current_bars = self._current_session_bars(primary, trading_date, now)
         if not current_bars:
-            raise YahooMarketDataError(f"no current-session bars for {self.profile.ticker}")
+            raise NoSessionBarsError(f"no current-session bars for {self.profile.ticker}")
         latest = current_bars[-1]
         source_age = self._validate_freshness(latest, now)
         reference_close = self._reference_close(primary, trading_date)

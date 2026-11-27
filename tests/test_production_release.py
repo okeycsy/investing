@@ -50,6 +50,58 @@ def product_payload() -> dict:
 
 
 class ProductionCliTest(unittest.TestCase):
+    def test_no_bars_outside_regular_session_is_a_quiet_skip(self):
+        from investing_monitor.adapters.yahoo_market_data import NoSessionBarsError
+
+        class MarketOnlyPlanner:
+            def plan(self, now, _checkpoints, *, last_completed_run_at):
+                return TickPlan(
+                    now=now,
+                    gap_seconds=0,
+                    tasks=(PlannedTask(TickTask.MARKET, "market"),),
+                )
+
+        class NoBarsAdapter:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def fetch_price_levels(self, _now):
+                raise RuntimeError("levels unavailable in test")
+
+            def fetch_cycle(self, _now, **_kwargs):
+                raise NoSessionBarsError("no current-session bars for BE")
+
+        def run(now, run_id):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.db"
+                output = io.StringIO()
+                with (
+                    patch(
+                        "investing_monitor.cli.TickPlanner",
+                        side_effect=lambda **_kwargs: MarketOnlyPlanner(),
+                    ),
+                    patch("investing_monitor.cli.YahooMarketDataAdapter", NoBarsAdapter),
+                    redirect_stdout(output),
+                ):
+                    return main(
+                        [
+                            "--db", str(path), "shadow-tick",
+                            "--config", str(ROOT / "monitor_config.md"),
+                            "--now", now.isoformat(),
+                            "--scheduled-at", now.isoformat(),
+                            "--run-id", run_id,
+                            "--trigger", "schedule",
+                        ]
+                    ), output.getvalue()
+
+        # 2026-11-27 04:30 ET: Black Friday premarket with no trades at all.
+        premarket, log = run(datetime(2026, 11, 27, 9, 30, tzinfo=timezone.utc), "pre")
+        # 10:30 ET: the same symptom inside the regular session is an outage.
+        regular, _ = run(datetime(2026, 11, 27, 15, 30, tzinfo=timezone.utc), "regular")
+
+        self.assertEqual(premarket, 0, log)
+        self.assertNotEqual(regular, 0)
+
     def test_empty_successful_news_polls_are_not_runtime_failures(self):
         class NewsOnlyPlanner:
             def plan(self, now, _checkpoints, *, last_completed_run_at):
